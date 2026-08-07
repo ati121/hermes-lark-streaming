@@ -4,6 +4,17 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## Unreleased (personal fork)
+
+- Corrected the documented fork source to
+  `Aowen-Nowor/hermes-lark-streaming` and restored full installation,
+  configuration, troubleshooting, and maintenance documentation.
+- Documented the local `hermes_lark_streaming.text_sizes` feature for
+  independent PC/mobile sizing of body, reasoning, tool, notice, and footer
+  text.
+- Added a maintenance context with the upstream baseline, sync workflow,
+  lifecycle invariants, regression commands, and private-information rules.
+
 ## v1.6.0 (2026-07-21)
 
 - Fixed Clarify cards after Hermes platform adapters are loaded lazily.

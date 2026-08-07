@@ -10,7 +10,12 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.6.0 (DEV) | 协议 | MIT | Python | ≥3.11 | 与上游 | ⚠️ **不兼容** |
+| 版本 | 1.6.0（个人复刻版） |
+| 协议 | MIT |
+| Python | >=3.11 |
+| 与原版 | ⚠️ **不兼容** |
+
+当前仓库直接复刻自 [Aowen-Nowor/hermes-lark-streaming](https://github.com/Aowen-Nowor/hermes-lark-streaming)，发布源为 [ati121/hermes-lark-streaming](https://github.com/ati121/hermes-lark-streaming)。本地新增的核心功能是 PC/手机端独立字号；同步上游前必须阅读 [MAINTENANCE_CONTEXT.md](MAINTENANCE_CONTEXT.md)。
 
 ---
 
@@ -76,7 +81,7 @@ Background: _run_background_task ── [Hook 1/2]
 | `└ controller.py` | 节流调度器 | CardKit 80ms 节流，互斥锁 + re-flush |
 | **config/** | **配置读取子包** | |
 | `├ __init__.py` | 重导出门面 | `Config`, `_get_hermes_config_path` |
-| `└ reader.py` | 配置读取 | `_plugin_sec()` 惰性加载 + `/aowen config reload` 手动刷新 |
+| `└ reader.py` | 配置读取 | `_plugin_sec()` 惰性加载 + `text_sizes` 校验/设备继承 + `/aowen config reload` 手动刷新 |
 | **aowen/** | **监控命令子包 (v1.1.0)** | |
 | `└ __init__.py` | /aowen 命令体系 | pre_gateway_dispatch hook + metrics 收集 + 卡片构建 |
 | **plugin/** | **插件注册子包 (v1.1.0)** | |
@@ -120,6 +125,8 @@ Background: _run_background_task ── [Hook 1/2]
 **4.15 状态机标志位收敛 (v1.1.0)**: 8 个布尔标志位合并为 `_creation_stages: set[str]`（含 `"panel"`/`"answer"`/`"hint_removed"`）+ 4 个正交布尔（`_streaming_closed`/`_was_aborted`/`_pending_flush`/`_first_flush_done`）。
 
 **4.16 去重机制收敛 (v1.1.0)**: 从 5 层降到 2 层——保留 `_hls_wrapper` 标记 + `already_streamed` 透传 + `_stream_consumed_len` 长度追踪。移除 `_native_reasoning_active`（用 `bool(state._current_reasoning)` 代替）和 `_force_rewrap`（用 ContextVar 重解析代替）。
+
+**4.17 PC/手机端独立字号（个人复刻版）**: `hermes_lark_streaming.text_sizes` 支持 `body`、`reasoning`、`tool`、`notice`、`footer` 五种角色，每种角色可写单一字号或 `default`/`pc`/`mobile` 映射。未配置时绝不能改变原 Card JSON；配置后使用普通 interactive IM 卡片的整卡更新路径。`_do_create_linear_card()` 将配置快照保存到 `CardSession.text_sizes`，保证同一张卡生命周期内字号固定。
 
 ---
 
@@ -238,6 +245,12 @@ hermes_lark_streaming:
   card_ttl_sec: 600
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100
+  text_sizes:                      # 可选；不配置时保持原 Card JSON
+    body: {default: normal, pc: normal, mobile: large}
+    reasoning: {default: small, pc: small, mobile: normal}
+    tool: {default: x-small, pc: x-small, mobile: small}
+    notice: {default: x-small, pc: x-small, mobile: small}
+    footer: {default: x-small, pc: x-small, mobile: small}
   footer:
     show_label: false
     fields: [[status, elapsed, model, cost, compression_exhausted]]
@@ -275,9 +288,9 @@ display:
 tests/
   test_version.py              — 版本号读取逻辑
   test_patch.py                — Hook 函数单元测试
-  test_controller.py           — 会话生命周期 + 统一面板模式 + COMPLETING 短路
-  test_cardkit.py              — 卡片 JSON 构建
-  test_config.py               — 配置读取 + 热更新
+  test_controller.py           — 会话生命周期 + 字号快照/整卡更新 + COMPLETING 短路
+  test_cardkit.py              — 卡片 JSON 构建 + 无配置兼容 + 设备字号别名
+  test_config.py               — 配置读取 + 字号校验/继承 + 热更新
   test_flush.py                — 节流调度器
   test_text.py                 — 文本增量追踪
   test_tooluse.py              — 工具调用追踪
@@ -316,7 +329,7 @@ tests/
 
 ```bash
 # 克隆
-git clone -b DEV https://gitee.com/Aowen-Nowor/hermes-lark-streaming.git
+git clone https://github.com/ati121/hermes-lark-streaming.git
 
 # 安装到 Hermes
 hermes plugins install /path/to/hermes-lark-streaming
@@ -337,7 +350,7 @@ $HERMES_PYTHON -m pytest tests/e2e/ -v
 # 清理 + 重装
 $HERMES_PYTHON ~/.hermes/plugins/hermes-lark-streaming/__main__.py cleanup
 hermes plugins uninstall hermes-lark-streaming
-hermes plugins install https://gitee.com/Aowen-Nowor/hermes-lark-streaming
+hermes plugins install https://github.com/ati121/hermes-lark-streaming.git
 hermes gateway restart
 ```
 
@@ -349,4 +362,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-07-21 | Version: 1.6.0*
+*Last updated: 2026-08-07 | Version: 1.6.0 personal fork*

@@ -1,36 +1,35 @@
-# hermes-lark-streaming 安装指南
+# hermes-lark-streaming 安装与维护指南
 
-> 高信息密度参考文档，专为 Agent 自动解析设计
-> 最后更新: 2026-07-21 (v1.6.0)
+> 高信息密度参考文档，供 Hermes Agent 或其他自动化 Agent 解析。
+> 最后更新：2026-08-07（v1.6.0，个人复刻版）
 
-## 快速概览
+## 项目概览
 
 | 项目 | 值 |
-|------|-------|
-| 名称 | hermes-lark-streaming (飞书敖式卡片) |
+|------|-----|
+| 名称 | hermes-lark-streaming |
+| 作用 | Hermes Agent 的飞书/Lark CardKit v2.0 流式卡片插件 |
 | 许可证 | MIT |
 | Python | >=3.11 |
 | 依赖 | lark-oapi>=1.4.0, PyYAML>=6.0 |
 | 插件类型 | standalone |
-| Gitee | https://gitee.com/Aowen-Nowor/hermes-lark-streaming |
-| GitHub | https://github.com/Aowen-Nowor/hermes-lark-streaming |
+| 当前仓库 | https://github.com/ati121/hermes-lark-streaming |
+| 复刻来源 | https://github.com/Aowen-Nowor/hermes-lark-streaming |
+| 更上游 | https://github.com/Cheerwhy/hermes-lark-streaming |
 
-## 手动安装
+本仓库按个人使用需求维护，仅供自用。相对 Aowen-Nowor 上游，当前最重要的
+本地修改是卡片正文、推理、工具、提示和页脚支持 PC/手机端独立字号。
 
-### 方式一：Hermes CLI（推荐）
+## 安装
+
+### Hermes CLI（推荐）
 
 ```bash
-# Gitee (SSH)
-hermes plugins install git@gitee.com:Aowen-Nowor/hermes-lark-streaming.git
+# HTTPS
+hermes plugins install https://github.com/ati121/hermes-lark-streaming.git
 
-# Gitee (HTTPS)
-hermes plugins install https://gitee.com/Aowen-Nowor/hermes-lark-streaming
-
-# GitHub (SSH)
-hermes plugins install git@github.com:Aowen-Nowor/hermes-lark-streaming.git
-
-# GitHub (HTTPS)
-hermes plugins install https://github.com/Aowen-Nowor/hermes-lark-streaming
+# SSH
+hermes plugins install git@github.com:ati121/hermes-lark-streaming.git
 ```
 
 提示时输入 `Y` 启用插件，然后重启网关：
@@ -39,33 +38,24 @@ hermes plugins install https://github.com/Aowen-Nowor/hermes-lark-streaming
 hermes gateway restart
 ```
 
-### 方式二：本地目录
+插件会读取 `HERMES_HOME` 作为安装和配置根目录，未设置时使用
+`~/.hermes`。
+
+### 本地目录
 
 ```bash
-git clone https://gitee.com/Aowen-Nowor/hermes-lark-streaming.git
+git clone https://github.com/ati121/hermes-lark-streaming.git
 cd hermes-lark-streaming
 hermes plugins add .
 hermes gateway restart
 ```
 
-### 方式三：pip 安装
+### 让 Agent 自动安装
 
-```bash
-pip install hermes-lark-streaming
-```
+将本文件 URL 交给 Hermes Agent：
 
-## 卸载
-
-```bash
-# 1. 清理注入的配置（插件代码还在时执行）
-HERMES_PYTHON=$(python3 ~/.hermes/plugins/hermes-lark-streaming/__main__.py python)
-$HERMES_PYTHON ~/.hermes/plugins/hermes-lark-streaming/__main__.py cleanup
-
-# 2. 卸载插件
-hermes plugins uninstall hermes-lark-streaming
-
-# 3. 重启网关
-hermes gateway restart
+```text
+https://raw.githubusercontent.com/ati121/hermes-lark-streaming/main/docs/AGENT_GUIDE.md
 ```
 
 ## 更新
@@ -75,168 +65,172 @@ hermes plugins update hermes-lark-streaming
 hermes gateway restart
 ```
 
-或手动更新：
+手动更新已安装目录时，使用当前仓库的 `main` 分支：
 
 ```bash
-cd ~/.hermes/plugins/hermes-lark-streaming
-git pull origin DEV
+cd "$HERMES_HOME/plugins/hermes-lark-streaming"
+git pull origin main
 hermes plugins reload hermes-lark-streaming
 hermes gateway restart
 ```
 
-## 必需凭据配置
+如果当前目录来自重写前的历史，且工作区没有本地改动，可以直接重新安装当前仓库，
+避免把已清理的旧历史带回来。
 
-### 环境变量方式（优先级最高）
+## 卸载
 
 ```bash
-export FEISHU_APP_ID="your_app_id"
-export FEISHU_APP_SECRET="your_app_secret"
+# 插件代码还在时清理自动注入的配置
+HERMES_PYTHON=$(python3 "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" python)
+$HERMES_PYTHON "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" cleanup
+
+hermes plugins uninstall hermes-lark-streaming
+hermes gateway restart
 ```
 
-### 文件方式（优先级中等）
+## 凭据配置
 
-在 `~/.hermes/.env` 文件中检查：
+插件复用 Hermes 已有的飞书/Lark 凭据，不要在仓库文件中写入真实值。
 
-```ini
+```bash
+# $HERMES_HOME/.env
 FEISHU_APP_ID=your_app_id
 FEISHU_APP_SECRET=your_app_secret
+FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 ```
 
-### 配置文件方式（优先级最低）
+也可以使用环境变量，或在 `$HERMES_HOME/config.yaml` 的 `feishu`/`lark` 节中配置。
+优先级为：环境变量 > `.env` > 配置文件。
 
-在 `~/.hermes/config.yaml` 中检查：
+## 配置项
 
-```yaml
-feishu:
-  app_id: "your_app_id"
-  app_secret: "your_app_secret"
-```
+配置文件：`$HERMES_HOME/config.yaml`，默认值见下表。
 
-**优先级顺序**: 环境变量 > `~/.hermes/.env` > `~/.hermes/config.yaml`
-
-## 可选配置项 (config.yaml)
-
-### hermes_lark_streaming 节
-
-| 配置键 | 默认值 | 范围 | 说明 |
-|--------|---------|------|------|
-| `max_tool_steps` | `20` | 1–100 | 统一面板中工具步骤最大数量（超限折叠） |
-| `max_reasoning_rounds` | `20` | 1–100 | 统一面板中推理轮次最大数量（超限折叠） |
-| `card_ttl_sec` | `600` | >0 | 会话 TTL（秒），超时卡片失效 |
-| `flush_interval_ms` | `200` | 70–2000 | 插件发送间隔（毫秒） |
+| 配置键 | 默认值 | 范围/类型 | 说明 |
+|--------|---------|-----------|------|
+| `panel_expanded` | `false` | bool | 完成态统一面板是否展开 |
+| `streaming_panel_expanded` | `false` | bool | 流式态统一面板是否展开 |
 | `print_strategy` | `delay` | `fast`/`delay` | 打字机效果策略 |
-| `print_step` | `4` | 1–10 | 打字机每次渲染字符数（需飞书7.23+） |
-| `panel_expanded` | `false` | bool | 完成态卡片面板是否展开 |
-| `streaming_panel_expanded` | `false` | bool | 流式态卡片面板是否展开 |
+| `print_step` | `4` | 1–10 | 每次渲染字符数，需飞书 7.23+ |
+| `flush_interval_ms` | `200` | 70–2000 | 插件发送间隔（毫秒） |
+| `card_ttl_sec` | `600` | >0 | 卡片存活检测超时（秒） |
+| `max_tool_steps` | `20` | 1–100 | 面板显示的工具步骤上限 |
+| `max_reasoning_rounds` | `20` | 1–100 | 面板显示的推理轮次上限 |
 | `footer.show_label` | `false` | bool | 是否显示页脚字段标签 |
-| `footer.fields` | `[[status, elapsed, model, cost, compression_exhausted]]` | array | 页脚字段配置 |
+| `footer.fields` | status/elapsed/model/cost/compression_exhausted | array | 页脚字段排列 |
+| `text_sizes` | `{}` | mapping | PC/手机端设备差异字号（本地新增） |
 
-### display 节（Hermes 全局配置，非 hermes_lark_streaming 节）
-
-| 配置键 | 默认值 | 说明 |
-|--------|---------|------|
-| `display.show_reasoning` | `false` | 是否展示推理/思考面板（全局，影响所有平台） |
-| `display.platforms.feishu.show_reasoning` | — | 飞书平台专属推理显示开关（优先于全局） |
-
-示例配置：
+基础示例：
 
 ```yaml
 hermes_lark_streaming:
-  max_tool_steps: 20
-  max_reasoning_rounds: 20
-  card_ttl_sec: 600
-  flush_interval_ms: 200
+  panel_expanded: false
+  streaming_panel_expanded: false
   print_strategy: delay
   print_step: 4
+  flush_interval_ms: 200
+  card_ttl_sec: 600
+  max_tool_steps: 20
+  max_reasoning_rounds: 20
   footer:
     show_label: false
     fields:
       - [status, elapsed, model, cost, compression_exhausted]
 
-# display 节是 Hermes 全局配置，不在 hermes_lark_streaming 下
 display:
   show_reasoning: true
-  # 或按平台配置：
-  # platforms:
-  #   feishu:
-  #     show_reasoning: true
 ```
 
-### 插件命令（/aowen 前缀）
+### `text_sizes`（PC/手机端独立字号）
 
-所有 `/aowen` 开头的命令由插件处理，不经过 Hermes AI：
+完整形式如下：
+
+```yaml
+hermes_lark_streaming:
+  text_sizes:
+    body: {default: normal, pc: normal, mobile: large}
+    reasoning: {default: small, pc: small, mobile: normal}
+    tool: {default: x-small, pc: x-small, mobile: small}
+    notice: {default: x-small, pc: x-small, mobile: small}
+    footer: {default: x-small, pc: x-small, mobile: small}
+```
+
+支持的角色为 `body`、`reasoning`、`tool`、`notice`、`footer`；设备字段为
+`default`、`pc`、`mobile`。每个角色也可直接写一个字符串，例如 `body: large`。
+
+支持的字号值：`heading-0`、`heading-1`、`heading-2`、`heading-3`、`heading-4`、
+`heading`、`normal`、`notation`、`xxxx-large`、`xxx-large`、`xx-large`、
+`x-large`、`large`、`medium`、`small`、`x-small`。
+
+缺少 `pc`/`mobile` 时继承 `default`；缺少 `default` 时使用角色默认值：
+`body=normal`、`reasoning=small`、`tool/notice/footer=x-small`。
+
+未配置 `text_sizes` 时，Card JSON 必须保持原样。配置启用后，飞书使用普通
+interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。字号配置在卡片创建时
+快照，同一张卡片整个流式生命周期固定不变；`/aowen config reload` 只影响新卡片。
+
+## `/aowen` 命令
 
 | 命令 | 说明 |
 |------|------|
-| `/aowen help` | 显示所有命令列表 |
-| `/aowen status` | 查看插件状态 + 当前配置（折叠面板展示） |
-| `/aowen monitor` | 查看监控面板（卡片创建数、API 调用数、错误码分布等） |
-| `/aowen monitor reset` | 重置监控统计计数器 |
-| `/aowen config reload` | 修改 config.yaml 后重新加载配置立即生效 |
-| `/aowen` | 同 `/aowen help` |
+| `/aowen help` 或 `/aowen` | 显示命令列表 |
+| `/aowen status` | 显示插件状态与当前配置 |
+| `/aowen monitor` | 显示卡片/API/错误统计 |
+| `/aowen monitor reset` | 重置监控计数 |
+| `/aowen config reload` | 重新读取配置并作用于后续卡片 |
 
-> **中断场景**：当 AI 正在回复中（agent 运行中）发送 `/aowen` 命令时，插件会回复一张橙色提示卡"AI 正在回复中"（借鉴 Hermes 原生 `/model` 命令的 "Agent is running — wait or /stop first" UX），提示用户等待完成或 `/stop` 后再使用。命令本身不会被发给 AI。
+命令由插件直接处理，不会发送给 Hermes AI。AI 回复进行中发送命令时，会收到提示卡，
+不会把命令误交给模型。
 
-## 提供的钩子（Hooks）
+## 提供的钩子
 
-- `pre_gateway_dispatch` - 消息分发前拦截（/aowen 命令）
-- `on_feishu_normalize` - 飞书消息标准化
-- `on_message_started` - 消息开始
-- `on_message_completed` - 消息完成
-- `on_message_aborted` - 消息中止
-- `on_message_interrupted` - 消息中断
-- `on_answer_delta` - 回答增量更新
-- `on_thinking_delta` - 思考增量更新
-- `on_reasoning_delta` - 推理增量更新
-- `on_tool_updated` - 工具调用更新
-- `on_background_review_message` - 后台审查消息
-- `on_cron_deliver` - 定时任务交付
+`pre_gateway_dispatch`、`on_feishu_normalize`、`on_message_started`、
+`on_message_completed`、`on_message_aborted`、`on_message_interrupted`、
+`on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、`on_tool_updated`、
+`on_background_review_message`、`on_cron_deliver`。
 
 ## 故障排查
 
-| 现象 | 原因 | 解决方案 |
-|------|------|----------|
-| 卡片不显示 | 缺少凭据 | 设置 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET` |
-| 错误码 300305 | 元素超限（硬限制 200） | 减小 `max_tool_steps` / `max_reasoning_rounds` |
-| 错误码 300315 | Schema 校验失败 | 检查飞书 Card 2.0 规范，确认卡片属性合法 |
-| 内容被截断 | 静态卡片表格超限 | 静态卡片（cron/gateway）表格行数 >5 时自动降级 |
-| 流式卡住 | TTL 过期 | 增加 `card_ttl_sec` 值 |
-| 封口失败 | 元素总数超标 | 安全网已自动裁剪早期面板，检查日志确认 |
-| 文本兜底 | 极端超限场景 | 核心内容保留，完整内容降级为纯文本 |
+| 现象 | 检查项 |
+|------|--------|
+| 没有卡片 | `hermes plugins list` 是否启用、凭据是否存在、日志是否有 `HLS:` |
+| 元素超限（300305） | 降低 `max_tool_steps`/`max_reasoning_rounds`；代码有最终安全网 |
+| Schema 错误（300315） | 检查 CardKit v2 卡片结构和字号值是否合法 |
+| 流式卡片卡住 | 增大 `card_ttl_sec`，确认卡片未被删除/撤回 |
+| 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
 
 ## 验证安装
 
 ```bash
-# 查看插件列表
 hermes plugins list
-
-# 检查日志
-grep hermes_lark_streaming ~/.hermes/logs/agent.log
-
-# 查看版本号
-python -c "from hermes_lark_streaming import __version__; print(__version__)"
-
-# 或从 plugin.yaml 读取
-grep 'version:' ~/.hermes/plugins/hermes-lark-streaming/plugin.yaml
+grep hermes_lark_streaming "$HERMES_HOME/logs/agent.log"
+HERMES_PYTHON=$(python3 "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" python)
+$HERMES_PYTHON "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" status
+$HERMES_PYTHON "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" verify
+$HERMES_PYTHON "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" doctor
 ```
 
-## 常见问题
+## 开发与测试
 
-**Q: 与原版 Cheerwhy/hermes-lark-streaming 兼容吗？**  
-A: 不兼容。如已安装原版，请先卸载再安装本插件。
+```bash
+git clone https://github.com/ati121/hermes-lark-streaming.git
+cd hermes-lark-streaming
+python -m pip install -e ".[dev]"
+python -m pytest tests/
+```
 
-**Q: 如何获取飞书 App ID 和 Secret？**  
-A: 在飞书开放平台创建应用后，在「凭证与基础信息」页面获取。
+需要更新上游时，先阅读 `docs/MAINTENANCE_CONTEXT.md`，不要直接覆盖带有本地字号修改的
+代码文件。
 
-**Q: 卡片元素限制是多少？**  
-A: 单卡片最多 200 个 Tag 对象，插件内置安全网自动裁剪超限内容。
+## 相关文档
 
-**Q: 支持哪些 Hermes Agent 版本？**  
-A: 需要支持插件系统的 Hermes Agent 版本，建议使用最新版。
-
-**Q: 卸载时忘记运行 cleanup 怎么办？**  
-A: 可忽略，或手动清理 `~/.hermes/config.yaml` 中的相关配置。
+- [维护上下文](MAINTENANCE_CONTEXT.md)
+- [项目技能说明](SKILL.md)
+- [更新日志](CHANGELOG.md)
+- [Issue 模板](ISSUES_TEMPLATE.md)
 
 ## 相关链接
 
-- **问题反馈**: https://gitee.com/Aowen-Nowor/hermes-lark-streaming/issues
+- 当前仓库：https://github.com/ati121/hermes-lark-streaming
+- 复刻来源：https://github.com/Aowen-Nowor/hermes-lark-streaming
+- 更上游：https://github.com/Cheerwhy/hermes-lark-streaming
