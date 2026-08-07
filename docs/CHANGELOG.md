@@ -15,6 +15,14 @@ filesystem paths.
 - Added a maintenance context with the upstream baseline, sync workflow,
   lifecycle invariants, regression commands, and private-information rules.
 
+## v1.6.1 (2026-08-07, personal fork)
+
+- Simplified the README into a fork-of-upstream, personal-use statement that
+  records the local `text_sizes` feature.
+- Restored upstream release tooling (`scripts/`, `.workflow/release-pipeline.yml`)
+  deleted from an earlier cleanup.
+- Bumped version to 1.6.1.
+
 ## v1.6.0 (2026-07-21)
 
 - Fixed Clarify cards after Hermes platform adapters are loaded lazily.
