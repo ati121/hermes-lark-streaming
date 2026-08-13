@@ -5,10 +5,76 @@ import importlib
 import importlib.util
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
 _logger = logging.getLogger("hermes_lark_streaming")
+
+_MAIN_THREAD = threading.main_thread()
+
+# Host modules whose in-flight import makes *any* blocking import unsafe from
+# a non-main thread.  These are the modules Hermes is executing on MainThread
+# while our register() runs on its ``plugin-discovery`` thread.
+_HOST_IMPORT_ANCHORS = ("gateway.run", "run_agent", "agent.conversation_loop")
+
+def _module_initializing(name: str) -> bool:
+    """Return True when ``name`` is in sys.modules but its body is still running.
+
+    CPython sets ``ModuleSpec._initializing`` for the duration of a module's
+    execution.  It is a private attribute, so every read is ``getattr``-guarded:
+    if a future CPython drops it we degrade to the old blocking behaviour rather
+    than crash.
+    """
+    mod = sys.modules.get(name)
+    if mod is None:
+        return False
+    spec = getattr(mod, "__spec__", None)
+    return bool(getattr(spec, "_initializing", False))
+
+def _host_import_unsafe() -> bool:
+    """Return True when a blocking import would risk the discovery deadlock."""
+    # Python's per-module import lock is re-entrant for the thread that owns
+    # it, so MainThread can never deadlock against itself.
+    if threading.current_thread() is _MAIN_THREAD:
+        return False
+    return any(_module_initializing(name) for name in _HOST_IMPORT_ANCHORS)
+
+def _try_import(module: str, attr: str | None = None) -> Any | None:
+    """Resolve a host module (or one of its attributes) without ever blocking.
+
+    Deadlock this exists to prevent (v1.6.2): Hermes' ``PluginManager``
+    holds ``_discovery_lock`` while it imports this plugin on its
+    ``plugin-discovery`` thread, and MainThread asks for that same lock from
+    *inside* ``import gateway.run`` (``model_tools`` calls ``discover_plugins()``
+    at import time).  A blocking ``from gateway.run import GatewayRunner`` on
+    the discovery thread therefore waits on a module lock MainThread will not
+    release until it gets the discovery lock — a hard deadlock that hangs the
+    gateway before it ever opens its log file or connects a platform.
+
+    So: read ``sys.modules`` first (never blocks, and returns partially
+    initialized modules), and only fall back to a real import when no host
+    import is in flight.  Returning ``None`` is always safe — every caller
+    treats it as "not available yet" and the deferred patch thread retries.
+    """
+    mod = sys.modules.get(module)
+    if mod is None:
+        if _host_import_unsafe():
+            _logger.debug(
+                "HLS: skipping import of %s — host import in flight on another thread",
+                module,
+            )
+            return None
+        try:
+            mod = importlib.import_module(module)
+        except (ImportError, AttributeError):
+            return None
+        except Exception:
+            _logger.debug("HLS: import of %s failed", module, exc_info=True)
+            return None
+    if attr is None:
+        return mod
+    return getattr(mod, attr, None)
 
 class HermesCompat:
     """Encapsulates all Hermes internal module access."""
@@ -48,19 +114,17 @@ class HermesCompat:
         self.conversation_loop_func: Any | None = None
         self.run_agent_module: Any | None = None
         
-        # GatewayRunner
-        try:
-            from gateway.run import GatewayRunner
-            self.gateway_runner_class = GatewayRunner
-        except (ImportError, AttributeError):
+        # GatewayRunner — via _try_import: a blocking import here deadlocks the
+        # gateway when Hermes runs register() on its plugin-discovery thread.
+        self.gateway_runner_class = _try_import("gateway.run", "GatewayRunner")
+        if self.gateway_runner_class is None:
             _logger.debug("HLS: GatewayRunner not available yet")
         
         # AIAgent
-        try:
-            from run_agent import AIAgent
-            self.aiagent_class = AIAgent
+        self.aiagent_class = _try_import("run_agent", "AIAgent")
+        if self.aiagent_class is not None:
             self.run_agent_module = sys.modules.get("run_agent")
-        except (ImportError, AttributeError):
+        else:
             _logger.debug("HLS: AIAgent not available yet")
         
         # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
@@ -69,13 +133,10 @@ class HermesCompat:
         
         # Cron scheduler
         for mod_name in ("cron.scheduler", "gateway.cron.scheduler"):
-            try:
-                mod = importlib.import_module(mod_name)
-                if hasattr(mod, "_deliver_result"):
-                    self.cron_scheduler_module = mod
-                    break
-            except ImportError:
-                continue
+            mod = _try_import(mod_name)
+            if mod is not None and hasattr(mod, "_deliver_result"):
+                self.cron_scheduler_module = mod
+                break
         
         # Conversation loop (with namespace collision workaround)
         self._resolve_conversation_loop()
@@ -90,16 +151,10 @@ class HermesCompat:
             "gateway.platforms.feishu",                # Legacy path (Hermes < v0.17)
         ]
         for _mod_path in _feishu_import_paths:
-            try:
-                mod = importlib.import_module(_mod_path)
-                if hasattr(mod, "FeishuAdapter"):
-                    cls = getattr(mod, "FeishuAdapter")
-                    _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
-                    return cls
-            except (ImportError, AttributeError):
-                if _mod_path == "hermes_plugins.feishu_platform.adapter":
-                    pass
-                continue
+            cls = _try_import(_mod_path, "FeishuAdapter")
+            if cls is not None:
+                _logger.debug("HLS: FeishuAdapter resolved via %s", _mod_path)
+                return cls
         _logger.debug("HLS: FeishuAdapter not available via any import path")
         return None
     
@@ -119,14 +174,20 @@ class HermesCompat:
                 _logger.debug("HLS: conversation_loop resolved via sys.modules")
                 return
         
-        # Strategy 2: Anchor-based discovery
+        # Strategy 2: Anchor-based discovery.
+        # Skipped entirely while the host is mid-import of agent.conversation_loop:
+        # the sys.modules assignment below would replace the module object Hermes
+        # is still executing, corrupting its import.
+        if _module_initializing("agent.conversation_loop"):
+            _logger.debug(
+                "HLS: agent.conversation_loop still initializing — deferring resolution"
+            )
+            return
+        
         for anchor_name in ("gateway.run", "run_agent"):
-            anchor = sys.modules.get(anchor_name)
+            anchor = _try_import(anchor_name)
             if anchor is None:
-                try:
-                    anchor = importlib.import_module(anchor_name)
-                except ImportError:
-                    continue
+                continue
             anchor_file = getattr(anchor, "__file__", None)
             if not anchor_file:
                 continue
@@ -153,13 +214,12 @@ class HermesCompat:
                 _logger.debug("HLS: anchor-based load failed: %s", e)
         
         # Strategy 3: Standard import
-        try:
-            from agent.conversation_loop import run_conversation as _func
-            import agent.conversation_loop as _mod
-            self.conversation_loop_module = _mod
-            self.conversation_loop_func = _func
-        except (ImportError, AttributeError):
-            pass
+        _mod = _try_import("agent.conversation_loop")
+        if _mod is not None:
+            _func = getattr(_mod, "run_conversation", None)
+            if _func is not None:
+                self.conversation_loop_module = _mod
+                self.conversation_loop_func = _func
     
     @property
     def has_gateway_runner(self) -> bool:

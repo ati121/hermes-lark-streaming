@@ -4,7 +4,44 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
-## Unreleased (personal fork)
+## v1.6.2 (2026-08-13, personal fork)
+
+### Fixed — gateway startup deadlock
+
+Resolving Hermes internals could hang the gateway permanently before it wrote
+a single log line or connected any platform.
+
+`HermesCompat._resolve_modules()` used blocking imports (`from gateway.run
+import GatewayRunner` and five similar sites). Hermes calls plugin `register()`
+from a background discovery thread while holding its plugin-discovery lock, and
+the main thread asks for that same lock from inside `import gateway.run`,
+because tool-module import triggers plugin discovery as a side effect. The two
+threads then wait on each other: the discovery thread wants a module import lock
+the main thread owns, and the main thread wants the discovery lock the discovery
+thread owns. Neither wait has a timeout, so the process never recovers.
+
+The fix adds `_try_import()`, which reads `sys.modules` first — never blocking,
+and tolerating partially initialized modules — and only falls back to a real
+import when no host module import is in flight on another thread. The main
+thread is exempt because a module import lock is re-entrant for its owner. All
+six resolution sites and the `platform_registry` lookup now use it.
+
+Because any target can now start out unresolved, the deferred patch thread
+retries every unfinished patch (gateway runner, conversation loop, agent, cron,
+platform adapter, adapter-creation hook) instead of only the gateway runner. Its
+backoff starts at 0.1s and grows to 2s, so patches land before the first message
+is dispatched; the 60-second deadline is unchanged. Per-target completion flags
+prevent a retry from wrapping an already-wrapped callable.
+
+Also fixed: resolution no longer replaces `sys.modules["agent.conversation_loop"]`
+while the host is still executing that module, which corrupted the host's own
+import.
+
+Note on the host side: plugin discovery executes arbitrary third-party imports
+while holding a lock, with no timeout. This release removes our side of the
+cycle, but the same pattern is reachable by any plugin whose import blocks.
+
+### Documentation
 
 - Corrected the documented fork source to
   `Aowen-Nowor/hermes-lark-streaming` and restored full installation,

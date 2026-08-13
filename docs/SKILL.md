@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.6.1（个人复刻版） |
+| 版本 | 1.6.2（个人复刻版） |
 | 协议 | MIT |
 | Python | >=3.11 |
 | 与原版 | ⚠️ **不兼容** |
@@ -362,4 +362,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-08-07 | Version: 1.6.1 personal fork*
+*Last updated: 2026-08-13 | Version: 1.6.2 personal fork*
