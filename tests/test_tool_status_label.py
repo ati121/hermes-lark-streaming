@@ -159,6 +159,101 @@ class TestLoadingStatusText:
         )
 
 
+class TestLabelReachedFromRealFlush:
+    """Regression: the label call must survive the flush's early returns.
+
+    The first round of unit tests invoked _sync_loading_label directly, so they
+    passed while the real flush never reached it — on Feishu the spinner stayed
+    blank. These drive _do_unified_flush instead.
+    """
+
+    def _session_and_ctrl(self):
+        from hermes_lark_streaming.controller.linear_mixin import UnifiedControllerMixin
+        from hermes_lark_streaming.state.linear import UnifiedLinearState
+        from hermes_lark_streaming.state.session import CardSession
+        from hermes_lark_streaming.state.phase import CardPhase
+
+        loop = asyncio.new_event_loop()
+        session = CardSession("om_test123456", "oc_test123456", loop)
+        session.card_id = "card_777"
+        session.state = CardPhase.STREAMING
+        session.linear = True
+        session.interactive_mode = False
+        session.unified_state = UnifiedLinearState()
+        session.existing_elements = {_LOADING_ELEMENT_ID}
+        session.flush.set_card_message_ready(True)
+
+        client = MagicMock()
+        client.cardkit_batch_update = AsyncMock()
+        client.cardkit_stream_element = AsyncMock()
+
+        cfg = MagicMock()
+        cfg.show_reasoning = False
+        cfg.streaming_panel_expanded = False
+        cfg.max_tool_steps = 20
+        cfg.max_reasoning_rounds = 20
+
+        ctrl = UnifiedControllerMixin()
+        ctrl._client = client
+        ctrl._cfg = cfg
+        return session, ctrl, client, loop
+
+    def _label_updates(self, client) -> list[dict]:
+        found = []
+        for call in client.cardkit_batch_update.await_args_list:
+            for action in call.args[1]:
+                if (
+                    action.get("action") == "partial_update_element"
+                    and action["params"].get("element_id") == _LOADING_ELEMENT_ID
+                ):
+                    found.append(action["params"]["partial_element"])
+        return found
+
+    def test_label_pushed_on_first_tool_event(self) -> None:
+        """This is the case that shipped broken: panel gets built, label didn't."""
+        session, ctrl, client, loop = self._session_and_ctrl()
+        try:
+            session.tool_use.record_start("terminal", "curl wttr.in")
+            session.unified_state.on_tool_event(is_new_tool=True)
+            loop.run_until_complete(ctrl._do_unified_flush(session))
+        finally:
+            loop.close()
+
+        updates = self._label_updates(client)
+        assert updates, "spinner label was never sent during a real flush"
+        assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 终端命令"
+
+    def test_label_cleared_when_tool_finishes(self) -> None:
+        session, ctrl, client, loop = self._session_and_ctrl()
+        try:
+            session.tool_use.record_start("terminal")
+            session.unified_state.on_tool_event(is_new_tool=True)
+            loop.run_until_complete(ctrl._do_unified_flush(session))
+            session.tool_use.record_end("terminal", output="ok")
+            session.unified_state.on_tool_event(is_new_tool=False)
+            loop.run_until_complete(ctrl._do_unified_flush(session))
+        finally:
+            loop.close()
+
+        updates = self._label_updates(client)
+        assert len(updates) >= 2
+        assert updates[-1]["text"] == {"tag": "plain_text", "content": " "}
+
+    def test_label_survives_answer_only_flush(self) -> None:
+        session, ctrl, client, loop = self._session_and_ctrl()
+        try:
+            session.tool_use.record_start("read_file", "SOUL.md")
+            session.unified_state.on_tool_event(is_new_tool=True)
+            session.unified_state.on_answer_delta("正在查看")
+            loop.run_until_complete(ctrl._do_unified_flush(session))
+        finally:
+            loop.close()
+
+        updates = self._label_updates(client)
+        assert updates, "label lost when an answer delta shares the flush"
+        assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 读取文件"
+
+
 class TestFooterStatusIcons:
     """Leading dot on the footer status: 🟢 done / 🛑 /stop / 🔴 error."""
 

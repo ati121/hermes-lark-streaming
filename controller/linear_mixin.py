@@ -379,6 +379,10 @@ class UnifiedControllerMixin:
                 self._schedule_linear_flush(session)
             return
 
+        # Before the phase work: every phase below has early returns, so a call
+        # placed after them never runs on the tool-event path.
+        await self._sync_loading_label(session)
+
         actions: list[dict[str, Any]] = []
 
         # Bug fix (v1.0.5): Split Phase 2 into two sub-paths:
@@ -669,8 +673,6 @@ class UnifiedControllerMixin:
                     )
                     return
                 _logger.debug("HLS: unified stream_element failed: %s", e)
-
-        await self._sync_loading_label(session)
 
         if state.panel_dirty or state.answer_dirty or state.tool_steps_dirty:
             self._schedule_linear_flush(session)
