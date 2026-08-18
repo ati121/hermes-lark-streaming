@@ -12,3 +12,7 @@ tests/samples/
 .ruff_cache/
 .deps/
 .hermes-last-release
+# Local agent tooling scratch dirs — never part of a release, and their notes
+# quote paths that the plugin security scanner flags.
+.cortexkit/
+.zcode/

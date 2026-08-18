@@ -351,7 +351,7 @@ class TestGetHermesConfigPath:
     """_get_hermes_config_path() 动态路径解析测试 — 多 Profile 场景."""
 
     def test_default_path_when_no_env(self) -> None:
-        """无 HERMES_HOME 环境变量时，使用 ~/.hermes/config.yaml."""
+        """无 HERMES_HOME 环境变量时，回退到用户主目录下的默认配置文件."""
         with patch.dict(os.environ, {}, clear=True):
             os.environ.pop("HERMES_HOME", None)
             path = _get_hermes_config_path()
