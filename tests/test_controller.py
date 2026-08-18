@@ -870,7 +870,7 @@ class TestPhase3ElementNotFoundV141:
     Phase 3 except 块无 is_element_not_found_error 分支 → 落入通用 warning
     → hint_removed 未同步 + existing_elements 未 discard → 下轮 safety net
     再次添加 delete → 死循环 → partial_update (面板内容) 因 batch 原子失败
-    丢失 → 卡片卡在「正在加载上下文...」。
+    丢失 → 卡片卡在「等待上游模型响应」。
 
     修复：Phase 3 except 块新增 is_element_not_found_error 分支，同步
     hint_removed + discard existing_elements，保留 dirty 供下轮重试。
@@ -1683,7 +1683,7 @@ def test_v134_concurrency_seal_no_duplicate_session() -> None:
     → on_interrupted 创建新 session + fire _do_create_linear_card。
     原 bug：on_message_started 继续创建第二个 session 并覆盖，导致：
       1. 两张卡片被创建（on_interrupted 一张 + on_message_started 一张）
-      2. on_interrupted 的卡片成为孤儿（永远停在"正在加载上下文..."）
+      2. on_interrupted 的卡片成为孤儿（永远停在"等待上游模型响应"）
 
     修复：on_message_started 检测到 session 已存在时复用，不重复创建。
     """

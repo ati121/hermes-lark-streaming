@@ -781,10 +781,10 @@ class TestLoadingContextI18n:
     def test_loading_context_entry(self) -> None:
         assert "loading_context" in _T
 
-    def test_loading_context_is_tuple_of_two(self) -> None:
-        en, zh = _T["loading_context"]
-        assert isinstance(en, str) and len(en) > 0
-        assert isinstance(zh, str) and len(zh) > 0
+    def test_loading_context_i18n_text(self) -> None:
+        assert _T["loading_context"] == (
+            "Waiting for upstream model...", "等待上游模型响应",
+        )
 
 
 # ── v1.3.0 P0-01: Clarify choice normalization ──────────────────────

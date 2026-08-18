@@ -215,7 +215,7 @@ class UnifiedControllerMixin:
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
                         include_answer_element=False,   # Answer element added with panel
-                        include_loading_hint=True,      # "正在加载上下文..."
+                        include_loading_hint=True,  # 等待上游模型响应
                         streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                         print_strategy=self._cfg.print_strategy,
                         print_step=self._cfg.print_step,
