@@ -4,7 +4,32 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
-## v1.6.2 (2026-08-13, personal fork)
+## v1.6.3 (2026-08-18, personal fork)
+
+### Added — tool progress labels and status markers
+
+- Shows the currently called tool beside the streaming indicator, with localized
+  Chinese names for Hermes tools and Hindsight memory operations.
+- Keeps the last tool label visible until the next tool starts, so fast tools do
+  not make the status flicker away immediately.
+- Adds green, stop-sign, and red markers to completed, `/stop`-interrupted, and
+  failed footer statuses.
+- Localizes the unified panel title to `执行过程` while retaining the English
+  `agent loop` title.
+- Falls back to the unified panel header when the CardKit transport does not
+  accept a partial update to the streaming indicator.
+
+### Fixed — tool label flush timing
+
+Tool-label updates now run before the streaming flush phases. This prevents
+phase-level early returns from skipping the update entirely.
+
+### Tests
+
+- Added coverage for real Hermes tool names, Hindsight naming, localized labels,
+  sticky tool status, CardKit fallback behavior, and footer markers.
+- Focused card tests and end-to-end tests pass.
+
 
 ### Fixed — gateway startup deadlock
 
