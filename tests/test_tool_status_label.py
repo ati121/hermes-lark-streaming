@@ -102,33 +102,36 @@ class TestLegacyAliasFallbackStillWorks:
         assert en == zh == "Some future tool"
 
 
-class TestActiveToolNames:
+class TestLastToolNames:
+    """Sticky by design — a fast tool must not blank the label on completion."""
+
     def test_none_when_no_tools(self) -> None:
-        assert ToolUseTracker().active_tool_names is None
+        assert ToolUseTracker().last_tool_names is None
 
     def test_reports_running_tool(self) -> None:
         t = ToolUseTracker()
         t.record_start("terminal", "ls -la")
-        assert t.active_tool_names == ("Terminal", "终端命令")
+        assert t.last_tool_names == ("Terminal", "终端命令")
 
-    def test_none_after_completion(self) -> None:
+    def test_persists_after_completion(self) -> None:
+        """A 1s terminal call used to blink and vanish; now it stays put."""
         t = ToolUseTracker()
         t.record_start("terminal")
         t.record_end("terminal", output="ok")
-        assert t.active_tool_names is None
+        assert t.last_tool_names == ("Terminal", "终端命令")
+
+    def test_switches_to_next_tool(self) -> None:
+        t = ToolUseTracker()
+        t.record_start("terminal")
+        t.record_end("terminal", output="ok")
+        t.record_start("read_file")
+        assert t.last_tool_names == ("Read", "读取文件")
 
     def test_reports_latest_of_several_running(self) -> None:
         t = ToolUseTracker()
         t.record_start("terminal")
         t.record_start("read_file")
-        assert t.active_tool_names == ("Read", "读取文件")
-
-    def test_falls_back_to_earlier_running_tool(self) -> None:
-        t = ToolUseTracker()
-        t.record_start("terminal")
-        t.record_start("read_file")
-        t.record_end("read_file", output="done")
-        assert t.active_tool_names == ("Terminal", "终端命令")
+        assert t.last_tool_names == ("Read", "读取文件")
 
 
 class TestLoadingStatusText:
@@ -223,7 +226,8 @@ class TestLabelReachedFromRealFlush:
         assert updates, "spinner label was never sent during a real flush"
         assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 终端命令"
 
-    def test_label_cleared_when_tool_finishes(self) -> None:
+    def test_label_stays_after_a_fast_tool_finishes(self) -> None:
+        """The 1s terminal call that blinked and vanished on Feishu."""
         session, ctrl, client, loop = self._session_and_ctrl()
         try:
             session.tool_use.record_start("terminal")
@@ -236,8 +240,27 @@ class TestLabelReachedFromRealFlush:
             loop.close()
 
         updates = self._label_updates(client)
-        assert len(updates) >= 2
-        assert updates[-1]["text"] == {"tag": "plain_text", "content": " "}
+        assert updates, "label was never sent"
+        assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 终端命令"
+        blanks = [u for u in updates if u["text"].get("content") == " "]
+        assert not blanks, "label must not blank out when a tool completes"
+
+    def test_label_rotates_to_the_next_tool(self) -> None:
+        session, ctrl, client, loop = self._session_and_ctrl()
+        try:
+            session.tool_use.record_start("terminal")
+            session.unified_state.on_tool_event(is_new_tool=True)
+            loop.run_until_complete(ctrl._do_unified_flush(session))
+            session.tool_use.record_end("terminal", output="ok")
+            session.tool_use.record_start("read_file")
+            session.unified_state.on_tool_event(is_new_tool=True)
+            loop.run_until_complete(ctrl._do_unified_flush(session))
+        finally:
+            loop.close()
+
+        zh = [u["text"]["i18n_content"]["zh_cn"] for u in self._label_updates(client)]
+        assert zh[0] == "正在调用 终端命令"
+        assert zh[-1] == "正在调用 读取文件"
 
     def test_label_survives_answer_only_flush(self) -> None:
         session, ctrl, client, loop = self._session_and_ctrl()
@@ -353,7 +376,8 @@ class TestSyncLoadingLabel:
         asyncio.run(self._ctrl(client)._sync_loading_label(session))
         client.cardkit_batch_update.assert_not_awaited()
 
-    def test_clears_label_when_tool_finishes(self) -> None:
+    def test_no_update_when_tool_finishes(self) -> None:
+        """Completion is not a change — the label stays until the next tool."""
         client = MagicMock()
         client.cardkit_batch_update = AsyncMock()
         session = _make_session(_loading_label=("Terminal", "终端命令"))
@@ -362,9 +386,21 @@ class TestSyncLoadingLabel:
 
         asyncio.run(self._ctrl(client)._sync_loading_label(session))
 
+        client.cardkit_batch_update.assert_not_awaited()
+        assert session._loading_label == ("Terminal", "终端命令")
+
+    def test_updates_when_next_tool_starts(self) -> None:
+        client = MagicMock()
+        client.cardkit_batch_update = AsyncMock()
+        session = _make_session(_loading_label=("Terminal", "终端命令"))
+        session.tool_use.record_start("terminal")
+        session.tool_use.record_end("terminal", output="ok")
+        session.tool_use.record_start("read_file")
+
+        asyncio.run(self._ctrl(client)._sync_loading_label(session))
+
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
-        assert partial["text"] == {"tag": "plain_text", "content": " "}
-        assert session._loading_label is None
+        assert partial["text"]["i18n_content"]["zh_cn"] == "正在调用 读取文件"
 
     def test_skips_after_loading_element_deleted(self) -> None:
         client = MagicMock()

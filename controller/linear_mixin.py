@@ -174,7 +174,7 @@ class UnifiedControllerMixin:
             if not elements:
                 elements.append(_loading_hint_element())
             elements.append(_loading_element(
-                session.tool_use.active_tool_names,
+                session.tool_use.last_tool_names,
                 text_sizes=session.text_sizes,
             ))
 
@@ -681,7 +681,7 @@ class UnifiedControllerMixin:
         """Active tool for the panel title — only when the spinner label can't carry it."""
         if session._loading_label_supported:
             return None
-        return session.tool_use.active_tool_names
+        return session.tool_use.last_tool_names
 
     async def _sync_loading_label(self, session: CardSession) -> None:
         """Push the running tool's name into the spinner row beside the dots.
@@ -696,7 +696,7 @@ class UnifiedControllerMixin:
         if not session.card_id or _LOADING_ELEMENT_ID not in session.existing_elements:
             return
 
-        label = session.tool_use.active_tool_names
+        label = session.tool_use.last_tool_names
         if label == session._loading_label:
             return
 

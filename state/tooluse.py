@@ -348,14 +348,15 @@ class ToolUseTracker:
         return (time.time() - self._session.started_at) * 1000
 
     @property
-    def active_tool_names(self) -> tuple[str, str] | None:
-        """``(en, zh)`` display names of the most recent still-running tool."""
-        if self._session is None:
+    def last_tool_names(self) -> tuple[str, str] | None:
+        """``(en, zh)`` display names of the most recent tool, running or not.
+
+        Deliberately sticky: the spinner keeps showing this tool until the next
+        one takes over, instead of blanking the moment a fast tool returns.
+        """
+        if self._session is None or not self._session.steps:
             return None
-        for step in reversed(self._session.steps):
-            if step.status == "running":
-                return _tool_display_names(step.name)
-        return None
+        return _tool_display_names(self._session.steps[-1].name)
 
     def record_start(self, name: str, detail: str = "") -> None:
         if self._session is None:
