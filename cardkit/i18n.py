@@ -32,8 +32,8 @@ _T: dict[str, tuple[str, str]] = {
     "cache": ("Cache {}", "缓存 {}"),
     "bg_review_panel": ("Review", "审查"),
     "partial_continues": ("Continues in next message", "内容未完，继续在下一条消息"),
-    # ── Context loading hint (first card only, removed on first token) ──
-    "loading_context": ("Loading context...", "正在加载上下文..."),
+    # ── Upstream model placeholder (first card only, removed on first event) ──
+    "loading_context": ("Waiting for upstream model...", "等待上游模型响应"),
     # ── Live tool status shown beside the loading spinner ──
     "calling_tool": ("Calling {}...", "正在调用 {}"),
     # ── Clarify interactive card (three-state: pending / submitted / confirmed) ──
