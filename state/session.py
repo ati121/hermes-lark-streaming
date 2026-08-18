@@ -42,6 +42,8 @@ class CardSession:
         "_first_answer_time",
         "_first_flush_done",
         "_is_continuation",
+        "_loading_label",
+        "_loading_label_supported",
         "_loop",
         "_pending_flush",
         "_streaming_closed",
@@ -132,6 +134,10 @@ class CardSession:
         self._card_ready: asyncio.Event = asyncio.Event()
         self._is_continuation: bool = False
         self._continuation_reactivation_count: int = 0
+        # Live tool label beside the spinner: last value pushed, and whether
+        # Feishu accepts partial updates of the loading div's text at all.
+        self._loading_label: tuple[str, str] | None = None
+        self._loading_label_supported: bool = True
 
     def transition(self, to: str, source: str = "", reason: str = "") -> bool:
         """rejected.  Illegal transitions are logged but do not raise."""

@@ -114,6 +114,89 @@ def _basename_only(text: str) -> str:
         return text
     return os.path.basename(text.replace("\\", "/").rstrip("/"))
 
+# ── Exact-match specs for real Hermes tool names ───────────────────────────
+# Hermes hands the model's raw ``function_name`` to the progress callback
+# (agent/tool_executor.py), so these keys are the literal strings we receive.
+# Format: name → (zh title, en title, icon, sanitizer, no_result)
+_TOOL_SPECS: dict[str, tuple[str, str, str, str | None, bool]] = {
+    # Shell / files
+    "terminal": ("终端命令", "Terminal", "setting_outlined", "command", False),
+    "close_terminal": ("关闭终端", "Close terminal", "setting_outlined", None, True),
+    "read_terminal": ("读取终端", "Read terminal", "setting_outlined", None, False),
+    "read_file": ("读取文件", "Read", "file-link-text_outlined", "path", True),
+    "write_file": ("写入文件", "Edit", "edit_outlined", "path", True),
+    "patch": ("修改文件", "Patch", "edit_outlined", "path", True),
+    "search_files": ("搜索文件", "Search files", "doc-search_outlined", "search", False),
+    "execute_code": ("执行代码", "Execute code", "setting_outlined", None, False),
+    # Web
+    "web_search": ("联网搜索", "Search", "search_outlined", "search", False),
+    "web_extract": ("抓取网页", "Fetch web page", "language_outlined", "url", True),
+    "x_search": ("X 搜索", "X search", "search_outlined", "search", False),
+    # Skills
+    "skill_view": ("查看技能", "View skill", "app-default_outlined", None, False),
+    "skill_manage": ("管理技能", "Manage skill", "app-default_outlined", None, False),
+    "skills_list": ("技能列表", "List skills", "app-default_outlined", None, False),
+    "setup_mcp": ("配置 MCP", "Set up MCP", "setting-inter_outlined", None, False),
+    # Memory — Hindsight's three operations (retain / recall / reflect)
+    "memory": ("记忆", "Memory", "time_outlined", None, False),
+    "hindsight_retain": ("记忆写入", "Retain memory", "time_outlined", None, True),
+    "hindsight_recall": ("记忆回溯", "Recall memory", "time_outlined", "search", False),
+    "hindsight_reflect": ("记忆推演", "Reflect on memory", "time_outlined", "search", False),
+    "session_search": ("会话检索", "Search sessions", "doc-search_outlined", "search", False),
+    "hindsight_operation": ("记忆操作", "Memory operation", "time_outlined", None, False),
+    # Delegation / planning
+    "delegate_task": ("派发子任务", "Delegate task", "robot_outlined", None, False),
+    "todo": ("待办清单", "Todo", "list-check_outlined", None, True),
+    "clarify": ("追问确认", "Clarify", "list-check_outlined", None, True),
+    "cronjob": ("定时任务", "Cron job", "time_outlined", None, False),
+    # Tool discovery
+    "tool_search": ("工具检索", "Search tools", "doc-search_outlined", "search", False),
+    "tool_describe": ("工具说明", "Describe tool", "setting-inter_outlined", None, False),
+    "tool_call": ("调用工具", "Call tool", "setting-inter_outlined", None, False),
+    # Media
+    "vision_analyze": ("图像分析", "Analyze image", "report_outlined", None, False),
+    "video_analyze": ("视频分析", "Analyze video", "report_outlined", None, False),
+    "image_generate": ("生成图片", "Generate image", "report_outlined", None, True),
+    "video_generate": ("生成视频", "Generate video", "report_outlined", None, True),
+    "text_to_speech": ("语音合成", "Text to speech", "report_outlined", None, True),
+    # Browser
+    "browser_navigate": ("浏览器跳转", "Browser navigate", "browser-mac_outlined", "url", True),
+    "browser_click": ("浏览器点击", "Browser click", "browser-mac_outlined", None, True),
+    "browser_type": ("浏览器输入", "Browser type", "browser-mac_outlined", None, True),
+    "browser_snapshot": ("浏览器快照", "Browser snapshot", "browser-mac_outlined", None, True),
+    "browser_exec": ("浏览器执行", "Browser exec", "browser-mac_outlined", None, True),
+    "browser_vision": ("浏览器视觉", "Browser vision", "browser-mac_outlined", None, True),
+    "browser_scroll": ("浏览器滚动", "Browser scroll", "browser-mac_outlined", None, True),
+    "browser_back": ("浏览器返回", "Browser back", "browser-mac_outlined", None, True),
+    "browser_press": ("浏览器按键", "Browser press", "browser-mac_outlined", None, True),
+    "browser_console": ("浏览器控制台", "Browser console", "browser-mac_outlined", None, False),
+    "browser_dialog": ("浏览器弹窗", "Browser dialog", "browser-mac_outlined", None, True),
+    "browser_get_images": ("浏览器取图", "Browser images", "browser-mac_outlined", None, True),
+    "browser_cdp": ("浏览器 CDP", "Browser CDP", "browser-mac_outlined", None, False),
+    # Projects / panes
+    "project_create": ("创建项目", "Create project", "folder_outlined", None, True),
+    "project_list": ("项目列表", "List projects", "folder_outlined", None, False),
+    "project_switch": ("切换项目", "Switch project", "folder_outlined", None, True),
+    "focus_pane": ("聚焦窗格", "Focus pane", "folder_outlined", None, True),
+    "open_preview": ("打开预览", "Open preview", "folder_outlined", None, True),
+    "read_preview": ("读取预览", "Read preview", "folder_outlined", None, False),
+    "read_window_below": ("读取下方窗口", "Read window below", "folder_outlined", None, False),
+    # Messaging
+    "send_message": ("发送消息", "Send message", "app-default_outlined", None, True),
+    "react_to_message": ("消息回应", "React to message", "app-default_outlined", None, True),
+    # Feishu docs / drive
+    "feishu_doc_read": ("读取飞书文档", "Read Feishu doc", "file-link-text_outlined", None, False),
+    "feishu_drive_list_comments": ("飞书评论列表", "List Feishu comments", "app-default_outlined", None, False),
+    "feishu_drive_add_comment": ("飞书添加评论", "Add Feishu comment", "app-default_outlined", None, True),
+    "feishu_drive_reply_comment": ("飞书回复评论", "Reply Feishu comment", "app-default_outlined", None, True),
+    "feishu_drive_list_comment_replies": ("飞书评论回复", "List comment replies", "app-default_outlined", None, False),
+    # Home Assistant
+    "ha_call_service": ("智能家居调用", "Call HA service", "setting-inter_outlined", None, True),
+    "ha_get_state": ("智能家居状态", "Get HA state", "setting-inter_outlined", None, False),
+    "ha_list_entities": ("智能家居设备", "List HA entities", "setting-inter_outlined", None, False),
+    "ha_list_services": ("智能家居服务", "List HA services", "setting-inter_outlined", None, False),
+}
+
 _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["skill"], "icon": "app-default_outlined", "title": "Load skill", "sanitizer": None},
     {
@@ -162,10 +245,28 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["summarize", "analyze", "prepare"], "icon": "report_outlined", "title": "Analyze"},
 ]
 
+def _normalize_tool_name(name: str) -> str:
+    return name.strip().lower().replace("-", "_")
+
+def _spec_to_descriptor(name: str, spec: tuple[str, str, str, str | None, bool]) -> dict[str, Any]:
+    zh, en, icon, sanitizer, no_result = spec
+    return {
+        "aliases": [name],
+        "icon": icon,
+        "title": en,
+        "title_zh": zh,
+        "sanitizer": sanitizer,
+        "no_result": no_result,
+    }
+
 def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
+    """Exact spec first, then the legacy alias-prefix table as a fallback."""
     if not name:
         return None
-    normalized = name.strip().lower().replace("-", "_")
+    normalized = _normalize_tool_name(name)
+    spec = _TOOL_SPECS.get(normalized)
+    if spec is not None:
+        return _spec_to_descriptor(normalized, spec)
     for desc in _TOOL_DESCRIPTORS:
         for alias in desc["aliases"]:
             if normalized == alias or normalized.startswith(f"{alias}_"):
@@ -173,10 +274,27 @@ def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
     return None
 
 def _humanize_tool_name(name: str) -> str:
+    # MCP tools arrive as mcp__<server>__<tool>; the bare underscore split
+    # would render "Mcp  server  tool" with doubled spaces.
+    if name.startswith("mcp__"):
+        parts = [p for p in name[len("mcp__"):].split("__") if p]
+        if parts:
+            return " · ".join(p.replace("_", " ").strip() for p in parts)
     cleaned = name.replace("-", " ").replace("_", " ").strip()
     if not cleaned:
         return "Tool"
     return cleaned[0].upper() + cleaned[1:]
+
+def _tool_display_names(name: str | None) -> tuple[str, str]:
+    """Return ``(en, zh)`` display names for a raw tool name."""
+    if not name:
+        return "Tool", "工具"
+    desc = _resolve_tool_descriptor(name)
+    if desc is not None:
+        en = desc["title"]
+        return en, desc.get("title_zh") or en
+    humanized = _humanize_tool_name(name)
+    return humanized, humanized
 
 def _format_duration_label(ms: float) -> str:
     return f"{ms:.0f} ms" if ms < 1000 else f"{(ms / 1000):.1f} s"
@@ -229,6 +347,16 @@ class ToolUseTracker:
             return 0.0
         return (time.time() - self._session.started_at) * 1000
 
+    @property
+    def active_tool_names(self) -> tuple[str, str] | None:
+        """``(en, zh)`` display names of the most recent still-running tool."""
+        if self._session is None:
+            return None
+        for step in reversed(self._session.steps):
+            if step.status == "running":
+                return _tool_display_names(step.name)
+        return None
+
     def record_start(self, name: str, detail: str = "") -> None:
         if self._session is None:
             self._session = ToolSession(started_at=time.time())
@@ -280,15 +408,18 @@ class ToolUseTracker:
         steps = []
         for s in self._session.steps:
             desc = _resolve_tool_descriptor(s.name)
-            base_title = desc["title"] if desc else _humanize_tool_name(s.name)
+            base_title, base_title_zh = _tool_display_names(s.name)
             if s.elapsed_ms > 0:
-                base_title = f"{base_title} ({_format_duration_label(s.elapsed_ms)})"
+                suffix = f" ({_format_duration_label(s.elapsed_ms)})"
+                base_title += suffix
+                base_title_zh += suffix
             sanitizer = desc.get("sanitizer") if desc else None
             detail = _sanitize_detail(s.detail, sanitizer)
             steps.append(
                 {
                     "name": s.name,
                     "title": base_title,
+                    "title_zh": base_title_zh,
                     "status": s.status,
                     "detail": detail,
                     "output": s.output,
