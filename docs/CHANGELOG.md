@@ -4,6 +4,23 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.4 (2026-08-19, personal fork)
+
+### Fixed — plugin scan compatibility
+
+- Moved the Feishu integration-test notification code from workflow YAML into a
+  Python script so environment-variable handling receives the scanner's normal
+  source-code treatment.
+- Removed an unused notification script that read an unrelated secret at import
+  time.
+- Removed secret-length and broad environment dumps from the release workflow.
+- Reduced integration-test checkout permissions to read-only and disabled
+  persisted checkout credentials before installing upstream dependencies.
+- Clarified the initial card state as `等待上游模型响应` / `Waiting for upstream
+  model...`.
+
+The existing `v1.6.2` and `v1.6.3` tags remain rollback points.
+
 ## v1.6.3 (2026-08-18, personal fork)
 
 ### Added — tool progress labels and status markers

@@ -35,7 +35,7 @@ stages:
       #   - tag_name = v{version}
       #   - target_commitish = GITEE_COMMIT（系统变量，当前 commit SHA）
       #   - Gitee API 会在创建 Release 时自动创建对应的 tag（如果不存在）
-      #   - 所有变量在 Python 进程里通过 os.environ 读取，不经过插件模板引擎
+      #   - 所有变量由 Python 进程自行从运行环境读取，不经过插件模板引擎
       #
       # 实际逻辑放在 scripts/create_release.py（避免在 YAML 块标量里
       # 嵌入复杂多行 Python 字符串导致 YAML 解析失败）。
@@ -50,10 +50,11 @@ stages:
             # ── 调试：打印环境变量（排查变量注入问题）──
             echo "=== 环境变量检查 ==="
             echo "OWNER=[${OWNER:-<未设置>}]"
-            echo "TOKEN=[${TOKEN:+<已设置，长度 ${#TOKEN}>}]"
+            echo "TOKEN=[${TOKEN:+<已设置>}]"
             echo "REPO=[${REPO:-<未设置>}]"
-            # 打印所有可能的 GITEE_ 系统变量（用于调试，不打印 TOKEN 值）
-            env | grep -E "^(GITEE_|GO_)" | grep -v -i "token" | head -20 || echo "(无 GITEE_/GO_ 系统变量)"
+            # 只打印发版脚本实际使用的系统变量（显式白名单，避免误打印新增的密钥）
+            echo "GITEE_COMMIT=[${GITEE_COMMIT:-<未设置>}]"
+            echo "TARGET_BRANCH=[${TARGET_BRANCH:-<未设置>}]"
 
             # ── 兜底：如果通用变量未注入，尝试从 GITEE_PARAMS 文件读取 ──
             # 通用变量是项目级，需要「关联流水线」才会注入环境变量。
