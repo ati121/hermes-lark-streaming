@@ -25,6 +25,7 @@ __all__ = [
     '_collapsible_panel',
     '_streaming_element',
     '_loading_element',
+    '_loading_status_text',
     '_loading_hint_element',
     '_build_tool_step_elements',
     '_build_tool_step_title',
@@ -182,7 +183,35 @@ def _streaming_element(
         "element_id": element_id,
     }
 
-def _loading_element() -> dict:
+def _loading_status_text(
+    label: tuple[str, str] | None = None,
+    *,
+    text_sizes: Mapping[str, Any] | None = None,
+) -> dict:
+    """Text object beside the spinner. ``label`` is the ``(en, zh)`` tool name.
+
+    Stays ``plain_text`` in every state — Feishu rejects a changed ``tag`` on a
+    partial update, so the blank and labelled forms must share one tag.
+    """
+    if not label:
+        return {"tag": "plain_text", "content": " "}
+    en_name, zh_name = label
+    en_tpl, zh_tpl = _T["calling_tool"]
+    en_text = en_tpl.format(en_name)
+    zh_text = zh_tpl.format(zh_name)
+    text: dict[str, Any] = {
+        "tag": "plain_text",
+        "content": en_text,
+        "i18n_content": _i18n(en_text, zh_text),
+        "text_color": "grey",
+    }
+    return _set_text_size(text, _role_text_size(text_sizes, "notice", default="notation"))
+
+def _loading_element(
+    label: tuple[str, str] | None = None,
+    *,
+    text_sizes: Mapping[str, Any] | None = None,
+) -> dict:
     """Loading spinner element (div with icon — div natively supports icon, markdown varies)."""
     return {
         "tag": "div",
@@ -191,10 +220,7 @@ def _loading_element() -> dict:
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
         },
-        "text": {
-            "tag": "plain_text",
-            "content": " ",
-        },
+        "text": _loading_status_text(label, text_sizes=text_sizes),
         "element_id": _LOADING_ELEMENT_ID,
     }
 
@@ -232,7 +258,7 @@ def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
     panel["element_id"] = UNIFIED_PANEL_ELEMENT_ID
     return panel
 
-def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True) -> dict:
+def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True, active_tool: tuple[str, str] | None = None) -> dict:
     """Build header dict for unified panel. Title computed from state (rounds/tools/elapsed)."""
     en_title, zh_title = _T["agent_process"]
     en_parts: list[str] = [en_title]
@@ -259,6 +285,13 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
         elapsed_str = _format_elapsed(total_elapsed_ms)
         en_parts.append(elapsed_str)
         zh_parts.append(elapsed_str)
+
+    # Fallback slot for the spinner label — used when Feishu rejects a partial
+    # update of the loading div's text (see UnifiedControllerMixin).
+    if active_tool:
+        en_tpl, zh_tpl = _T["calling_tool"]
+        en_parts.append(en_tpl.format(active_tool[0]))
+        zh_parts.append(zh_tpl.format(active_tool[1]))
 
     en_full = " · ".join(en_parts)
     zh_full = " · ".join(zh_parts)
@@ -474,6 +507,7 @@ def build_unified_panel(
     max_tool_steps: int = 20,
     max_reasoning_rounds: int = 20,
     text_sizes: Mapping[str, Any] | None = None,
+    active_tool: tuple[str, str] | None = None,
 ) -> dict:
     """Build full unified panel. Thin assembler over build_panel_header/children."""
     header = build_panel_header(
@@ -482,6 +516,7 @@ def build_unified_panel(
         tool_steps=tool_steps,
         tool_elapsed_ms=tool_elapsed_ms,
         show_reasoning=show_reasoning,
+        active_tool=active_tool,
     )
     children = build_panel_children(
         reasoning_rounds=reasoning_rounds,
@@ -527,7 +562,17 @@ def _build_tool_step_title(
     status = step.get("status", "running")
     status_info = _tool_status_info(status)
     title = step.get("title", step.get("name", "tool"))
-    content = f"<font color='{status_info['color']}'>**{_escape_md(title)}**</font>"
+    title_zh = step.get("title_zh") or title
+    color = status_info["color"]
+    content = f"<font color='{color}'>**{_escape_md(title)}**</font>"
+    text: dict[str, Any] = {
+        "tag": "lark_md",
+        "content": content,
+        "text_size": _role_text_size(text_sizes, "tool", default="notation"),
+    }
+    if title_zh != title:
+        zh_content = f"<font color='{color}'>**{_escape_md(title_zh)}**</font>"
+        text["i18n_content"] = _i18n(content, zh_content)
     return {
         "tag": "div",
         "icon": {
@@ -535,11 +580,7 @@ def _build_tool_step_title(
             "token": step.get("icon", "tool_02"),
             "color": "grey",
         },
-        "text": {
-            "tag": "lark_md",
-            "content": content,
-            "text_size": _role_text_size(text_sizes, "tool", default="notation"),
-        },
+        "text": text,
     }
 
 def _build_reasoning_round_title(

@@ -12,9 +12,10 @@ __all__ = [
 _LOCALES = ["zh_cn", "en_us"]
 
 _T: dict[str, tuple[str, str]] = {
-    "status_completed": ("Completed", "已完成"),
-    "status_error": ("Error", "出错"),
-    "status_stopped": ("Stopped", "已停止"),
+    # Leading status dot — 🟢 done / 🛑 stopped by /stop / 🔴 error.
+    "status_completed": ("🟢 Completed", "🟢 已完成"),
+    "status_error": ("🔴 Error", "🔴 出错"),
+    "status_stopped": ("🛑 Stopped", "🛑 已停止"),
     "elapsed": ("Elapsed {}", "耗时 {}"),
     "context": ("Context {}", "上下文 {}"),
     "processing": ("Processing...", "处理中..."),
@@ -33,6 +34,8 @@ _T: dict[str, tuple[str, str]] = {
     "partial_continues": ("Continues in next message", "内容未完，继续在下一条消息"),
     # ── Context loading hint (first card only, removed on first token) ──
     "loading_context": ("Loading context...", "正在加载上下文..."),
+    # ── Live tool status shown beside the loading spinner ──
+    "calling_tool": ("Calling {}...", "正在调用 {}"),
     # ── Clarify interactive card (three-state: pending / submitted / confirmed) ──
     "clarify_select_placeholder": ("Quick select...", "快速选择..."),
     "clarify_input_placeholder": ("Type your answer...", "请输入你的回答..."),
@@ -44,7 +47,7 @@ _T: dict[str, tuple[str, str]] = {
     "cost_actual": ("${} (actual)", "${} (实报)"),
     "cost_included": ("Free", "免费"),
     # ── Unified panel i18n ──
-    "agent_process": ("agent loop", "agent loop"),
+    "agent_process": ("agent loop", "执行过程"),
     "rounds": ("{} rounds", "{} 轮"),
     "tools_count": ("{} tools", "{} 个工具"),
     "round_n": ("Round {}", "第 {} 轮"),

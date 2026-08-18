@@ -15,6 +15,7 @@ from ..cardkit import (
     _LOADING_HINT_ELEMENT_ID,
     _loading_element,
     _loading_hint_element,
+    _loading_status_text,
     _role_text_size,
     _streaming_element,
     build_streaming_card_v2,
@@ -172,7 +173,10 @@ class UnifiedControllerMixin:
         else:
             if not elements:
                 elements.append(_loading_hint_element())
-            elements.append(_loading_element())
+            elements.append(_loading_element(
+                session.tool_use.last_tool_names,
+                text_sizes=session.text_sizes,
+            ))
 
         summary = _build_seal_summary(state) if final else "Processing..."
         return build_interactive_card_v2(
@@ -375,6 +379,10 @@ class UnifiedControllerMixin:
                 self._schedule_linear_flush(session)
             return
 
+        # Before the phase work: every phase below has early returns, so a call
+        # placed after them never runs on the tool-event path.
+        await self._sync_loading_label(session)
+
         actions: list[dict[str, Any]] = []
 
         # Bug fix (v1.0.5): Split Phase 2 into two sub-paths:
@@ -396,6 +404,7 @@ class UnifiedControllerMixin:
                     max_tool_steps=self._cfg.max_tool_steps,
                     max_reasoning_rounds=self._cfg.max_reasoning_rounds,
                     text_sizes=session.text_sizes,
+                    active_tool=self._active_tool_for_header(session),
                 )
                 new_elements.append(panel)
 
@@ -531,6 +540,7 @@ class UnifiedControllerMixin:
                     max_tool_steps=self._cfg.max_tool_steps,
                     max_reasoning_rounds=self._cfg.max_reasoning_rounds,
                     text_sizes=session.text_sizes,
+                    active_tool=self._active_tool_for_header(session),
                 )
                 actions.append({
                     "action": "partial_update_element",
@@ -556,6 +566,7 @@ class UnifiedControllerMixin:
                     max_tool_steps=self._cfg.max_tool_steps,
                     max_reasoning_rounds=self._cfg.max_reasoning_rounds,
                     text_sizes=session.text_sizes,
+                    active_tool=self._active_tool_for_header(session),
                 )
                 actions.append({
                     "action": "add_elements",
@@ -665,6 +676,66 @@ class UnifiedControllerMixin:
 
         if state.panel_dirty or state.answer_dirty or state.tool_steps_dirty:
             self._schedule_linear_flush(session)
+
+    def _active_tool_for_header(self, session: CardSession) -> tuple[str, str] | None:
+        """Active tool for the panel title — only when the spinner label can't carry it."""
+        if session._loading_label_supported:
+            return None
+        return session.tool_use.last_tool_names
+
+    async def _sync_loading_label(self, session: CardSession) -> None:
+        """Push the running tool's name into the spinner row beside the dots.
+
+        Sent as its own batch_update: a rejected div-text update must not take
+        the panel or answer actions down with it.
+        """
+        if session.interactive_mode:
+            return  # whole-card rebuild already carries the label
+        if not session._loading_label_supported or session._streaming_closed:
+            return
+        if not session.card_id or _LOADING_ELEMENT_ID not in session.existing_elements:
+            return
+
+        label = session.tool_use.last_tool_names
+        if label == session._loading_label:
+            return
+
+        actions = [{
+            "action": "partial_update_element",
+            "params": {
+                "element_id": _LOADING_ELEMENT_ID,
+                "partial_element": {
+                    "text": _loading_status_text(label, text_sizes=session.text_sizes),
+                },
+            },
+        }]
+        session.sequence += 1
+        try:
+            await self._client.cardkit_batch_update(
+                session.card_id, actions, sequence=session.sequence,
+            )
+            session._loading_label = label
+        except FeishuAPIError as e:
+            if e.code == CARDKIT_STREAMING_CLOSED:
+                session._streaming_closed = True
+                return
+            if is_schema_error(e):
+                # Feishu refuses partial updates of a div's text — stop trying
+                # and let the panel title carry the status instead.
+                _logger.info(
+                    "HLS: spinner label unsupported (%s), falling back to panel title card=%s",
+                    e, session.card_id[:12],
+                )
+                session._loading_label_supported = False
+                state = session.unified_state
+                if state is not None and state.panel_visible:
+                    state.panel_dirty = True
+                return
+            _logger.debug("HLS: spinner label update failed: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _logger.debug("HLS: spinner label update error: %s", e)
 
     def _linear_on_thinking(self, session: CardSession, text: str) -> None:
         """Handle a thinking/reasoning delta in linear mode."""
