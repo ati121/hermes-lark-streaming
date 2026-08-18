@@ -159,6 +159,36 @@ class TestLoadingStatusText:
         )
 
 
+class TestFooterStatusIcons:
+    """Leading dot on the footer status: 🟢 done / 🛑 /stop / 🔴 error."""
+
+    def _footer(self, **kwargs) -> tuple[str, str]:
+        from hermes_lark_streaming.cardkit.elements import _build_footer_elements
+
+        el = _build_footer_elements({"duration": 12.5}, **kwargs)[1]
+        return el["content"], el["i18n_content"]["zh_cn"]
+
+    def test_completed_is_green(self) -> None:
+        en, zh = self._footer()
+        assert zh.startswith("🟢 已完成")
+        assert en.startswith("🟢 Completed")
+
+    def test_stopped_is_stop_sign(self) -> None:
+        en, zh = self._footer(is_aborted=True)
+        assert zh.startswith("🛑 已停止")
+        assert en.startswith("🛑 Stopped")
+
+    def test_error_is_red(self) -> None:
+        en, zh = self._footer(is_error=True)
+        assert "🔴 出错" in zh
+        assert "🔴 Error" in en
+        assert "color='red'" in en  # red font kept on top of the dot
+
+    def test_icons_are_distinct(self) -> None:
+        icons = {self._footer()[1][0], self._footer(is_aborted=True)[1][0], self._footer(is_error=True)[1][:2]}
+        assert len(icons) == 3
+
+
 class TestPanelHeaderFallback:
     def test_no_active_tool_leaves_title_unchanged(self) -> None:
         header = build_panel_header(reasoning_rounds=[], tool_steps=[{"name": "terminal"}])
