@@ -48,7 +48,12 @@ class TestEnabled:
 
 
 class TestFooterFields:
-    _DEFAULT_FIELDS = [["status", "elapsed", "model", "cost", "compression_exhausted"]]
+    _DEFAULT_FIELDS = [["status", "elapsed", "speed", "model", "cost", "compression_exhausted"]]
+
+    def test_default_includes_speed(self) -> None:
+        """speed 默认开启 — 未配置 footer 时页脚就带输出速度."""
+        cfg = _make_config({"hermes_lark_streaming": {}})
+        assert "speed" in cfg.footer_fields[0]
 
     def test_normal_2d_fields(self) -> None:
         cfg = _make_config({"hermes_lark_streaming": {"footer": {"fields": [["a", "b"], ["c"]]}}})

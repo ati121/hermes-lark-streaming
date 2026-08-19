@@ -4,6 +4,21 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.5 (2026-08-20, personal fork)
+
+### Added — output speed footer field
+
+- Adds a `speed` footer field showing output throughput such as `50 t/s`,
+  enabled by default. Remove it from `footer.fields` to hide it.
+- Measures the rate over the window from the first answer token to completion,
+  so time-to-first-token and tool execution do not dilute the figure. Falls back
+  to the whole-message duration when the answer arrives in one piece rather than
+  streaming.
+- Suppresses the field when output tokens are absent or the measurement window
+  is too short to be meaningful.
+
+The `v1.6.4` tag remains the rollback point for the previous footer layout.
+
 ## v1.6.4 (2026-08-19, personal fork)
 
 ### Fixed — plugin scan compatibility

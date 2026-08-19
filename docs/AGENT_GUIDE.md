@@ -117,8 +117,13 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 | `max_tool_steps` | `20` | 1–100 | 面板显示的工具步骤上限 |
 | `max_reasoning_rounds` | `20` | 1–100 | 面板显示的推理轮次上限 |
 | `footer.show_label` | `false` | bool | 是否显示页脚字段标签 |
-| `footer.fields` | status/elapsed/model/cost/compression_exhausted | array | 页脚字段排列 |
+| `footer.fields` | status/elapsed/speed/model/cost/compression_exhausted | array | 页脚字段排列 |
 | `text_sizes` | `{}` | mapping | PC/手机端设备差异字号（本地新增） |
+
+可选的页脚字段名：`status`、`elapsed`、`speed`、`model`、`tokens`、`context`、
+`cache`、`cost`、`api_calls`、`history_offset`、`compression_exhausted`。未知字段名
+会被静默跳过。`speed` 默认开启，显示输出速度（如 `50 t/s`），分母取首字到完成的
+时间窗口，因此不会被首字延迟和工具执行时间摊薄。不想要可以从 `fields` 里去掉。
 
 基础示例：
 
@@ -135,7 +140,7 @@ hermes_lark_streaming:
   footer:
     show_label: false
     fields:
-      - [status, elapsed, model, cost, compression_exhausted]
+      - [status, elapsed, speed, model, cost, compression_exhausted]
 
 display:
   show_reasoning: true

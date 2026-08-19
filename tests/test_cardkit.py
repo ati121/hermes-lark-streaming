@@ -751,6 +751,86 @@ class TestCacheFooterField:
         assert "100%" in en
 
 
+# --- Speed footer field ---
+
+
+def _speed(data: dict, *, show_label: bool = False) -> tuple[str | None, str | None]:
+    return _render_footer_field(
+        "speed", data, is_error=False, is_aborted=False, show_label=show_label,
+    )
+
+
+class TestSpeedFooterField:
+    """_render_footer_field("speed", ...) 输出速度字段渲染测试."""
+
+    def test_uses_gen_seconds_window(self) -> None:
+        """速度分母是 gen_seconds（首字到完成），不是整条消息耗时."""
+        en, zh = _speed({"output_tokens": 500, "gen_seconds": 10.0, "duration": 100.0})
+        assert en == "50 t/s"
+        assert zh == "50 t/s"
+
+    def test_falls_back_to_duration(self) -> None:
+        """缺少 gen_seconds 时退回整条耗时（答案一次性到达的情况）."""
+        en, _ = _speed({"output_tokens": 500, "duration": 10.0})
+        assert en == "50 t/s"
+
+    def test_slow_speed_keeps_one_decimal(self) -> None:
+        """低于 10 t/s 保留一位小数，避免都显示成 0 或 9."""
+        en, _ = _speed({"output_tokens": 42, "gen_seconds": 10.0})
+        assert en == "4.2 t/s"
+
+    def test_fast_speed_rounds_to_integer(self) -> None:
+        """10 t/s 及以上取整，小数位在这个量级没有意义."""
+        en, _ = _speed({"output_tokens": 1234, "gen_seconds": 10.0})
+        assert en == "123 t/s"
+
+    def test_zero_output_tokens_returns_none(self) -> None:
+        """没有输出 token 时不显示速度."""
+        en, zh = _speed({"output_tokens": 0, "gen_seconds": 10.0})
+        assert en is None
+        assert zh is None
+
+    def test_missing_data_returns_none(self) -> None:
+        """footer 数据为空时不显示速度."""
+        en, _ = _speed({})
+        assert en is None
+
+    def test_window_too_short_returns_none(self) -> None:
+        """窗口过短时算出的数字是测量噪声，不显示."""
+        en, _ = _speed({"output_tokens": 5, "gen_seconds": 0.01})
+        assert en is None
+
+    def test_no_window_at_all_returns_none(self) -> None:
+        """gen_seconds 和 duration 都缺失时不显示速度."""
+        en, _ = _speed({"output_tokens": 500})
+        assert en is None
+
+    def test_show_label_bilingual(self) -> None:
+        """show_label=True 时中英文各自加前缀."""
+        en, zh = _speed(
+            {"output_tokens": 500, "gen_seconds": 10.0}, show_label=True,
+        )
+        assert en == "Speed 50 t/s"
+        assert zh == "速度 50 t/s"
+
+    def test_speed_in_build_footer_elements(self) -> None:
+        """speed 字段在 _build_footer_elements 中正常渲染."""
+        result = _build_footer_elements(
+            {"output_tokens": 500, "gen_seconds": 10.0},
+            fields=[["speed"]],
+        )
+        assert len(result) >= 2
+        assert "50 t/s" in result[1]["content"]
+
+    def test_unknown_field_still_skipped(self) -> None:
+        """未知字段名被跳过，不因新增 speed 而改变."""
+        en, _ = _render_footer_field(
+            "not_a_field", {"output_tokens": 500},
+            is_error=False, is_aborted=False, show_label=False,
+        )
+        assert en is None
+
+
 # --- 图片提取 ---
 
 

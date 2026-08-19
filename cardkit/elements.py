@@ -43,6 +43,7 @@ __all__ = [
     '_render_footer_field',
     '_compact',
     '_format_elapsed',
+    '_format_speed',
     '_build_unified_panel_placeholder',
     'build_unified_panel',
     'build_panel_header',
@@ -965,6 +966,18 @@ def _render_footer_field(
             return val, val
         return None, None
 
+    if name == "speed":
+        val = _format_speed(
+            data.get("output_tokens", 0) or 0,
+            data.get("gen_seconds", 0) or 0,
+            data.get("duration", 0) or 0,
+        )
+        if val:
+            if show_label:
+                return _T["speed"][0].format(val), _T["speed"][1].format(val)
+            return val, val
+        return None, None
+
     if name == "model":
         v = data.get("model") or None
         return v, v
@@ -1057,3 +1070,17 @@ def _compact(n: int) -> str:
 def _format_elapsed(ms: float) -> str:
     seconds = ms / 1000
     return f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m {int(seconds % 60)}s"
+
+# Measurement windows shorter than this make the tokens/s figure mostly noise.
+_MIN_SPEED_WINDOW_SEC = 0.3
+
+def _format_speed(output_tokens: int, gen_seconds: float, duration: float) -> str | None:
+    """输出速度 tokens/s. gen_seconds 是首字到完成的窗口，缺失时退回整条消息耗时
+    (未流式的情况下答案一次性到达，整条耗时就是正确分母)。"""
+    if not isinstance(output_tokens, (int, float)) or output_tokens <= 0:
+        return None
+    window = gen_seconds if isinstance(gen_seconds, (int, float)) and gen_seconds > 0 else duration
+    if not isinstance(window, (int, float)) or window < _MIN_SPEED_WINDOW_SEC:
+        return None
+    tps = output_tokens / window
+    return f"{tps:.1f} t/s" if tps < 10 else f"{int(round(tps))} t/s"
