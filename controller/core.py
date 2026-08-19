@@ -766,9 +766,20 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if aborted:
             session._was_aborted = True
 
+        # ── 输出速度窗口 ──
+        # 首字到现在的这段时间才是模型真正在吐 token；把它单独记下来，页脚的
+        # speed 字段才不会被 TTFB 和工具执行时间摊薄。_first_answer_time 与
+        # time.monotonic() 同源，两者相减即为该窗口。
+        gen_seconds = 0.0
+        if session._first_answer_time > 0.0:
+            gen_seconds = time.monotonic() - session._first_answer_time
+            if duration > 0:
+                gen_seconds = min(gen_seconds, duration)
+
         session.footer = {
             "duration": duration,
             "model": model,
+            **({"gen_seconds": gen_seconds} if gen_seconds > 0 else {}),
             **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
             **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),

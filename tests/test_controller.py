@@ -432,6 +432,49 @@ class TestLinearDispatch:
         # The actual completion happens asynchronously in _do_linear_complete
         assert session.state == COMPLETING
 
+    def test_completed_records_gen_seconds_window(self) -> None:
+        """首字时间存在时，footer 记下首字到完成的窗口供 speed 字段使用."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_speed", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_speed"
+        session._first_answer_time = time.monotonic() - 2.0
+        ctrl._sessions["msg_speed"] = session
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_speed",
+                duration=5.0,
+                tokens={"input_tokens": 100, "output_tokens": 200},
+            )
+        assert session.footer["gen_seconds"] == pytest.approx(2.0, abs=0.5)
+
+    def test_completed_clamps_gen_seconds_to_duration(self) -> None:
+        """窗口不会超过整条消息耗时."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_speed_clamp", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_speed_clamp"
+        session._first_answer_time = time.monotonic() - 30.0
+        ctrl._sessions["msg_speed_clamp"] = session
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_speed_clamp",
+                duration=4.0,
+                tokens={"input_tokens": 100, "output_tokens": 200},
+            )
+        assert session.footer["gen_seconds"] == 4.0
+
+    def test_completed_omits_gen_seconds_without_first_answer(self) -> None:
+        """没有流式首字（答案一次性到达）时不记窗口，speed 退回整条耗时."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_speed_none", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_speed_none"
+        ctrl._sessions["msg_speed_none"] = session
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(message_id="msg_speed_none", duration=5.0)
+        assert "gen_seconds" not in session.footer
+
     def test_guard_skips_terminal(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_term", linear=True)

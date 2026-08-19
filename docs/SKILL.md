@@ -253,7 +253,9 @@ hermes_lark_streaming:
     footer: {default: x-small, pc: x-small, mobile: small}
   footer:
     show_label: false
-    fields: [[status, elapsed, model, cost, compression_exhausted]]
+    # 可选字段: status elapsed speed model tokens context cache cost
+    #           api_calls history_offset compression_exhausted
+    fields: [[status, elapsed, speed, model, cost, compression_exhausted]]
 
 # display 节是 Hermes 全局配置，不在 hermes_lark_streaming 下
 display:
