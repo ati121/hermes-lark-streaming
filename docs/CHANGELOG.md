@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.6 (2026-08-20, personal fork)
+
+### Fixed — output speed for multi-call turns
+
+- Uses the final API call's output tokens for the `speed` footer field instead
+  of Hermes's cumulative session total, preventing inflated values such as
+  `330 t/s`, `475 t/s`, and `1976 t/s` on turns with tool loops.
+- Keeps the cumulative token total available in the existing `tokens` footer
+  field.
+
+The `v1.6.5` tag remains available as the rollback point for the original
+output-speed implementation.
+
 ## v1.6.5 (2026-08-20, personal fork)
 
 ### Added — output speed footer field
@@ -11,9 +24,10 @@ filesystem paths.
 - Adds a `speed` footer field showing output throughput such as `50 t/s`,
   enabled by default. Remove it from `footer.fields` to hide it.
 - Measures the rate over the window from the first answer token to completion,
-  so time-to-first-token and tool execution do not dilute the figure. Falls back
-  to the whole-message duration when the answer arrives in one piece rather than
-  streaming.
+  so time-to-first-token and tool execution do not dilute the figure. For agent
+  turns with tool loops, the numerator is taken from the final API call rather
+  than Hermes's cumulative session output token total. Falls back to the whole-
+  message duration when the answer arrives in one piece rather than streaming.
 - Suppresses the field when output tokens are absent or the measurement window
   is too short to be meaningful.
 

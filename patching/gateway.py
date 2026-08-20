@@ -350,6 +350,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     _agent_ref_child = ctx.get("_agent_ref")
                     cache_read_child = getattr(_agent_ref_child, "session_cache_read_tokens", 0) if _agent_ref_child else 0
                     cache_write_child = getattr(_agent_ref_child, "session_cache_write_tokens", 0) if _agent_ref_child else 0
+                    last_turn_usage_child = getattr(_agent_ref_child, "_last_turn_usage", None) or {}
                     reasoning_tokens = getattr(_agent_ref_child, "session_reasoning_tokens", 0) if _agent_ref_child else 0
                     estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
                     cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
@@ -362,6 +363,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                         tokens={
                             "input_tokens": result.get("input_tokens", 0),
                             "output_tokens": result.get("output_tokens", 0),
+                            "speed_output_tokens": last_turn_usage_child.get("output_tokens", 0),
                             "cache_read_tokens": cache_read_child,
                             "cache_write_tokens": cache_write_child,
                         },
@@ -437,6 +439,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 _agent_ref = ctx.get("_agent_ref")
                 cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
                 cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
+                last_turn_usage = getattr(_agent_ref, "_last_turn_usage", None) or {}
                 reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                 estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                 cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
@@ -449,6 +452,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     tokens={
                         "input_tokens": result.get("input_tokens", 0),
                         "output_tokens": result.get("output_tokens", 0),
+                        "speed_output_tokens": last_turn_usage.get("output_tokens", 0),
                         "cache_read_tokens": cache_read,
                         "cache_write_tokens": cache_write,
                     },
@@ -601,6 +605,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                     _agent_ref = ctx.get("_agent_ref")
                     cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
                     cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
+                    last_turn_usage = getattr(_agent_ref, "_last_turn_usage", None) or {}
                     reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                     estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                     cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
@@ -613,6 +618,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                         tokens={
                             "input_tokens": (result or {}).get("input_tokens", 0),
                             "output_tokens": (result or {}).get("output_tokens", 0),
+                            "speed_output_tokens": last_turn_usage.get("output_tokens", 0),
                             "cache_read_tokens": cache_read,
                             "cache_write_tokens": cache_write,
                         },

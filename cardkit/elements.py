@@ -968,7 +968,10 @@ def _render_footer_field(
 
     if name == "speed":
         val = _format_speed(
-            data.get("output_tokens", 0) or 0,
+            # Hermes reports output_tokens as a cumulative session total.  It
+            # may include prior turns and tool-loop calls, so speed must use
+            # the output from the final API call instead.
+            data.get("speed_output_tokens", data.get("output_tokens", 0)) or 0,
             data.get("gen_seconds", 0) or 0,
             data.get("duration", 0) or 0,
         )

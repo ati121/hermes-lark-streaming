@@ -444,9 +444,14 @@ class TestLinearDispatch:
             ctrl.on_completed(
                 message_id="msg_speed",
                 duration=5.0,
-                tokens={"input_tokens": 100, "output_tokens": 200},
+                tokens={
+                    "input_tokens": 100,
+                    "output_tokens": 200,
+                    "speed_output_tokens": 80,
+                },
             )
         assert session.footer["gen_seconds"] == pytest.approx(2.0, abs=0.5)
+        assert session.footer["speed_output_tokens"] == 80
 
     def test_completed_clamps_gen_seconds_to_duration(self) -> None:
         """窗口不会超过整条消息耗时."""

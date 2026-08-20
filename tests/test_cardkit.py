@@ -769,6 +769,17 @@ class TestSpeedFooterField:
         assert en == "50 t/s"
         assert zh == "50 t/s"
 
+    def test_uses_last_call_tokens_instead_of_cumulative_total(self) -> None:
+        """Do not divide cumulative session tokens by final-answer time."""
+        en, _ = _speed(
+            {
+                "output_tokens": 2000,
+                "speed_output_tokens": 100,
+                "gen_seconds": 2.0,
+            },
+        )
+        assert en == "50 t/s"
+
     def test_falls_back_to_duration(self) -> None:
         """缺少 gen_seconds 时退回整条耗时（答案一次性到达的情况）."""
         en, _ = _speed({"output_tokens": 500, "duration": 10.0})

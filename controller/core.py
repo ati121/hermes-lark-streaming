@@ -782,6 +782,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             **({"gen_seconds": gen_seconds} if gen_seconds > 0 else {}),
             **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
+            **(
+                {"speed_output_tokens": tokens.get("speed_output_tokens")}
+                if tokens and tokens.get("speed_output_tokens")
+                else {}
+            ),
             **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),
             **({"cache_write_tokens": tokens.get("cache_write_tokens")} if tokens and tokens.get("cache_write_tokens") else {}),
             **({"context_used": context.get("used_tokens")} if context else {}),
