@@ -225,8 +225,10 @@ def _loading_element(
         "element_id": _LOADING_ELEMENT_ID,
     }
 
-def _loading_hint_element() -> dict:
-    """上下文加载占位元素 — 首卡创建后插入，首字即显时删除."""
+def _loading_hint_element(status_key: str = "loading_context") -> dict:
+    """上下文状态占位元素 — 首卡创建后插入，首字即显时删除."""
+    if status_key not in ("loading_context", "model_thinking"):
+        status_key = "loading_context"
     return {
         "tag": "div",
         "icon": {
@@ -236,8 +238,8 @@ def _loading_hint_element() -> dict:
         },
         "text": {
             "tag": "lark_md",
-            "content": _T["loading_context"][0],
-            "i18n_content": _t("loading_context"),
+            "content": _T[status_key][0],
+            "i18n_content": _t(status_key),
         },
         "element_id": _LOADING_HINT_ELEMENT_ID,
     }

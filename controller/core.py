@@ -403,8 +403,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         """Native model reasoning delta (incremental append)."""
         if not self.enabled:
             return
-        if not self._cfg.show_reasoning:
-            return
         session = self._get_active_session(message_id)
         if session is None or session.guard.should_skip("on_reasoning"):
             return
@@ -416,13 +414,23 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _logger.debug("on_reasoning: stale epoch, skipping msg=%s", (message_id or "?")[:12])
             return
 
-        # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
-        # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
-        if session.unified_state is None:
-            _logger.warning("HLS: on_thinking but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
-            return
-        session.unified_state.on_reasoning_delta(text)
-        self._schedule_linear_flush(session)
+        # Detecting model activity is independent from exposing chain-of-thought.
+        # Even with show_reasoning=false, the placeholder must stop claiming that
+        # Hermes is still waiting for the upstream model.
+        phase_changed = session._response_phase != "thinking"
+        session._response_phase = "thinking"
+
+        if self._cfg.show_reasoning:
+            # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
+            # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
+            if session.unified_state is None:
+                _logger.warning(
+                    "HLS: on_reasoning but unified_state is None, status only msg=%s",
+                    (message_id or "?")[:12],
+                )
+            else:
+                session.unified_state.on_reasoning_delta(text)
+        self._schedule_linear_flush(session, force=phase_changed)
 
     def on_tool_update(
         self,
@@ -451,6 +459,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             # speed window so tool execution time cannot dilute that call.
             session._first_answer_time = 0.0
             session._last_answer_time = 0.0
+            session._response_phase = "tool"
             session.tool_use.record_start(tool_name, detail)
         else:
             is_error = status in ("error", "failed")
@@ -496,6 +505,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         answer_text = strip_reasoning_tags(text)
         if answer_text:
+            session._response_phase = "answer"
             now = time.monotonic()
             if session._first_answer_time == 0.0:
                 session._first_answer_time = now

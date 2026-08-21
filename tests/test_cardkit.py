@@ -959,6 +959,11 @@ class TestLoadingHintElement:
         el = _loading_hint_element()
         assert "i18n_content" in el["text"]
 
+    def test_model_thinking_status(self) -> None:
+        el = _loading_hint_element("model_thinking")
+        assert el["text"]["i18n_content"]["zh_cn"] == "模型思考中..."
+        assert el["text"]["i18n_content"]["en_us"] == "Model is thinking..."
+
     def test_streaming_card_does_not_include_hint(self) -> None:
         """流式占位卡片默认包含占位提示（v1.0.2: 嵌入初始卡片，不再单独API插入）."""
         card = build_streaming_card_v2()
@@ -970,6 +975,14 @@ class TestLoadingHintElement:
         card = build_streaming_card_v2(include_loading_hint=False)
         element_ids = [e.get("element_id") for e in card["body"]["elements"]]
         assert _LOADING_HINT_ELEMENT_ID not in element_ids
+
+    def test_streaming_card_can_start_in_thinking_state(self) -> None:
+        card = build_streaming_card_v2(loading_hint_status="model_thinking")
+        hint = next(
+            e for e in card["body"]["elements"]
+            if e.get("element_id") == _LOADING_HINT_ELEMENT_ID
+        )
+        assert hint["text"]["i18n_content"]["zh_cn"] == "模型思考中..."
 
 
 class TestPreservativeSealActionsDeleteHint:

@@ -44,9 +44,11 @@ class CardSession:
         "_is_continuation",
         "_loading_label",
         "_loading_label_supported",
+        "_loading_hint_state",
         "_last_answer_time",
         "_loop",
         "_pending_flush",
+        "_response_phase",
         "_streaming_closed",
         "_streaming_closed_logged",
         "_was_aborted",
@@ -130,6 +132,7 @@ class CardSession:
         self._first_answer_time: float = 0.0
         self._last_answer_time: float = 0.0
         self._pending_flush: bool = False
+        self._response_phase: str = "waiting"
         self._streaming_closed: bool = False
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG
         self._streaming_closed_logged: bool = False
@@ -140,6 +143,7 @@ class CardSession:
         # Feishu accepts partial updates of the loading div's text at all.
         self._loading_label: tuple[str, str] | None = None
         self._loading_label_supported: bool = True
+        self._loading_hint_state: str = "loading_context"
 
     def transition(self, to: str, source: str = "", reason: str = "") -> bool:
         """rejected.  Illegal transitions are logged but do not raise."""

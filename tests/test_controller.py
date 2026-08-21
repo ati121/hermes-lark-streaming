@@ -396,6 +396,30 @@ class TestLinearDispatch:
         assert session.unified_state is not None
         assert session.unified_state.panel_dirty is True
 
+    def test_reasoning_marks_thinking_when_reasoning_display_is_hidden(self) -> None:
+        """Reasoning detection and reasoning-text display are independent."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_hidden_reasoning", linear=True)
+        ctrl._sessions["msg_hidden_reasoning"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            ctrl.on_reasoning(message_id="msg_hidden_reasoning", text="internal step")
+
+        assert session._response_phase == "thinking"
+        assert session.unified_state is not None
+        assert session.unified_state.current_reasoning_text == ""
+        schedule.assert_called_once_with(session, force=True)
+
+    def test_reasoning_before_card_creation_is_kept_pending(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_early_reasoning", linear=True)
+        ctrl._sessions["msg_early_reasoning"] = session
+
+        ctrl.on_reasoning(message_id="msg_early_reasoning", text="internal step")
+
+        assert session._response_phase == "thinking"
+        assert session._pending_flush is True
+
     def test_linear_dispatch_answer_sets_dirty(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_d", linear=True)
@@ -403,6 +427,7 @@ class TestLinearDispatch:
         ctrl.on_answer(message_id="msg_d", text="a")
         assert session.unified_state is not None
         assert session.unified_state.answer_dirty is True
+        assert session._response_phase == "answer"
 
     def test_linear_thinking_dispatches(self) -> None:
         ctrl = _setup_ctrl()
@@ -908,6 +933,25 @@ class TestDoUnifiedFlush:
         assert len(delete_hint_actions) == 1
         assert "hint_removed" in session._creation_stages
         assert "panel" in session._creation_stages
+
+    @pytest.mark.asyncio
+    async def test_loading_hint_changes_to_model_thinking(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_hint_thinking", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_hint_thinking"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session._response_phase = "thinking"
+        ctrl._sessions["msg_hint_thinking"] = session
+
+        await ctrl._do_unified_flush(session)
+
+        actions = ctrl._client.cardkit_batch_update.await_args.args[1]
+        update = next(a for a in actions if a["action"] == "partial_update_element")
+        partial = update["params"]["partial_element"]["text"]
+        assert "tag" not in partial
+        assert partial["i18n_content"]["zh_cn"] == "模型思考中..."
+        assert session._loading_hint_state == "model_thinking"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("code", [230020, 300309])

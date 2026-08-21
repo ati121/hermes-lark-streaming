@@ -4,6 +4,18 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.8 (2026-08-21, personal fork)
+
+### Fixed — distinguish upstream waiting from model thinking
+
+- Detects native reasoning and interim thinking callbacks even when the
+  configured reasoning panel is hidden.
+- Changes the initial placeholder from `等待上游模型响应` / `Waiting for
+  upstream model...` to `模型思考中...` / `Model is thinking...` as soon as
+  upstream reasoning begins.
+- Keeps tool activity and visible answer streaming as separate response phases,
+  so the placeholder and spinner do not report stale status between phases.
+
 ## v1.6.7 (2026-08-21, personal fork)
 
 ### Fixed — align output-speed numerator and timing window

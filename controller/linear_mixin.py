@@ -172,9 +172,14 @@ class UnifiedControllerMixin:
                     elements.extend(action.get("params", {}).get("elements", []))
         else:
             if not elements:
-                elements.append(_loading_hint_element())
+                hint_key = (
+                    "model_thinking"
+                    if session._response_phase == "thinking"
+                    else "loading_context"
+                )
+                elements.append(_loading_hint_element(hint_key))
             elements.append(_loading_element(
-                session.tool_use.last_tool_names,
+                self._current_tool_label(session),
                 text_sizes=session.text_sizes,
             ))
 
@@ -212,10 +217,16 @@ class UnifiedControllerMixin:
                     # 现有生命周期守卫使用 card_id 作为卡片已就绪标记。
                     session.card_id = f"im:{card_msg_id}"
                 else:
+                    loading_hint_status = (
+                        "model_thinking"
+                        if session._response_phase == "thinking"
+                        else "loading_context"
+                    )
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
                         include_answer_element=False,   # Answer element added with panel
                         include_loading_hint=True,  # 等待上游模型响应
+                        loading_hint_status=loading_hint_status,
                         streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                         print_strategy=self._cfg.print_strategy,
                         print_step=self._cfg.print_step,
@@ -224,6 +235,7 @@ class UnifiedControllerMixin:
                     card_id = await self._client.cardkit_create(card)
                     card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
                     session.card_id = card_id
+                    session._loading_hint_state = loading_hint_status
                 session.card_msg_id = card_msg_id
                 session.card_created_at = _time.time()
                 session.flush.set_throttle(self._cfg.flush_interval_sec)
@@ -248,8 +260,16 @@ class UnifiedControllerMixin:
             if session.linear and session.unified_state and (
                 session.unified_state.has_dirty or session._pending_flush
             ):
+                status_only = session._pending_flush and not session.unified_state.has_dirty
                 session._pending_flush = False
-                if not session._first_flush_done:
+                if status_only:
+                    # A reasoning-status update is not the first visible answer;
+                    # keep the immediate-answer flush available for later.
+                    self._fire_and_forget(
+                        session.flush.flush_now(lambda: self._do_unified_flush(session)),
+                        asyncio.get_running_loop(),
+                    )
+                elif not session._first_flush_done:
                     # First content → immediate flush (首字即显)
                     session._first_flush_done = True
                     # v1.3.4 fix (P2): 持有 Task 强引用防止 GC 回收
@@ -288,20 +308,43 @@ class UnifiedControllerMixin:
             # Signal readiness even on failure so awaiters don't deadlock
             session._card_ready.set()
 
-    def _schedule_linear_flush(self, session: CardSession) -> None:
+    def _schedule_linear_flush(self, session: CardSession, *, force: bool = False) -> None:
         """Schedule a unified panel flush for the given session."""
         if not session.should_proceed("_schedule_linear_flush"):
             return
         # COMPLETING is not terminal, but we should not schedule new flushes
-        if session.state == IDLE or session.state == COMPLETING:
+        if session.state == IDLE:
+            if force:
+                session._pending_flush = True
+            return
+        if session.state == COMPLETING:
             return
 
         state = session.unified_state
-        if state is None or not state.has_dirty:
+        if state is None:
+            if force:
+                session._pending_flush = True
+            return
+        if not force and not state.has_dirty:
             return
 
         if not session.flush._card_message_ready:
             session._pending_flush = True
+            return
+
+        if force and not state.has_dirty:
+            # Status-only transition (waiting -> thinking). Do not consume the
+            # first-visible-content fast path and do not flush every reasoning
+            # token after the transition has already been displayed.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = session._loop
+            if loop is not None and not loop.is_closed():
+                self._fire_and_forget(
+                    session.flush.flush_now(lambda: self._do_unified_flush(session)),
+                    loop,
+                )
             return
 
         # ── First-Token Immediate Flush (首字即显) ──
@@ -381,6 +424,7 @@ class UnifiedControllerMixin:
 
         # Before the phase work: every phase below has early returns, so a call
         # placed after them never runs on the tool-event path.
+        await self._sync_loading_context(session)
         await self._sync_loading_label(session)
 
         actions: list[dict[str, Any]] = []
@@ -581,7 +625,12 @@ class UnifiedControllerMixin:
 
         # ── Delete loading hint if still present (safety net) ──
         _hint_delete_in_batch = False
-        if "hint_removed" not in session._creation_stages and _LOADING_HINT_ELEMENT_ID in session.existing_elements:
+        has_visible_model_content = state.panel_visible or bool(state.answer_text)
+        if (
+            has_visible_model_content
+            and "hint_removed" not in session._creation_stages
+            and _LOADING_HINT_ELEMENT_ID in session.existing_elements
+        ):
             actions.append({
                 "action": "delete_elements",
                 "params": {"element_ids": [_LOADING_HINT_ELEMENT_ID]},
@@ -677,11 +726,61 @@ class UnifiedControllerMixin:
         if state.panel_dirty or state.answer_dirty or state.tool_steps_dirty:
             self._schedule_linear_flush(session)
 
+    def _current_tool_label(self, session: CardSession) -> tuple[str, str] | None:
+        """Return the sticky tool label only while the model is in tool phase."""
+        if session._response_phase in ("thinking", "answer"):
+            return None
+        return session.tool_use.last_tool_names
+
     def _active_tool_for_header(self, session: CardSession) -> tuple[str, str] | None:
         """Active tool for the panel title — only when the spinner label can't carry it."""
         if session._loading_label_supported:
             return None
-        return session.tool_use.last_tool_names
+        return self._current_tool_label(session)
+
+    async def _sync_loading_context(self, session: CardSession) -> None:
+        """Replace the upstream-waiting hint once reasoning starts."""
+        if session.interactive_mode or session._streaming_closed:
+            return
+        if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
+            return
+
+        if session._response_phase != "thinking":
+            return
+        status_key = "model_thinking"
+        if status_key == session._loading_hint_state:
+            return
+
+        hint = _loading_hint_element(status_key)
+        actions = [{
+            "action": "partial_update_element",
+            "params": {
+                "element_id": _LOADING_HINT_ELEMENT_ID,
+                # Keep the existing lark_md tag; CardKit partial updates reject
+                # attempts to replace an element's tag.
+                "partial_element": {
+                    "text": {
+                        "content": hint["text"]["content"],
+                        "i18n_content": hint["text"]["i18n_content"],
+                    },
+                },
+            },
+        }]
+        session.sequence += 1
+        try:
+            await self._client.cardkit_batch_update(
+                session.card_id, actions, sequence=session.sequence,
+            )
+            session._loading_hint_state = status_key
+        except FeishuAPIError as e:
+            if e.code == CARDKIT_STREAMING_CLOSED:
+                session._streaming_closed = True
+                return
+            _logger.debug("HLS: loading context update failed: %s", e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _logger.debug("HLS: loading context update error: %s", e)
 
     async def _sync_loading_label(self, session: CardSession) -> None:
         """Push the running tool's name into the spinner row beside the dots.
@@ -696,7 +795,7 @@ class UnifiedControllerMixin:
         if not session.card_id or _LOADING_ELEMENT_ID not in session.existing_elements:
             return
 
-        label = session.tool_use.last_tool_names
+        label = self._current_tool_label(session)
         if label == session._loading_label:
             return
 
@@ -739,12 +838,21 @@ class UnifiedControllerMixin:
 
     def _linear_on_thinking(self, session: CardSession, text: str) -> None:
         """Handle a thinking/reasoning delta in linear mode."""
-        state = session.unified_state
-        if state is None:
-            return
         split = split_reasoning_text(text)
         reasoning = split.get("reasoning_text")
         answer = split.get("answer_text")
+
+        phase_changed = False
+        if reasoning:
+            phase_changed = session._response_phase != "thinking"
+            session._response_phase = "thinking"
+        elif answer:
+            session._response_phase = "answer"
+
+        state = session.unified_state
+        if state is None:
+            self._schedule_linear_flush(session, force=phase_changed)
+            return
 
         _reasoning_already_tracked = bool(state._current_reasoning)
         if reasoning and self._cfg.show_reasoning and not _reasoning_already_tracked:
@@ -767,8 +875,8 @@ class UnifiedControllerMixin:
                     )
                     state.on_answer_delta(_new_part)
             # else: text is same length or shorter - already captured, skip
-        if (reasoning and self._cfg.show_reasoning and not _reasoning_already_tracked) or answer:
-            self._schedule_linear_flush(session)
+        if reasoning or answer:
+            self._schedule_linear_flush(session, force=bool(reasoning and phase_changed))
 
     async def _preservative_seal(
         self,

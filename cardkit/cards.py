@@ -151,6 +151,7 @@ def build_streaming_card_v2(
     print_step: int = 4,
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
+    loading_hint_status: str = "loading_context",
     include_answer_element: bool = True,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -170,7 +171,7 @@ def build_streaming_card_v2(
 
     # ── Loading hint (context loading placeholder, removed on first LLM token) ──
     if include_loading_hint:
-        elements.append(_loading_hint_element())
+        elements.append(_loading_hint_element(loading_hint_status))
 
     # ── Loading spinner ──
     elements.append(_loading_element())
