@@ -18,6 +18,18 @@ from . import (
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
+def _visible_output_tokens(usage: Any) -> int:
+    """Return visible output tokens from one canonical Hermes usage record."""
+    if not isinstance(usage, dict):
+        return 0
+    output_tokens = usage.get("output_tokens", 0)
+    reasoning_tokens = usage.get("reasoning_tokens", 0)
+    if not isinstance(output_tokens, (int, float)) or output_tokens <= 0:
+        return 0
+    if not isinstance(reasoning_tokens, (int, float)) or reasoning_tokens < 0:
+        reasoning_tokens = 0
+    return max(0, int(output_tokens - reasoning_tokens))
+
 def _wrap_handle_message(orig: Callable) -> Callable:
     """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
 
@@ -363,7 +375,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                         tokens={
                             "input_tokens": result.get("input_tokens", 0),
                             "output_tokens": result.get("output_tokens", 0),
-                            "speed_output_tokens": last_turn_usage_child.get("output_tokens", 0),
+                            "speed_output_tokens": _visible_output_tokens(last_turn_usage_child),
                             "cache_read_tokens": cache_read_child,
                             "cache_write_tokens": cache_write_child,
                         },
@@ -452,7 +464,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     tokens={
                         "input_tokens": result.get("input_tokens", 0),
                         "output_tokens": result.get("output_tokens", 0),
-                        "speed_output_tokens": last_turn_usage.get("output_tokens", 0),
+                        "speed_output_tokens": _visible_output_tokens(last_turn_usage),
                         "cache_read_tokens": cache_read,
                         "cache_write_tokens": cache_write,
                     },
@@ -618,7 +630,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                         tokens={
                             "input_tokens": (result or {}).get("input_tokens", 0),
                             "output_tokens": (result or {}).get("output_tokens", 0),
-                            "speed_output_tokens": last_turn_usage.get("output_tokens", 0),
+                            "speed_output_tokens": _visible_output_tokens(last_turn_usage),
                             "cache_read_tokens": cache_read,
                             "cache_write_tokens": cache_write,
                         },

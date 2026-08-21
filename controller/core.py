@@ -445,7 +445,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _logger.debug("on_tool_update: stale epoch, skipping msg=%s", (message_id or "?")[:12])
             return
 
-        if status in ("running", "started", "tool.started"):
+        is_new_tool = status in ("running", "started", "tool.started")
+        if is_new_tool:
+            # The next visible answer belongs to a later model call. Reset the
+            # speed window so tool execution time cannot dilute that call.
+            session._first_answer_time = 0.0
+            session._last_answer_time = 0.0
             session.tool_use.record_start(tool_name, detail)
         else:
             is_error = status in ("error", "failed")
@@ -458,7 +463,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session.unified_state is None:
             _logger.warning("HLS: on_tool_update but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
             return
-        is_new_tool = status in ("running", "started", "tool.started")
         session.unified_state.on_tool_event(is_new_tool=is_new_tool)
         self._schedule_linear_flush(session)
 
@@ -490,12 +494,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _logger.debug("on_answer: stale epoch, skipping msg=%s", (message_id or "?")[:12])
             return
 
-        # ── TTFB: 首字到达时间 ──
-        if session._first_answer_time == 0.0:
-            session._first_answer_time = time.monotonic()
-
         answer_text = strip_reasoning_tags(text)
         if answer_text:
+            now = time.monotonic()
+            if session._first_answer_time == 0.0:
+                session._first_answer_time = now
+            session._last_answer_time = now
             if session.unified_state is None:
                 _logger.warning("HLS: on_answer but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
                 return
@@ -767,14 +771,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             session._was_aborted = True
 
         # ── 输出速度窗口 ──
-        # 首字到现在的这段时间才是模型真正在吐 token；把它单独记下来，页脚的
-        # speed 字段才不会被 TTFB 和工具执行时间摊薄。_first_answer_time 与
-        # time.monotonic() 同源，两者相减即为该窗口。
+        # Use only the final visible answer segment. Tool start resets both
+        # timestamps, and the endpoint is the last visible delta rather than
+        # on_completed, so tool time and completion bookkeeping stay outside.
         gen_seconds = 0.0
-        if session._first_answer_time > 0.0:
-            gen_seconds = time.monotonic() - session._first_answer_time
-            if duration > 0:
-                gen_seconds = min(gen_seconds, duration)
+        if session._last_answer_time > session._first_answer_time > 0.0:
+            gen_seconds = session._last_answer_time - session._first_answer_time
 
         session.footer = {
             "duration": duration,
@@ -784,7 +786,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
             **(
                 {"speed_output_tokens": tokens.get("speed_output_tokens")}
-                if tokens and tokens.get("speed_output_tokens")
+                if tokens
                 else {}
             ),
             **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),

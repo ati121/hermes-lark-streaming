@@ -420,6 +420,47 @@ class TestLinearDispatch:
         assert session.unified_state is not None
         assert session.unified_state.tool_steps_dirty is True
 
+    def test_tool_start_resets_speed_window(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_tool_speed", linear=True)
+        session._first_answer_time = 10.0
+        session._last_answer_time = 12.0
+        ctrl._sessions["msg_tool_speed"] = session
+
+        ctrl.on_tool_update(
+            message_id="msg_tool_speed", tool_name="read", status="started",
+        )
+
+        assert session._first_answer_time == 0.0
+        assert session._last_answer_time == 0.0
+
+    def test_tool_call_excluded_from_final_answer_window(self) -> None:
+        """Pre-tool text and tool duration must not enter the final-call rate."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_tool_window", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_tool_window"
+        session._first_answer_time = 10.0
+        session._last_answer_time = 11.0
+        ctrl._sessions["msg_tool_window"] = session
+
+        ctrl.on_tool_update(
+            message_id="msg_tool_window", tool_name="read", status="started",
+        )
+        with patch("hermes_lark_streaming.controller.core.time.monotonic", side_effect=[40.0, 44.0]):
+            ctrl.on_answer(message_id="msg_tool_window", text="final part 1")
+            ctrl.on_answer(message_id="msg_tool_window", text="final part 2")
+
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_tool_window",
+                duration=35.0,
+                tokens={"output_tokens": 999, "speed_output_tokens": 200},
+            )
+
+        assert session.footer["gen_seconds"] == 4.0
+        assert session.footer["speed_output_tokens"] == 200
+
     def test_linear_completed_dispatches(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_c", linear=True)
@@ -432,13 +473,14 @@ class TestLinearDispatch:
         # The actual completion happens asynchronously in _do_linear_complete
         assert session.state == COMPLETING
 
-    def test_completed_records_gen_seconds_window(self) -> None:
-        """首字时间存在时，footer 记下首字到完成的窗口供 speed 字段使用."""
+    def test_completed_records_visible_delta_window(self) -> None:
+        """Speed window ends at the last visible delta, not on_completed."""
         ctrl = _setup_ctrl()
         session = _make_session("msg_speed", linear=True)
         session.state = STREAMING
         session.card_id = "card_speed"
-        session._first_answer_time = time.monotonic() - 2.0
+        session._first_answer_time = 10.0
+        session._last_answer_time = 12.0
         ctrl._sessions["msg_speed"] = session
         with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
             ctrl.on_completed(
@@ -450,27 +492,25 @@ class TestLinearDispatch:
                     "speed_output_tokens": 80,
                 },
             )
-        assert session.footer["gen_seconds"] == pytest.approx(2.0, abs=0.5)
+        assert session.footer["gen_seconds"] == 2.0
         assert session.footer["speed_output_tokens"] == 80
 
-    def test_completed_clamps_gen_seconds_to_duration(self) -> None:
-        """窗口不会超过整条消息耗时."""
+    def test_answer_timestamps_only_visible_text(self) -> None:
+        """Reasoning-only callback content must not start the speed window."""
         ctrl = _setup_ctrl()
-        session = _make_session("msg_speed_clamp", linear=True)
-        session.state = STREAMING
-        session.card_id = "card_speed_clamp"
-        session._first_answer_time = time.monotonic() - 30.0
-        ctrl._sessions["msg_speed_clamp"] = session
-        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
-            ctrl.on_completed(
-                message_id="msg_speed_clamp",
-                duration=4.0,
-                tokens={"input_tokens": 100, "output_tokens": 200},
-            )
-        assert session.footer["gen_seconds"] == 4.0
+        session = _make_session("msg_speed_visible", linear=True)
+        ctrl._sessions["msg_speed_visible"] = session
+
+        ctrl.on_answer(message_id="msg_speed_visible", text="Reasoning:\nhidden")
+        assert session._first_answer_time == 0.0
+        assert session._last_answer_time == 0.0
+
+        ctrl.on_answer(message_id="msg_speed_visible", text="visible")
+        assert session._first_answer_time > 0.0
+        assert session._last_answer_time == session._first_answer_time
 
     def test_completed_omits_gen_seconds_without_first_answer(self) -> None:
-        """没有流式首字（答案一次性到达）时不记窗口，speed 退回整条耗时."""
+        """Without a measurable visible stream, speed stays hidden."""
         ctrl = _setup_ctrl()
         session = _make_session("msg_speed_none", linear=True)
         session.state = STREAMING

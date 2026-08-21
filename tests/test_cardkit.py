@@ -765,7 +765,7 @@ class TestSpeedFooterField:
 
     def test_uses_gen_seconds_window(self) -> None:
         """速度分母是 gen_seconds（首字到完成），不是整条消息耗时."""
-        en, zh = _speed({"output_tokens": 500, "gen_seconds": 10.0, "duration": 100.0})
+        en, zh = _speed({"speed_output_tokens": 500, "gen_seconds": 10.0})
         assert en == "50 t/s"
         assert zh == "50 t/s"
 
@@ -780,24 +780,29 @@ class TestSpeedFooterField:
         )
         assert en == "50 t/s"
 
-    def test_falls_back_to_duration(self) -> None:
-        """缺少 gen_seconds 时退回整条耗时（答案一次性到达的情况）."""
-        en, _ = _speed({"output_tokens": 500, "duration": 10.0})
-        assert en == "50 t/s"
+    def test_does_not_fall_back_to_cumulative_tokens(self) -> None:
+        """Missing last-call usage must hide speed instead of mixing windows."""
+        en, _ = _speed({"output_tokens": 500, "gen_seconds": 10.0})
+        assert en is None
+
+    def test_does_not_fall_back_to_duration(self) -> None:
+        """A one-piece answer has no observable generation window."""
+        en, _ = _speed({"speed_output_tokens": 500, "duration": 10.0})
+        assert en is None
 
     def test_slow_speed_keeps_one_decimal(self) -> None:
         """低于 10 t/s 保留一位小数，避免都显示成 0 或 9."""
-        en, _ = _speed({"output_tokens": 42, "gen_seconds": 10.0})
+        en, _ = _speed({"speed_output_tokens": 42, "gen_seconds": 10.0})
         assert en == "4.2 t/s"
 
     def test_fast_speed_rounds_to_integer(self) -> None:
         """10 t/s 及以上取整，小数位在这个量级没有意义."""
-        en, _ = _speed({"output_tokens": 1234, "gen_seconds": 10.0})
+        en, _ = _speed({"speed_output_tokens": 1234, "gen_seconds": 10.0})
         assert en == "123 t/s"
 
     def test_zero_output_tokens_returns_none(self) -> None:
         """没有输出 token 时不显示速度."""
-        en, zh = _speed({"output_tokens": 0, "gen_seconds": 10.0})
+        en, zh = _speed({"speed_output_tokens": 0, "gen_seconds": 10.0})
         assert en is None
         assert zh is None
 
@@ -808,18 +813,18 @@ class TestSpeedFooterField:
 
     def test_window_too_short_returns_none(self) -> None:
         """窗口过短时算出的数字是测量噪声，不显示."""
-        en, _ = _speed({"output_tokens": 5, "gen_seconds": 0.01})
+        en, _ = _speed({"speed_output_tokens": 5, "gen_seconds": 0.01})
         assert en is None
 
     def test_no_window_at_all_returns_none(self) -> None:
         """gen_seconds 和 duration 都缺失时不显示速度."""
-        en, _ = _speed({"output_tokens": 500})
+        en, _ = _speed({"speed_output_tokens": 500})
         assert en is None
 
     def test_show_label_bilingual(self) -> None:
         """show_label=True 时中英文各自加前缀."""
         en, zh = _speed(
-            {"output_tokens": 500, "gen_seconds": 10.0}, show_label=True,
+            {"speed_output_tokens": 500, "gen_seconds": 10.0}, show_label=True,
         )
         assert en == "Speed 50 t/s"
         assert zh == "速度 50 t/s"
@@ -827,7 +832,7 @@ class TestSpeedFooterField:
     def test_speed_in_build_footer_elements(self) -> None:
         """speed 字段在 _build_footer_elements 中正常渲染."""
         result = _build_footer_elements(
-            {"output_tokens": 500, "gen_seconds": 10.0},
+            {"speed_output_tokens": 500, "gen_seconds": 10.0},
             fields=[["speed"]],
         )
         assert len(result) >= 2

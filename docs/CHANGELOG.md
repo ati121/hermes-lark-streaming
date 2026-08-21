@@ -4,6 +4,22 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.7 (2026-08-21, personal fork)
+
+### Fixed — align output-speed numerator and timing window
+
+- Resets the speed measurement window when a tool starts, so pre-tool text and
+  tool execution time do not dilute the final model call's output rate.
+- Measures from the first to the last visible answer delta instead of ending at
+  completion bookkeeping.
+- Subtracts reasoning tokens from the final API call's output token count.
+- Hides `speed` when final-call usage or a meaningful streamed-answer window is
+  unavailable. It no longer mixes cumulative session tokens or whole-message
+  duration with a final-call window.
+
+The `v1.6.6` tag remains available as the rollback point for the first
+final-call token implementation.
+
 ## v1.6.6 (2026-08-20, personal fork)
 
 ### Fixed — output speed for multi-call turns

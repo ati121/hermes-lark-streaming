@@ -968,12 +968,8 @@ def _render_footer_field(
 
     if name == "speed":
         val = _format_speed(
-            # Hermes reports output_tokens as a cumulative session total.  It
-            # may include prior turns and tool-loop calls, so speed must use
-            # the output from the final API call instead.
-            data.get("speed_output_tokens", data.get("output_tokens", 0)) or 0,
+            data.get("speed_output_tokens", 0) or 0,
             data.get("gen_seconds", 0) or 0,
-            data.get("duration", 0) or 0,
         )
         if val:
             if show_label:
@@ -1077,13 +1073,11 @@ def _format_elapsed(ms: float) -> str:
 # Measurement windows shorter than this make the tokens/s figure mostly noise.
 _MIN_SPEED_WINDOW_SEC = 0.3
 
-def _format_speed(output_tokens: int, gen_seconds: float, duration: float) -> str | None:
-    """输出速度 tokens/s. gen_seconds 是首字到完成的窗口，缺失时退回整条消息耗时
-    (未流式的情况下答案一次性到达，整条耗时就是正确分母)。"""
+def _format_speed(output_tokens: int, gen_seconds: float) -> str | None:
+    """Visible output tokens per second over the final streamed answer."""
     if not isinstance(output_tokens, (int, float)) or output_tokens <= 0:
         return None
-    window = gen_seconds if isinstance(gen_seconds, (int, float)) and gen_seconds > 0 else duration
-    if not isinstance(window, (int, float)) or window < _MIN_SPEED_WINDOW_SEC:
+    if not isinstance(gen_seconds, (int, float)) or gen_seconds < _MIN_SPEED_WINDOW_SEC:
         return None
-    tps = output_tokens / window
+    tps = output_tokens / gen_seconds
     return f"{tps:.1f} t/s" if tps < 10 else f"{int(round(tps))} t/s"

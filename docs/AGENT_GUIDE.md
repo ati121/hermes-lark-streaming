@@ -122,8 +122,10 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 
 可选的页脚字段名：`status`、`elapsed`、`speed`、`model`、`tokens`、`context`、
 `cache`、`cost`、`api_calls`、`history_offset`、`compression_exhausted`。未知字段名
-会被静默跳过。`speed` 默认开启，显示输出速度（如 `50 t/s`），分母取首字到完成的
-时间窗口，因此不会被首字延迟和工具执行时间摊薄。不想要可以从 `fields` 里去掉。
+会被静默跳过。`speed` 默认开启，显示最后一次模型调用的可见输出速度（如 `50 t/s`）：
+分子为该调用的输出 token 扣除 reasoning token，分母为工具调用之后最终可见正文的
+首个到末个流式块间隔。无法取得可靠 usage、答案一次性突发返回，或窗口短于 0.3 秒时
+不显示。不想要可以从 `fields` 里去掉。
 
 基础示例：
 

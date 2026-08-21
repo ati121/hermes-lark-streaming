@@ -44,6 +44,7 @@ class CardSession:
         "_is_continuation",
         "_loading_label",
         "_loading_label_supported",
+        "_last_answer_time",
         "_loop",
         "_pending_flush",
         "_streaming_closed",
@@ -127,6 +128,7 @@ class CardSession:
         self.error_message: str = ""
         self._first_flush_done: bool = False
         self._first_answer_time: float = 0.0
+        self._last_answer_time: float = 0.0
         self._pending_flush: bool = False
         self._streaming_closed: bool = False
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG

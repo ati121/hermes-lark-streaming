@@ -24,6 +24,7 @@ from hermes_lark_streaming.patching.hooks import (
     on_thinking_delta,
     on_tool_updated,
 )
+from hermes_lark_streaming.patching.gateway import _visible_output_tokens
 
 
 # ── Helpers ──
@@ -34,6 +35,21 @@ def _make_ctrl(*, enabled: bool = True) -> MagicMock:
     ctrl = MagicMock()
     ctrl.enabled = enabled
     return ctrl
+
+
+class TestVisibleOutputTokens:
+    def test_subtracts_reasoning_tokens(self) -> None:
+        assert _visible_output_tokens(
+            {"output_tokens": 500, "reasoning_tokens": 320},
+        ) == 180
+
+    def test_clamps_reasoning_only_output_to_zero(self) -> None:
+        assert _visible_output_tokens(
+            {"output_tokens": 100, "reasoning_tokens": 120},
+        ) == 0
+
+    def test_missing_usage_returns_zero(self) -> None:
+        assert _visible_output_tokens(None) == 0
 
 
 # ── _safe_hook decorator ──
