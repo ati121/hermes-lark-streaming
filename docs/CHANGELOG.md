@@ -4,6 +4,24 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.12 (2026-08-22, personal fork)
+
+### Removed — upstream Gitee release tooling
+
+- Deleted `scripts/create_release.py` and `.workflow/release-pipeline.yml`.
+
+Both belong to upstream's Gitee Go pipeline and cannot fire in this fork: the
+workflow triggers on pushes to `github_sync`, a branch that does not exist here
+(this repo is `main`), and the script posts to the Gitee v5 API using
+Gitee-issued `OWNER`/`TOKEN` credentials that were never configured. Releases
+in this repository have always been created by hand — v1.6.11 included — so
+neither file has ever run.
+
+Recorded because v1.6.1 restored this same pair after an earlier cleanup
+removed it: the tooling looks like it belongs to the release process, and the
+only way to tell it doesn't is to notice which forge it targets. It is not
+dead code to be revived — it is live code for a different repository.
+
 ## v1.6.11 (2026-08-22, personal fork)
 
 ### Changed — spinner row reads as a status line, not a sentence
