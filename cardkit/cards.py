@@ -152,6 +152,8 @@ def build_streaming_card_v2(
     include_unified_panel: bool = True,
     include_loading_hint: bool = True,
     loading_hint_status: str = "loading_context",
+    loading_status_key: str | None = None,
+    loading_status_emoji: str | None = None,
     include_answer_element: bool = True,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -173,8 +175,12 @@ def build_streaming_card_v2(
     if include_loading_hint:
         elements.append(_loading_hint_element(loading_hint_status))
 
-    # ── Loading spinner ──
-    elements.append(_loading_element())
+    # ── Loading spinner (carries the live model/tool status once streaming starts) ──
+    elements.append(_loading_element(
+        status_key=loading_status_key,
+        emoji=loading_status_emoji,
+        text_sizes=text_sizes,
+    ))
 
     card: dict[str, Any] = {
         "schema": "2.0",

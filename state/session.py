@@ -44,6 +44,7 @@ class CardSession:
         "_is_continuation",
         "_loading_label",
         "_loading_label_supported",
+        "_loading_status_key",
         "_loading_hint_state",
         "_last_answer_time",
         "_loop",
@@ -143,6 +144,8 @@ class CardSession:
         # Feishu accepts partial updates of the loading div's text at all.
         self._loading_label: tuple[str, str] | None = None
         self._loading_label_supported: bool = True
+        # Status text on that same row when no tool is running (model_thinking).
+        self._loading_status_key: str | None = None
         self._loading_hint_state: str = "loading_context"
 
     def transition(self, to: str, source: str = "", reason: str = "") -> bool:

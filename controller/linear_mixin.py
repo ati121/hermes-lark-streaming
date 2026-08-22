@@ -102,6 +102,11 @@ async def _fallback_write_answer(
 # NOTE: This is the *server-side flush interval* (how often we send
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
 
+# Spinner-row emoji for the no-tool state. Tools bring their own (see
+# ``_tool_emoji``); this keeps the row's shape when the turn switches between
+# thinking and a tool, so the text doesn't jump sideways.
+_THINKING_EMOJI = "💭"
+
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle."""
 
@@ -171,15 +176,16 @@ class UnifiedControllerMixin:
                 if action.get("action") == "add_elements":
                     elements.extend(action.get("params", {}).get("elements", []))
         else:
-            if not elements:
-                hint_key = (
-                    "model_thinking"
-                    if session._response_phase != "waiting"
-                    else "loading_context"
-                )
-                elements.append(_loading_hint_element(hint_key))
+            label, status_key, emoji = self._current_loading_status(session)
+            if not elements and session._response_phase == "waiting":
+                # Nothing from upstream yet — the hint carries 等待上游模型响应.
+                # Once the first token lands the spinner row below says
+                # 模型思考中, so a second status line would be redundant.
+                elements.append(_loading_hint_element("loading_context"))
             elements.append(_loading_element(
-                self._current_tool_label(session),
+                label,
+                status_key=status_key,
+                emoji=emoji,
                 text_sizes=session.text_sizes,
             ))
 
@@ -211,22 +217,25 @@ class UnifiedControllerMixin:
 
             try:
                 reply_to = session.anchor_id or session.message_id
+                include_hint = False
                 if session.interactive_mode:
                     card = self._build_interactive_linear_card(session)
                     card_msg_id = await self._client.reply_card(reply_to, card)
                     # 现有生命周期守卫使用 card_id 作为卡片已就绪标记。
                     session.card_id = f"im:{card_msg_id}"
                 else:
-                    loading_hint_status = (
-                        "model_thinking"
-                        if session._response_phase != "waiting"
-                        else "loading_context"
-                    )
+                    # Creation races the stream: if upstream already spoke, skip
+                    # the waiting hint entirely and let the spinner row open on
+                    # 模型思考中 rather than flashing a stale 等待上游模型响应.
+                    label, status_key, emoji = self._current_loading_status(session)
+                    include_hint = session._response_phase == "waiting"
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
                         include_answer_element=False,   # Answer element added with panel
-                        include_loading_hint=True,  # 等待上游模型响应
-                        loading_hint_status=loading_hint_status,
+                        include_loading_hint=include_hint,  # 等待上游模型响应
+                        loading_hint_status="loading_context",
+                        loading_status_key=status_key,
+                        loading_status_emoji=emoji,
                         streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                         print_strategy=self._cfg.print_strategy,
                         print_step=self._cfg.print_step,
@@ -235,16 +244,20 @@ class UnifiedControllerMixin:
                     card_id = await self._client.cardkit_create(card)
                     card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
                     session.card_id = card_id
-                    session._loading_hint_state = loading_hint_status
+                    session._loading_hint_state = "loading_context"
+                    session._loading_label = label
+                    session._loading_status_key = status_key
                 session.card_msg_id = card_msg_id
                 session.card_created_at = _time.time()
                 session.flush.set_throttle(self._cfg.flush_interval_sec)
 
                 # 元素跟踪只供 CardKit 路径使用。
-                session.existing_elements = set() if session.interactive_mode else {
-                    _LOADING_HINT_ELEMENT_ID,
-                    _LOADING_ELEMENT_ID,
-                }
+                if session.interactive_mode:
+                    session.existing_elements = set()
+                else:
+                    session.existing_elements = {_LOADING_ELEMENT_ID}
+                    if include_hint:
+                        session.existing_elements.add(_LOADING_HINT_ELEMENT_ID)
                 session._creation_stages.discard("panel")  # Panel NOT in initial card
 
             except FeishuAPIError as e:
@@ -458,12 +471,19 @@ class UnifiedControllerMixin:
                 text_sizes=session.text_sizes,
             ))
 
-            # Add new elements before loading hint
+            # Insert above the hint when it exists, otherwise above the spinner
+            # — the hint is absent whenever the card opened mid-stream, and the
+            # spinner row outlives every other placeholder.
+            _anchor = (
+                _LOADING_HINT_ELEMENT_ID
+                if _LOADING_HINT_ELEMENT_ID in session.existing_elements
+                else _LOADING_ELEMENT_ID
+            )
             actions.append({
                 "action": "add_elements",
                 "params": {
                     "type": "insert_before",
-                    "target_element_id": _LOADING_HINT_ELEMENT_ID,
+                    "target_element_id": _anchor,
                     "elements": new_elements,
                 },
             })
@@ -626,8 +646,14 @@ class UnifiedControllerMixin:
         # ── Delete loading hint if still present (safety net) ──
         _hint_delete_in_batch = False
         has_visible_model_content = state.panel_visible or bool(state.answer_text)
+        # Once the spinner row says 模型思考中, leaving 等待上游模型响应 above it
+        # would state the opposite. Drop the hint on the first upstream token
+        # even when that token produced nothing visible yet (show_reasoning off).
+        _spinner_owns_status = (
+            session._loading_label_supported and session._response_phase != "waiting"
+        )
         if (
-            has_visible_model_content
+            (has_visible_model_content or _spinner_owns_status)
             and "hint_removed" not in session._creation_stages
             and _LOADING_HINT_ELEMENT_ID in session.existing_elements
         ):
@@ -732,6 +758,26 @@ class UnifiedControllerMixin:
             return None
         return session.tool_use.last_tool_names
 
+    def _current_loading_status(
+        self, session: CardSession,
+    ) -> tuple[tuple[str, str] | None, str | None, str | None]:
+        """Spinner-row content as ``(tool_label, status_key, emoji)``.
+
+        The spinner row lives for the whole stream, so it — not the loading
+        hint — is what can actually show 模型思考中 to a user: the hint is
+        deleted in the same flush that renders the first visible content.
+
+        A running tool's name still wins; 模型思考中 fills the row whenever the
+        upstream has spoken but no tool is holding it. Both states carry an
+        emoji so the text doesn't shift sideways when one replaces the other.
+        """
+        label = self._current_tool_label(session)
+        if label:
+            return label, None, session.tool_use.last_tool_emoji
+        if session._response_phase == "waiting":
+            return None, None, None  # the hint element still says 等待上游模型响应
+        return None, "model_thinking", _THINKING_EMOJI
+
     def _active_tool_for_header(self, session: CardSession) -> tuple[str, str] | None:
         """Active tool for the panel title — only when the spinner label can't carry it."""
         if session._loading_label_supported:
@@ -739,9 +785,18 @@ class UnifiedControllerMixin:
         return self._current_tool_label(session)
 
     async def _sync_loading_context(self, session: CardSession) -> None:
-        """Replace the upstream-waiting hint once the model starts responding."""
+        """Fallback hint update for cards whose spinner row can't be updated.
+
+        Normally the spinner row carries 模型思考中 (see ``_sync_loading_label``)
+        and this is a no-op: the hint element is deleted in the same flush that
+        renders the first visible content, so writing to it there costs an API
+        call for a line the user never sees. Only when Feishu has rejected
+        spinner-row updates is the hint worth touching.
+        """
         if session.interactive_mode or session._streaming_closed:
             return
+        if session._loading_label_supported:
+            return  # spinner row owns the status
         if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
             return
 
@@ -785,7 +840,10 @@ class UnifiedControllerMixin:
             _logger.debug("HLS: loading context update error: %s", e)
 
     async def _sync_loading_label(self, session: CardSession) -> None:
-        """Push the running tool's name into the spinner row beside the dots.
+        """Push the live model/tool status into the spinner row beside the dots.
+
+        Carries 模型思考中 from the first upstream token until a tool starts,
+        then the tool's name, then back again once the tool returns.
 
         Sent as its own batch_update: a rejected div-text update must not take
         the panel or answer actions down with it.
@@ -797,8 +855,8 @@ class UnifiedControllerMixin:
         if not session.card_id or _LOADING_ELEMENT_ID not in session.existing_elements:
             return
 
-        label = self._current_tool_label(session)
-        if label == session._loading_label:
+        label, status_key, emoji = self._current_loading_status(session)
+        if label == session._loading_label and status_key == session._loading_status_key:
             return
 
         actions = [{
@@ -806,7 +864,10 @@ class UnifiedControllerMixin:
             "params": {
                 "element_id": _LOADING_ELEMENT_ID,
                 "partial_element": {
-                    "text": _loading_status_text(label, text_sizes=session.text_sizes),
+                    "text": _loading_status_text(
+                        label, status_key=status_key, emoji=emoji,
+                        text_sizes=session.text_sizes,
+                    ),
                 },
             },
         }]
@@ -816,6 +877,7 @@ class UnifiedControllerMixin:
                 session.card_id, actions, sequence=session.sequence,
             )
             session._loading_label = label
+            session._loading_status_key = status_key
         except FeishuAPIError as e:
             if e.code == CARDKIT_STREAMING_CLOSED:
                 session._streaming_closed = True
@@ -851,9 +913,6 @@ class UnifiedControllerMixin:
         elif answer:
             # Same first-token rule as on_answer: interim text counts as the
             # upstream's first response even without reasoning markers.
-            if session._response_phase == "waiting":
-                session._response_phase = "thinking"
-                self._schedule_linear_flush(session, force=True)
             session._response_phase = "answer"
 
         state = session.unified_state

@@ -15,10 +15,12 @@ from hermes_lark_streaming.cardkit import (
 )
 from hermes_lark_streaming.feishu import CARDKIT_SCHEMA_ERROR, FeishuAPIError
 from hermes_lark_streaming.state.tooluse import (
+    _DEFAULT_TOOL_EMOJI,
     _TOOL_SPECS,
     _humanize_tool_name,
     _resolve_tool_descriptor,
     _tool_display_names,
+    _tool_emoji,
     ToolUseTracker,
 )
 
@@ -102,6 +104,65 @@ class TestLegacyAliasFallbackStillWorks:
         assert en == zh == "Some future tool"
 
 
+class TestToolEmoji:
+    """Every tool must resolve to an emoji — the row's shape depends on it."""
+
+    def test_every_icon_token_is_mapped(self) -> None:
+        """Guard: a new tool bringing a new icon token must not slip through.
+
+        Emoji resolution keys off the icon token so one entry covers a whole
+        family. That only holds while every token in use has a mapping — this
+        test is what says so out loud when someone adds the next one.
+        """
+        from hermes_lark_streaming.state.tooluse import (
+            _TOOL_DESCRIPTORS,
+            _TOOL_EMOJI_BY_ICON,
+        )
+
+        tokens = {spec[2] for spec in _TOOL_SPECS.values()}
+        tokens |= {d["icon"] for d in _TOOL_DESCRIPTORS if d.get("icon")}
+        missing = tokens - set(_TOOL_EMOJI_BY_ICON)
+        assert not missing, f"这些 icon token 还没配 emoji: {sorted(missing)}"
+
+    def test_every_spec_resolves(self) -> None:
+        for name in _TOOL_SPECS:
+            assert _tool_emoji(name), name
+
+    @pytest.mark.parametrize(
+        ("name", "emoji"),
+        [
+            ("terminal", "🖥️"),
+            ("read_file", "📄"),
+            ("write_file", "✏️"),
+            ("web_search", "🔍"),
+            ("delegate_task", "🤖"),
+            # by-name overrides where the shared icon token is too coarse
+            ("hindsight_recall", "🧠"),   # time_outlined, shared with cron
+            ("cronjob", "⏰"),
+            ("image_generate", "🎨"),     # report_outlined, shared with video
+            ("video_generate", "🎬"),
+        ],
+    )
+    def test_specific_mappings(self, name: str, emoji: str) -> None:
+        assert _tool_emoji(name) == emoji
+
+    def test_unmapped_tools_fall_back(self) -> None:
+        """MCP and future tools have no descriptor — they still get a mark."""
+        assert _tool_emoji("mcp__grok_search_rs__web_search") == _DEFAULT_TOOL_EMOJI
+        assert _tool_emoji("nonexistent_tool_xyz") == _DEFAULT_TOOL_EMOJI
+        assert _tool_emoji(None) == _DEFAULT_TOOL_EMOJI
+
+    def test_tracker_reports_emoji_alongside_names(self) -> None:
+        t = ToolUseTracker()
+        assert t.last_tool_emoji is None
+        t.record_start("terminal")
+        assert t.last_tool_emoji == "🖥️"
+        t.record_end("terminal", output="ok")
+        assert t.last_tool_emoji == "🖥️", "sticky, same as last_tool_names"
+        t.record_start("read_file")
+        assert t.last_tool_emoji == "📄"
+
+
 class TestLastToolNames:
     """Sticky by design — a fast tool must not blank the label on completion."""
 
@@ -144,15 +205,29 @@ class TestLoadingStatusText:
         assert _loading_status_text(None)["tag"] == _loading_status_text(("Terminal", "终端命令"))["tag"]
 
     def test_chinese_rendering(self) -> None:
-        text = _loading_status_text(("Terminal", "终端命令"))
-        assert text["i18n_content"]["zh_cn"] == "正在调用 终端命令"
-        assert text["i18n_content"]["en_us"] == "Calling Terminal..."
+        """Locks the exact row format: pad + emoji + name, and no verb prefix.
+
+        The tool titles are already verb phrases (读取文件, 写入文件), so a
+        prefix would be a third thing saying "in progress" after the spinner
+        and the emoji. The two leading spaces are EN SPACE (U+2002), not
+        ASCII — a leading ASCII run is the sort of thing a renderer collapses.
+        """
+        text = _loading_status_text(("Terminal", "终端命令"), emoji="🖥️")
+        assert text["i18n_content"]["zh_cn"] == "  🖥️ 终端命令"
+        assert text["i18n_content"]["en_us"] == "  🖥️ Terminal"
+        assert "正在调用" not in text["i18n_content"]["zh_cn"]
+        assert "Calling" not in text["i18n_content"]["en_us"]
+
+    def test_renders_without_emoji(self) -> None:
+        """An unmapped tool still renders — emoji is decoration, not structure."""
+        text = _loading_status_text(("Mystery", "神秘工具"))
+        assert text["i18n_content"]["zh_cn"] == "  神秘工具"
 
     def test_label_lands_in_the_spinner_row(self) -> None:
-        el = _loading_element(("Read", "读取文件"))
+        el = _loading_element(("Read", "读取文件"), emoji="📄")
         assert el["element_id"] == _LOADING_ELEMENT_ID
         assert el["icon"]["tag"] == "custom_icon"  # the three dots
-        assert el["text"]["i18n_content"]["zh_cn"] == "正在调用 读取文件"
+        assert el["text"]["i18n_content"]["zh_cn"] == "  📄 读取文件"
 
     def test_spinner_row_adds_no_elements(self) -> None:
         from hermes_lark_streaming.cardkit.elements import _count_tag_objects
@@ -224,7 +299,7 @@ class TestLabelReachedFromRealFlush:
 
         updates = self._label_updates(client)
         assert updates, "spinner label was never sent during a real flush"
-        assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 终端命令"
+        assert "终端命令" in updates[-1]["text"]["i18n_content"]["zh_cn"]
 
     def test_label_stays_after_a_fast_tool_finishes(self) -> None:
         """The 1s terminal call that blinked and vanished on Feishu."""
@@ -241,7 +316,7 @@ class TestLabelReachedFromRealFlush:
 
         updates = self._label_updates(client)
         assert updates, "label was never sent"
-        assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 终端命令"
+        assert "终端命令" in updates[-1]["text"]["i18n_content"]["zh_cn"]
         blanks = [u for u in updates if u["text"].get("content") == " "]
         assert not blanks, "label must not blank out when a tool completes"
 
@@ -259,8 +334,8 @@ class TestLabelReachedFromRealFlush:
             loop.close()
 
         zh = [u["text"]["i18n_content"]["zh_cn"] for u in self._label_updates(client)]
-        assert zh[0] == "正在调用 终端命令"
-        assert zh[-1] == "正在调用 读取文件"
+        assert "终端命令" in zh[0]
+        assert "读取文件" in zh[-1]
 
     def test_label_survives_answer_only_flush(self) -> None:
         session, ctrl, client, loop = self._session_and_ctrl()
@@ -274,7 +349,7 @@ class TestLabelReachedFromRealFlush:
 
         updates = self._label_updates(client)
         assert updates, "label lost when an answer delta shares the flush"
-        assert updates[-1]["text"]["i18n_content"]["zh_cn"] == "正在调用 读取文件"
+        assert "读取文件" in updates[-1]["text"]["i18n_content"]["zh_cn"]
 
 
 class TestFooterStatusIcons:
@@ -329,6 +404,7 @@ def _make_session(**kwargs):
     session._streaming_closed = False
     session._loading_label = None
     session._loading_label_supported = True
+    session._loading_status_key = None
     session.sequence = 1
     session.text_sizes = {}
     session.tool_use = ToolUseTracker()
@@ -364,7 +440,7 @@ class TestSyncLoadingLabel:
         assert actions[0]["params"]["element_id"] == _LOADING_ELEMENT_ID
         partial = actions[0]["params"]["partial_element"]
         assert "tag" not in partial, "partial_update_element 不应带 tag"
-        assert partial["text"]["i18n_content"]["zh_cn"] == "正在调用 终端命令"
+        assert "终端命令" in partial["text"]["i18n_content"]["zh_cn"]
         assert session._loading_label == ("Terminal", "终端命令")
 
     def test_skips_when_unchanged(self) -> None:
@@ -400,7 +476,7 @@ class TestSyncLoadingLabel:
         asyncio.run(self._ctrl(client)._sync_loading_label(session))
 
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
-        assert partial["text"]["i18n_content"]["zh_cn"] == "正在调用 读取文件"
+        assert "读取文件" in partial["text"]["i18n_content"]["zh_cn"]
 
     def test_skips_after_loading_element_deleted(self) -> None:
         client = MagicMock()

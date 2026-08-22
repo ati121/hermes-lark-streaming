@@ -4,6 +4,63 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.11 (2026-08-22, personal fork)
+
+### Changed — spinner row reads as a status line, not a sentence
+
+- Each tool now shows an emoji before its name, resolved from the icon token
+  the tool already declares in `_TOOL_SPECS`. One entry per token covers a
+  whole family, so both the exact specs and the legacy alias table are handled
+  without a per-tool mapping; a by-name table sits above it for the tokens that
+  span unrelated tools (`time_outlined` is both memory and cron,
+  `report_outlined` is every media tool). MCP and unknown tools fall back to a
+  default mark, so the row never loses its shape.
+- Dropped the `正在调用` / `Calling ...` prefix from the row. The spinner
+  already reads as in-progress and every tool title is itself a verb phrase, so
+  the prefix was a third repetition — and produced doubled verbs on titles like
+  `读取文件`. The panel-title fallback keeps its prefix: there the label is
+  appended to `agent loop · …` and needs the verb to parse.
+- The thinking state carries its own emoji for the same reason, so the text
+  doesn't shift sideways when a tool takes over the row and hands it back.
+- Added leading padding (EN SPACE, not ASCII — a leading ASCII run is the sort
+  of thing a renderer feels free to collapse) so the text isn't crowded against
+  the spinner.
+
+Note: these are Unicode emoji, which Feishu renders in colour but not animated.
+Animated stickers need `lark_md`, and the row must stay `plain_text` — Feishu
+rejects a changed `tag` on a partial update, which would drop the status line
+into its degraded path.
+
+## v1.6.10 (2026-08-22, personal fork)
+
+### Fixed — 模型思考中 is now actually visible
+
+v1.6.9 pushed the status onto `context_loading_hint`, but that element is
+deleted in the same flush that renders the first visible content. The update
+and the deletion were one or two API round-trips apart, so the line was gone
+before it could be read: the card still appeared to jump from
+`等待上游模型响应` straight to the answer, and the status push was a wasted
+request. The scheduling was self-defeating too — `on_answer` flipped to
+`thinking` and fired a status-only flush, but that flush is fire-and-forget, so
+by the time it ran `answer_dirty` was already set and it took the full render
+path.
+
+- The status now lives on the spinner row (`loading_icon`), which survives
+  until the card is sealed. It shows `模型思考中...` / `Model is thinking...`
+  from the first upstream token, a running tool's name while a tool holds the
+  turn, and returns to thinking when the tool finishes.
+- A card created mid-stream opens directly on `模型思考中...` with no waiting
+  hint, instead of flashing a stale `等待上游模型响应`.
+- The waiting hint is dropped on the first upstream token even when that token
+  renders nothing visible (reasoning with the panel hidden), so the card can no
+  longer show `等待上游模型响应` above a spinner that says thinking.
+- Removed the now-redundant status-only flush from the answer path; the hint
+  rewrite is kept only as a fallback for cards where Feishu has rejected
+  spinner-row updates.
+- Content elements now anchor their `insert_before` to the hint when present
+  and to the spinner otherwise — the hint is absent on mid-stream cards, and
+  previously a discarded hint would have broken the insert.
+
 ## v1.6.9 (2026-08-22, personal fork)
 
 ### Fixed — first upstream byte always shows model thinking

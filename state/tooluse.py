@@ -15,6 +15,7 @@ __all__ = [
     "_redact_paths",
     "_resolve_tool_descriptor",
     "_sanitize_detail",
+    "_tool_emoji",
     "_TOOL_DESCRIPTORS",
     "_SENSITIVE_NAME_RE",
     "_INLINE_ASSIGNMENT_RE",
@@ -248,6 +249,63 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
 def _normalize_tool_name(name: str) -> str:
     return name.strip().lower().replace("-", "_")
 
+# ── Emoji shown beside the spinner while a tool runs ──────────────────────
+# Resolved in two layers. The icon token already encodes the design's own
+# grouping, so keying off it covers both _TOOL_SPECS and the legacy
+# _TOOL_DESCRIPTORS without a per-tool entry; the by-name table above it only
+# holds the cases where one token spans unrelated tools (memory and cron both
+# sit on time_outlined, every media tool on report_outlined).
+_TOOL_EMOJI_BY_NAME: dict[str, str] = {
+    "memory": "🧠",
+    "hindsight_retain": "🧠",
+    "hindsight_recall": "🧠",
+    "hindsight_reflect": "🧠",
+    "hindsight_operation": "🧠",
+    "cronjob": "⏰",
+    "clarify": "❓",
+    "todo": "📋",
+    "execute_code": "⚡",
+    "web_extract": "🌐",
+    "vision_analyze": "👁️",
+    "video_analyze": "🎬",
+    "image_generate": "🎨",
+    "video_generate": "🎬",
+    "text_to_speech": "🔊",
+    "send_message": "💬",
+    "react_to_message": "💬",
+}
+
+_TOOL_EMOJI_BY_ICON: dict[str, str] = {
+    "setting_outlined": "🖥️",
+    "file-link-text_outlined": "📄",
+    "edit_outlined": "✏️",
+    "doc-search_outlined": "🔎",
+    "search_outlined": "🔍",
+    "language_outlined": "🌐",
+    "app-default_outlined": "🧩",
+    "setting-inter_outlined": "🔧",
+    "time_outlined": "⏰",
+    "robot_outlined": "🤖",
+    "list-check_outlined": "📋",
+    "report_outlined": "📊",
+    "browser-mac_outlined": "🌐",
+    "folder_outlined": "📁",
+}
+
+_DEFAULT_TOOL_EMOJI = "🔧"
+
+def _tool_emoji(name: str | None) -> str:
+    """Emoji for a raw tool name — never empty, so the row can't jump around."""
+    if not name:
+        return _DEFAULT_TOOL_EMOJI
+    direct = _TOOL_EMOJI_BY_NAME.get(_normalize_tool_name(name))
+    if direct:
+        return direct
+    desc = _resolve_tool_descriptor(name)
+    if desc is not None:
+        return _TOOL_EMOJI_BY_ICON.get(str(desc.get("icon") or ""), _DEFAULT_TOOL_EMOJI)
+    return _DEFAULT_TOOL_EMOJI
+
 def _spec_to_descriptor(name: str, spec: tuple[str, str, str, str | None, bool]) -> dict[str, Any]:
     zh, en, icon, sanitizer, no_result = spec
     return {
@@ -357,6 +415,13 @@ class ToolUseTracker:
         if self._session is None or not self._session.steps:
             return None
         return _tool_display_names(self._session.steps[-1].name)
+
+    @property
+    def last_tool_emoji(self) -> str | None:
+        """Emoji for whichever tool ``last_tool_names`` is reporting."""
+        if self._session is None or not self._session.steps:
+            return None
+        return _tool_emoji(self._session.steps[-1].name)
 
     def record_start(self, name: str, detail: str = "") -> None:
         if self._session is None:

@@ -187,23 +187,39 @@ def _streaming_element(
 def _loading_status_text(
     label: tuple[str, str] | None = None,
     *,
+    status_key: str | None = None,
+    emoji: str | None = None,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Text object beside the spinner. ``label`` is the ``(en, zh)`` tool name.
+    """Text object beside the spinner.
+
+    ``label`` is the ``(en, zh)`` tool name and wins when a tool is running;
+    otherwise ``status_key`` names an entry in ``_T`` (e.g. ``model_thinking``).
+    With neither, the row renders blank.
+
+    The tool name carries no verb prefix: the spinner already reads as "in
+    progress" and every tool title is itself a verb phrase (读取文件,
+    写入文件), so a prefix would be the third thing saying the same word.
+    ``emoji`` and the leading space are what give the row its shape.
 
     Stays ``plain_text`` in every state — Feishu rejects a changed ``tag`` on a
-    partial update, so the blank and labelled forms must share one tag.
+    partial update, so the blank and labelled forms must share one tag. That
+    also rules out Feishu's animated sticker syntax, which needs ``lark_md``.
     """
-    if not label:
+    if label:
+        en_text, zh_text = label
+    elif status_key and status_key in _T:
+        en_text, zh_text = _T[status_key]
+    else:
         return {"tag": "plain_text", "content": " "}
-    en_name, zh_name = label
-    en_tpl, zh_tpl = _T["calling_tool"]
-    en_text = en_tpl.format(en_name)
-    zh_text = zh_tpl.format(zh_name)
+    mark = f"{emoji} " if emoji else ""
+    # EN SPACEs, not ASCII: a leading ASCII run is the kind of thing a renderer
+    # feels free to collapse, and this gap is doing layout work.
+    pad = "  "
     text: dict[str, Any] = {
         "tag": "plain_text",
-        "content": en_text,
-        "i18n_content": _i18n(en_text, zh_text),
+        "content": f"{pad}{mark}{en_text}",
+        "i18n_content": _i18n(f"{pad}{mark}{en_text}", f"{pad}{mark}{zh_text}"),
         "text_color": "grey",
     }
     return _set_text_size(text, _role_text_size(text_sizes, "notice", default="notation"))
@@ -211,6 +227,8 @@ def _loading_status_text(
 def _loading_element(
     label: tuple[str, str] | None = None,
     *,
+    status_key: str | None = None,
+    emoji: str | None = None,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
     """Loading spinner element (div with icon — div natively supports icon, markdown varies)."""
@@ -221,7 +239,9 @@ def _loading_element(
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
         },
-        "text": _loading_status_text(label, text_sizes=text_sizes),
+        "text": _loading_status_text(
+            label, status_key=status_key, emoji=emoji, text_sizes=text_sizes,
+        ),
         "element_id": _LOADING_ELEMENT_ID,
     }
 

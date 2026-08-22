@@ -315,6 +315,19 @@ def _setup_ctrl(*, linear: bool = False) -> StreamCardController:
     return ctrl
 
 
+def _all_batch_actions(ctrl: StreamCardController) -> list[dict]:
+    """Every action across every cardkit_batch_update call, in order.
+
+    A single flush can span several batches; assertions about what a flush
+    did — and, just as often, did not do — have to look at all of them.
+    """
+    return [
+        action
+        for call_ in ctrl._client.cardkit_batch_update.await_args_list
+        for action in call_.args[1]
+    ]
+
+
 @pytest.mark.asyncio
 async def test_create_linear_card_replies_to_anchor_id() -> None:
     """Anchor alias support: the linear card creator replies to ``anchor_id``
@@ -935,7 +948,8 @@ class TestDoUnifiedFlush:
         assert "panel" in session._creation_stages
 
     @pytest.mark.asyncio
-    async def test_loading_hint_changes_to_model_thinking(self) -> None:
+    async def test_spinner_carries_model_thinking(self) -> None:
+        """首字落地后，常驻的 spinner 行显示 模型思考中."""
         ctrl = _setup_ctrl()
         session = _make_session("msg_hint_thinking", linear=True)
         session.state = STREAMING
@@ -946,18 +960,23 @@ class TestDoUnifiedFlush:
 
         await ctrl._do_unified_flush(session)
 
-        actions = ctrl._client.cardkit_batch_update.await_args.args[1]
-        update = next(a for a in actions if a["action"] == "partial_update_element")
+        actions = _all_batch_actions(ctrl)
+        update = next(
+            a for a in actions
+            if a["action"] == "partial_update_element"
+            and a["params"]["element_id"] == _LOADING_ELEMENT_ID
+        )
+        assert "tag" not in update["params"]["partial_element"]
         partial = update["params"]["partial_element"]["text"]
-        assert "tag" not in partial
-        assert partial["i18n_content"]["zh_cn"] == "模型思考中..."
-        assert session._loading_hint_state == "model_thinking"
+        assert partial["i18n_content"]["zh_cn"] == "  💭 模型思考中..."
+        assert session._loading_status_key == "model_thinking"
 
-    def test_first_answer_delta_forces_thinking_flip(self) -> None:
-        """上游首字是 answer 而非 reasoning 时也要先翻到 thinking（v1.6.9）.
+    def test_first_answer_delta_lands_on_answer_phase(self) -> None:
+        """上游首字是 answer 时直接进入 answer 阶段，只调度一次 flush.
 
-        The placeholder must stop claiming 等待上游模型响应 the moment the
-        first upstream byte arrives, even when that byte is answer text.
+        v1.6.9 先把 phase 翻成 thinking 再 force 一次「只推状态」的 flush，
+        但那次 flush 是 fire-and-forget：真正执行时 ``answer_dirty`` 早已置位，
+        于是它走了完整路径，白花一次 API。spinner 行接手状态后不需要中间态。
         """
         ctrl = _setup_ctrl()
         session = _make_session("msg_first_answer", linear=True)
@@ -966,12 +985,11 @@ class TestDoUnifiedFlush:
         with patch.object(ctrl, "_schedule_linear_flush") as schedule:
             ctrl.on_answer(message_id="msg_first_answer", text="答")
 
-        assert schedule.call_args_list[0] == call(session, force=True)
-        # Phase lands on answer for the rest of the turn.
+        assert schedule.call_args_list == [call(session)]
         assert session._response_phase == "answer"
 
-    def test_subsequent_answer_deltas_do_not_re_force(self) -> None:
-        """只有首字节触发 force 状态推送，后续增量走正常节流."""
+    def test_subsequent_answer_deltas_schedule_normally(self) -> None:
+        """后续增量走正常节流，与首字调度方式一致."""
         ctrl = _setup_ctrl()
         session = _make_session("msg_second_answer", linear=True)
         session._response_phase = "answer"
@@ -983,12 +1001,13 @@ class TestDoUnifiedFlush:
         assert schedule.call_args_list == [call(session)]
 
     @pytest.mark.asyncio
-    async def test_answer_phase_hint_still_updates_to_model_thinking(self) -> None:
-        """首字为 answer 时，状态推送落地后 hint 也要变成 模型思考中.
+    async def test_model_thinking_survives_the_flush_that_renders_content(self) -> None:
+        """核心回归：思考中状态不能在写上去的同一次 flush 里被撤掉.
 
-        The status-only flush is asynchronous: by the time it runs, the
-        phase has already moved on to ``answer``. The hint update must not
-        be skipped just because the phase is no longer exactly ``thinking``.
+        v1.6.9 把状态写进 ``context_loading_hint``，而那个元素恰好在渲染首屏
+        内容的同一次 flush 里被 ``delete_elements`` 删除——推上去的文案随元素
+        一起消失，用户看到的是从 等待上游模型响应 直接跳到答案。改由常驻到
+        封盘的 spinner 行承载后，这里断言它确实活了下来。
         """
         ctrl = _setup_ctrl()
         session = _make_session("msg_answer_hint", linear=True)
@@ -1001,20 +1020,110 @@ class TestDoUnifiedFlush:
         ctrl.on_answer(message_id="msg_answer_hint", text="答")
         await ctrl._do_unified_flush(session)
 
-        update_actions = [
-            a
-            for calls in ctrl._client.cardkit_batch_update.await_args_list
-            for a in calls.args[1]
+        actions = _all_batch_actions(ctrl)
+        thinking = [
+            a for a in actions
             if a["action"] == "partial_update_element"
-            and a["params"].get("element_id") == _LOADING_HINT_ELEMENT_ID
+            and a["params"].get("element_id") == _LOADING_ELEMENT_ID
+            and a["params"]["partial_element"]["text"]
+            .get("i18n_content", {}).get("zh_cn", "").endswith("模型思考中...")
         ]
-        assert update_actions, "expected a loading-hint text update"
-        partial = update_actions[0]["params"]["partial_element"]["text"]
-        assert partial["i18n_content"]["zh_cn"] == "模型思考中..."
+        assert thinking, "spinner 行从未收到 模型思考中"
+
+        deleted = {
+            eid
+            for a in actions
+            if a["action"] == "delete_elements"
+            for eid in a["params"]["element_ids"]
+        }
+        assert _LOADING_ELEMENT_ID not in deleted, (
+            "承载 模型思考中 的元素在同一次 flush 里就被删了 —— 正是 v1.6.9 的 bug"
+        )
+        assert _LOADING_ELEMENT_ID in session.existing_elements
+        assert session._loading_status_key == "model_thinking"
 
     @pytest.mark.asyncio
-    async def test_creation_snapshot_shows_thinking_after_first_answer(self) -> None:
-        """卡片创建晚于上游首字时，初始占位直接就是 模型思考中."""
+    async def test_waiting_hint_dropped_once_spinner_owns_the_status(self) -> None:
+        """spinner 说思考中时，上方不能还挂着 等待上游模型响应.
+
+        show_reasoning 关闭时首个 reasoning delta 不产生任何可见内容，走不到
+        渲染分支——旧的删除条件只看可见内容，会让两行自相矛盾。
+        """
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_no_visible", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_no_visible"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session._response_phase = "thinking"
+        ctrl._sessions["msg_no_visible"] = session
+
+        await ctrl._do_unified_flush(session)
+
+        deleted = {
+            eid
+            for a in _all_batch_actions(ctrl)
+            if a["action"] == "delete_elements"
+            for eid in a["params"]["element_ids"]
+        }
+        assert _LOADING_HINT_ELEMENT_ID in deleted
+        assert _LOADING_HINT_ELEMENT_ID not in session.existing_elements
+
+    @pytest.mark.asyncio
+    async def test_hint_carries_status_when_spinner_updates_rejected(self) -> None:
+        """飞书拒绝 spinner 文案更新时，回落到由 hint 承载状态."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_fallback", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_fallback"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session._response_phase = "thinking"
+        session._loading_label_supported = False  # spinner 更新已被拒过
+        ctrl._sessions["msg_fallback"] = session
+
+        await ctrl._do_unified_flush(session)
+
+        hint_update = next(
+            a for a in _all_batch_actions(ctrl)
+            if a["action"] == "partial_update_element"
+            and a["params"].get("element_id") == _LOADING_HINT_ELEMENT_ID
+        )
+        partial = hint_update["params"]["partial_element"]["text"]
+        assert partial["i18n_content"]["zh_cn"] == "模型思考中..."
+        assert session._loading_hint_state == "model_thinking"
+        # 降级时 hint 是唯一的状态载体，不能被顺手删掉
+        assert _LOADING_HINT_ELEMENT_ID in session.existing_elements
+
+    @pytest.mark.asyncio
+    async def test_spinner_returns_to_thinking_after_a_tool_finishes(self) -> None:
+        """工具跑完、答案接上时，spinner 从工具名切回 模型思考中."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_tool_answer", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_tool_answer"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session._response_phase = "waiting"
+        ctrl._sessions["msg_tool_answer"] = session
+
+        ctrl.on_tool_update(
+            message_id="msg_tool_answer", tool_name="read_file",
+            status="running", detail="",
+        )
+        await ctrl._do_unified_flush(session)
+        assert session._loading_label == ("Read", "读取文件")
+
+        ctrl.on_tool_update(
+            message_id="msg_tool_answer", tool_name="read_file",
+            status="completed", detail="ok",
+        )
+        ctrl.on_answer(message_id="msg_tool_answer", text="结论")
+        await ctrl._do_unified_flush(session)
+
+        assert session._loading_label is None
+        assert session._loading_status_key == "model_thinking"
+
+    @pytest.mark.asyncio
+    async def test_creation_snapshot_opens_on_thinking_after_first_answer(self) -> None:
+        """卡片创建晚于上游首字时，直接以 模型思考中 开场，不挂等待提示."""
         ctrl = _setup_ctrl(linear=True)
         session = _make_session("msg_late_card", linear=True)
         session._response_phase = "answer"  # upstream already responded
@@ -1023,16 +1132,21 @@ class TestDoUnifiedFlush:
         await ctrl._do_create_linear_card(session)
 
         card = ctrl._client.cardkit_create.await_args.args[0]
-        hint = next(
-            e for e in card["body"]["elements"]
-            if e.get("element_id") == _LOADING_HINT_ELEMENT_ID
+        element_ids = [e.get("element_id") for e in card["body"]["elements"]]
+        assert _LOADING_HINT_ELEMENT_ID not in element_ids, (
+            "首字已到，卡片不该再闪一下 等待上游模型响应"
         )
-        assert hint["text"]["i18n_content"]["zh_cn"] == "模型思考中..."
-        assert session._loading_hint_state == "model_thinking"
+        spinner = next(
+            e for e in card["body"]["elements"]
+            if e.get("element_id") == _LOADING_ELEMENT_ID
+        )
+        assert spinner["text"]["i18n_content"]["zh_cn"].endswith("模型思考中...")
+        assert session._loading_status_key == "model_thinking"
+        assert _LOADING_HINT_ELEMENT_ID not in session.existing_elements
 
     @pytest.mark.asyncio
     async def test_creation_snapshot_keeps_waiting_before_any_token(self) -> None:
-        """一个字节都没收到时，初始占位仍是 等待上游模型响应."""
+        """一个字节都没收到时，初始占位仍是 等待上游模型响应，spinner 留空."""
         ctrl = _setup_ctrl(linear=True)
         session = _make_session("msg_early_card", linear=True)
         assert session._response_phase == "waiting"
@@ -1046,6 +1160,13 @@ class TestDoUnifiedFlush:
             if e.get("element_id") == _LOADING_HINT_ELEMENT_ID
         )
         assert hint["text"]["i18n_content"]["zh_cn"] == "等待上游模型响应"
+        spinner = next(
+            e for e in card["body"]["elements"]
+            if e.get("element_id") == _LOADING_ELEMENT_ID
+        )
+        assert "i18n_content" not in spinner["text"], "还没首字，spinner 不该抢先说思考中"
+        assert session._loading_status_key is None
+        assert _LOADING_HINT_ELEMENT_ID in session.existing_elements
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("code", [230020, 300309])
