@@ -4,6 +4,17 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.13 (2026-08-23, personal fork)
+
+### Fixed — first upstream activity now shows model thinking
+
+- Treats reasoning markers such as `<think>` and `Reasoning:` as upstream
+  activity even when the first chunk has no visible answer text.
+- Treats whitespace-only control chunks the same way without starting the
+  visible-answer speed timer.
+- Ensures the spinner transitions from `等待上游模型响应` to `模型思考中...`
+  during the first model generation phase, including after a tool call.
+
 ## v1.6.12 (2026-08-22, personal fork)
 
 ### Removed — upstream Gitee release tooling

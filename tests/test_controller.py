@@ -442,6 +442,46 @@ class TestLinearDispatch:
         assert session.unified_state.answer_dirty is True
         assert session._response_phase == "answer"
 
+    def test_reasoning_marker_answer_delta_enters_thinking(self) -> None:
+        """A marker-only stream chunk still means the model has started."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_marker_answer", linear=True)
+        ctrl._sessions["msg_marker_answer"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            ctrl.on_answer(message_id="msg_marker_answer", text="<think>")
+
+        assert session._response_phase == "thinking"
+        assert session.unified_state is not None
+        assert session.unified_state.has_dirty is False
+        schedule.assert_called_once_with(session, force=True)
+
+    def test_reasoning_marker_thinking_delta_enters_thinking(self) -> None:
+        """A standalone interim marker must not leave the card waiting."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_marker_thinking", linear=True)
+        ctrl._sessions["msg_marker_thinking"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            ctrl.on_thinking(message_id="msg_marker_thinking", text="<think>")
+
+        assert session._response_phase == "thinking"
+        schedule.assert_called_once_with(session, force=True)
+
+    def test_whitespace_answer_delta_enters_thinking_without_starting_speed(self) -> None:
+        """Invisible upstream output must not start the visible-answer timer."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_whitespace_answer", linear=True)
+        ctrl._sessions["msg_whitespace_answer"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            ctrl.on_answer(message_id="msg_whitespace_answer", text="\n")
+
+        assert session._response_phase == "thinking"
+        assert session._first_answer_time == 0.0
+        assert session._last_answer_time == 0.0
+        schedule.assert_called_once_with(session, force=True)
+
     def test_linear_thinking_dispatches(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_t", linear=True)

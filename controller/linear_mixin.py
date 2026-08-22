@@ -914,6 +914,13 @@ class UnifiedControllerMixin:
             # Same first-token rule as on_answer: interim text counts as the
             # upstream's first response even without reasoning markers.
             session._response_phase = "answer"
+        elif text:
+            # Some providers emit a standalone reasoning marker first (for
+            # example ``<think>``). There is no visible content to add yet,
+            # but the upstream has already spoken and the waiting hint must
+            # yield to the thinking state.
+            phase_changed = session._response_phase != "thinking"
+            session._response_phase = "thinking"
 
         state = session.unified_state
         if state is None:
@@ -941,8 +948,8 @@ class UnifiedControllerMixin:
                     )
                     state.on_answer_delta(_new_part)
             # else: text is same length or shorter - already captured, skip
-        if reasoning or answer:
-            self._schedule_linear_flush(session, force=bool(reasoning and phase_changed))
+        if reasoning or answer or phase_changed:
+            self._schedule_linear_flush(session, force=phase_changed)
 
     async def _preservative_seal(
         self,

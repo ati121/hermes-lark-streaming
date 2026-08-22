@@ -504,12 +504,26 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         answer_text = strip_reasoning_tags(text)
-        if answer_text:
-            # 上游首字即思考：the first token may be answer text rather than
-            # reasoning. The spinner row picks up 模型思考中 from this phase
-            # on the flush scheduled below, and keeps showing it for the rest
-            # of the stream — no separate status-only push needed.
-            session._response_phase = "answer"
+        if text:
+            # A stream callback can carry a reasoning marker (for example
+            # ``<think>``) before it carries any visible answer text. It is
+            # still upstream activity, so the card must leave the waiting
+            # state immediately instead of waiting for a renderable delta.
+            if answer_text.strip():
+                # The spinner row carries 模型思考中 for visible answer deltas
+                # too; ``answer`` is retained here for timing and tool-phase
+                # bookkeeping.
+                session._response_phase = "answer"
+            else:
+                phase_changed = session._response_phase != "thinking"
+                session._response_phase = "thinking"
+
+            if not answer_text.strip():
+                self._schedule_linear_flush(session, force=phase_changed)
+                return
+
+            # The spinner row picks up 模型思考中 from this phase on the flush
+            # scheduled below, and keeps showing it for the rest of the stream.
             now = time.monotonic()
             if session._first_answer_time == 0.0:
                 session._first_answer_time = now
