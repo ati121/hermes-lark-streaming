@@ -19,6 +19,8 @@ import pytest
 from hermes_lark_streaming.patching import (
     _msg_ctx,
     _maybe_wrap_callbacks,
+    _session_contexts,
+    _session_contexts_lock,
     _thread_local_ctx,
 )
 
@@ -77,6 +79,8 @@ def _clear_msg_ctx() -> None:
     """Clear message context."""
     _msg_ctx.set(None)
     _thread_local_ctx.data = None
+    with _session_contexts_lock:
+        _session_contexts.clear()
 
 
 # ── answer_wrapper tests ──
@@ -346,6 +350,41 @@ class TestNoFeishuContext:
         # 回调应保持原样(没被包装)
         assert agent.stream_delta_callback is orig_stream
         assert agent.interim_assistant_callback is orig_interim
+
+    def test_message_id_fallback_wraps_recovery_turn(self):
+        """A recovery turn without a platform event id still uses its card id."""
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _msg_ctx.set({
+                "message_id": "hls-recovery-chat-123",
+                "event_message_id": "",
+                "card_sent": False,
+            })
+            _thread_local_ctx.data = dict(_msg_ctx.get())
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent.stream_delta_callback("recovered output")
+
+            assert mock_ctrl.on_answer.call_count == 1
+            assert len(agent.stream_calls) == 0
+
+    def test_session_registry_wraps_when_contextvar_is_missing(self):
+        """Hermes worker threads can recover the turn id from session_id."""
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            agent = FakeAgent()
+            agent.session_id = "session-worker-123"
+            with _session_contexts_lock:
+                _session_contexts[agent.session_id] = {
+                    "message_id": "msg-from-registry",
+                    "event_message_id": "msg-from-registry",
+                }
+
+            _maybe_wrap_callbacks(agent)
+            agent.tool_progress_callback("tool.started", "terminal", "ls")
+
+            mock_ctrl.on_tool_update.assert_called_once()
 
 
 # ── Double-wrap guard tests ──

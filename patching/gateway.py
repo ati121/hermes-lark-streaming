@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import time
+import uuid
 from typing import Any, Callable
 
 from .. import __version__
@@ -14,6 +15,8 @@ from . import (
     _started_msg_ids_lock,
     _thread_local_ctx,
     _logger,
+    _session_contexts,
+    _session_contexts_lock,
 )
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
@@ -83,8 +86,21 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     @functools.wraps(orig)
     async def wrapper(self, event, source, *args, **kwargs):
-        mid = event.message_id
+        mid = getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
         anchor_id = self._reply_anchor_for_event(event)
+        if not mid:
+            # Gateway recovery events can be reconstructed without the
+            # platform message id. Keep them on the streaming-card path with
+            # a process-local id instead of falling through to standalone
+            # gateway cards. There is no valid platform reply target in this
+            # case, so the synthetic id is only used internally by HLS.
+            chat_id_for_id = getattr(source, "chat_id", "") or "unknown"
+            mid = f"hls-recovery-{chat_id_for_id}-{uuid.uuid4().hex}"
+            anchor_id = None
+            _logger.warning(
+                "HLS: inbound event missing message_id; using synthetic id=%s",
+                mid[:48],
+            )
         chat_id = source.chat_id if hasattr(source, "chat_id") else ""
 
         # Track this message as started (for interrupt detection)
@@ -257,16 +273,24 @@ def _wrap_run_agent(orig: Callable) -> Callable:
         _saved_parent_ctx = None  # Will hold parent context for restoration
         _original_msg_context_ref = None  # Reference to the original msg_context dict
         ctx = _msg_ctx.get()
-        if ctx is not None and event_message_id:
-            if _interrupt_depth > 0 and ctx.get("event_message_id") != event_message_id:
+        # A resumed/recovery turn may not carry Hermes' platform event id.
+        # The message wrapper above still gives it an internal id so all
+        # streaming callbacks share the same card session.
+        effective_event_message_id = (
+            event_message_id
+            or (ctx or {}).get("event_message_id")
+            or (ctx or {}).get("message_id")
+        )
+        if ctx is not None and effective_event_message_id:
+            if _interrupt_depth > 0 and ctx.get("event_message_id") != effective_event_message_id:
                 # BUG FIX (v0.15.4): We must keep a reference to the original
                 _original_msg_context_ref = ctx.get("_original_msg_context_ref") or ctx
                 _saved_parent_ctx = dict(ctx)  # Save a copy for restoration after orig()
                 ctx = {
-                    "message_id": event_message_id,
+                    "message_id": effective_event_message_id,
                     "chat_id": ctx.get("chat_id", ""),
                     "anchor_id": ctx.get("anchor_id"),
-                    "event_message_id": event_message_id,
+                    "event_message_id": effective_event_message_id,
                     "card_sent": False,
                     "_msg_start_time": time.monotonic(),
                     "_agent_ref": None,
@@ -282,9 +306,9 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     from .hooks import on_message_interrupted
                     on_message_interrupted(
                         message_id=_saved_parent_ctx.get("message_id", ""),
-                        new_message_id=event_message_id,
+                        new_message_id=effective_event_message_id,
                         chat_id=ctx["chat_id"],
-                        anchor_id=event_message_id,
+                        anchor_id=effective_event_message_id,
                     )
                 except Exception:
                     _logger.debug("run_agent: interrupt hook failed", exc_info=True)
@@ -293,16 +317,21 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 try:
                     from .hooks import on_message_started
                     on_message_started(
-                        message_id=event_message_id,
+                        message_id=effective_event_message_id,
                         chat_id=ctx["chat_id"],
-                        anchor_id=event_message_id,
+                        anchor_id=effective_event_message_id,
                     )
                 except Exception:
                     _logger.warning("HLS: suppressed exception", exc_info=True)
             else:
-                ctx["event_message_id"] = event_message_id
+                ctx["event_message_id"] = effective_event_message_id
             # Copy to thread-local for thread-pool workers
             _thread_local_ctx.data = dict(ctx)
+
+        _registered_session_id = str(session_id or "")
+        if _registered_session_id and ctx is not None:
+            with _session_contexts_lock:
+                _session_contexts[_registered_session_id] = dict(ctx)
 
         # v1.3.4 fix (P1): 确保 orig() 抛异常时 _saved_parent_ctx 被恢复。
         # 错误的 message_id（"wrong card gets completion" bug）。
@@ -322,6 +351,9 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 **kwargs,
             )
         except BaseException:
+            if _registered_session_id:
+                with _session_contexts_lock:
+                    _session_contexts.pop(_registered_session_id, None)
             if _saved_parent_ctx is not None:
                 _msg_ctx.set(_saved_parent_ctx)
                 _thread_local_ctx.data = dict(_saved_parent_ctx)
@@ -490,6 +522,10 @@ def _wrap_run_agent(orig: Callable) -> Callable:
         if _saved_parent_ctx is not None:
             _msg_ctx.set(_saved_parent_ctx)
             _thread_local_ctx.data = dict(_saved_parent_ctx)
+
+        if _registered_session_id:
+            with _session_contexts_lock:
+                _session_contexts.pop(_registered_session_id, None)
 
         return result
 

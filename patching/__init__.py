@@ -28,6 +28,8 @@ __all__ = [
     '_started_msg_ids_lock',
     '_gateway_cards',
     '_gateway_cards_lock',
+    '_session_contexts',
+    '_session_contexts_lock',
     '_gw_runner_patched',
     '_patch_status',
     # v1.4.0: FeishuAdapter patched-class registry (deferred loading fix)
@@ -110,6 +112,13 @@ _started_msg_ids_lock = threading.Lock()
 _gateway_cards: dict[str, dict[str, Any]] = {}
 _gateway_cards_lock = threading.Lock()
 
+# Explicit cross-thread context handoff keyed by Hermes session id. Hermes
+# executes AIAgent.run_conversation in a worker thread; ContextVar propagation
+# has changed across gateway releases, while the session id is stable on both
+# sides of that boundary.
+_session_contexts: dict[str, dict[str, Any]] = {}
+_session_contexts_lock = threading.Lock()
+
 _gw_runner_patched: bool = False
 
 _patch_status: dict[str, Any] = {}
@@ -142,7 +151,10 @@ def _get_event_message_id() -> str | None:
         ctx = _get_thread_local_ctx()
     if ctx is None:
         return None
-    return ctx.get("event_message_id")
+    # Recovery turns may not have a platform event id. The per-turn
+    # message_id is still unique inside the controller and is sufficient to
+    # keep all callbacks on the same streaming card.
+    return ctx.get("event_message_id") or ctx.get("message_id")
 
 def _get_thread_local_ctx() -> dict | None:
     return getattr(_thread_local_ctx, "data", None)

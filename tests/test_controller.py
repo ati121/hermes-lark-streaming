@@ -298,6 +298,8 @@ def _mock_client() -> AsyncMock:
     client.cardkit_create = AsyncMock(return_value="card_id_abc")
     client.reply_card_by_id = AsyncMock(return_value="msg_id_reply")
     client.reply_card = AsyncMock(return_value="msg_id_reply")
+    client.send_card_to_chat = AsyncMock(return_value="msg_id_standalone")
+    client.send_card_by_id_to_chat = AsyncMock(return_value="msg_id_standalone")
     client.cardkit_batch_update = AsyncMock()
     client.cardkit_stream_element = AsyncMock()
     client.cardkit_close_streaming = AsyncMock()
@@ -746,6 +748,19 @@ class TestInteractiveDeviceTextSizeTransport:
         card = ctrl._client.reply_card.call_args.args[1]
         assert "streaming_mode" not in card["config"]
         assert card["config"]["style"]["text_size"]["hls_body"]["mobile"] == "large"
+
+    @pytest.mark.asyncio
+    async def test_recovery_create_sends_standalone_interactive_card(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        self._enable_device_sizes(ctrl)
+        session = _make_session("hls-recovery-chat-123")
+
+        await ctrl._do_create_linear_card(session)
+
+        ctrl._client.send_card_to_chat.assert_called_once()
+        assert ctrl._client.send_card_to_chat.call_args.args[0] == session.chat_id
+        ctrl._client.reply_card.assert_not_called()
+        assert session.card_msg_id == "msg_id_standalone"
 
     @pytest.mark.asyncio
     async def test_flush_replaces_whole_interactive_card(self) -> None:

@@ -9,6 +9,8 @@ from . import (
     _thread_local_ctx,
     _logger,
     _get_event_message_id,
+    _session_contexts,
+    _session_contexts_lock,
 )
 
 def _resolve_eid(fallback_eid: str | None) -> str | None:
@@ -16,13 +18,24 @@ def _resolve_eid(fallback_eid: str | None) -> str | None:
     _eid = _get_event_message_id()
     return _eid if _eid else fallback_eid
 
+def _registered_eid(agent) -> str | None:
+    """Resolve the turn id explicitly registered before the executor hop."""
+    session_id = str(getattr(agent, "session_id", None) or "")
+    if not session_id:
+        return None
+    with _session_contexts_lock:
+        ctx = _session_contexts.get(session_id)
+        if not ctx:
+            return None
+        return ctx.get("event_message_id") or ctx.get("message_id")
+
 def _maybe_wrap_callbacks(agent) -> None:
     """Replace streaming callbacks on *agent* with wrappers that also fire
     Feishu CardKit updates.  Skips silently when outside a Feishu message
     context (i.e. no event_message_id in context)."""
     _logger.debug("HLS: _maybe_wrap_callbacks invoked, has_stream=%s, eid_lookup=%s", bool(getattr(agent, "stream_delta_callback", None)), bool(_get_event_message_id()))
 
-    eid = _get_event_message_id()
+    eid = _get_event_message_id() or _registered_eid(agent)
     if not eid:
         _logger.debug("HLS: skip — no event_message_id in ctx")
         return  # Not in a hermes-lark-streaming context — skip

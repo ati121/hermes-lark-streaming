@@ -72,7 +72,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
         # ── Agent path: suppress duplicate text reply ──
         ctx = _msg_ctx.get(None)
         if ctx is not None:
-            eid = ctx.get("event_message_id", "")
+            eid = ctx.get("event_message_id") or ctx.get("message_id") or ""
             if eid:
                 # We're inside an agent message pipeline.
                 # If card was already sent, suppress the gateway's text reply.

@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.14 (2026-08-23, personal fork)
+
+### Fixed — recovery turns keep the unified streaming card
+
+- Assigns an internal message id when Hermes reconstructs a gateway recovery
+  event without a platform message id, so the turn stays on the streaming-card
+  path instead of producing standalone gateway cards.
+- Sends recovery cards directly to the chat when there is no valid reply
+  anchor, while preserving CardKit updates for the rest of the turn.
+- Registers the active turn context by Hermes session id so worker-thread
+  callbacks still reach the answer, reasoning, and tool-card handlers when
+  `ContextVar` propagation is unavailable.
+
 ## v1.6.13 (2026-08-23, personal fork)
 
 ### Fixed — first upstream activity now shows model thinking

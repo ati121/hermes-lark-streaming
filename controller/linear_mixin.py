@@ -217,10 +217,14 @@ class UnifiedControllerMixin:
 
             try:
                 reply_to = session.anchor_id or session.message_id
+                standalone = session.message_id.startswith("hls-recovery-")
                 include_hint = False
                 if session.interactive_mode:
                     card = self._build_interactive_linear_card(session)
-                    card_msg_id = await self._client.reply_card(reply_to, card)
+                    if standalone:
+                        card_msg_id = await self._client.send_card_to_chat(session.chat_id, card)
+                    else:
+                        card_msg_id = await self._client.reply_card(reply_to, card)
                     # 现有生命周期守卫使用 card_id 作为卡片已就绪标记。
                     session.card_id = f"im:{card_msg_id}"
                 else:
@@ -242,7 +246,12 @@ class UnifiedControllerMixin:
                         text_sizes=session.text_sizes,
                     )
                     card_id = await self._client.cardkit_create(card)
-                    card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
+                    if standalone:
+                        card_msg_id = await self._client.send_card_by_id_to_chat(
+                            session.chat_id, card_id
+                        )
+                    else:
+                        card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
                     session.card_id = card_id
                     session._loading_hint_state = "loading_context"
                     session._loading_label = label
