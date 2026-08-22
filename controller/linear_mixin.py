@@ -174,7 +174,7 @@ class UnifiedControllerMixin:
             if not elements:
                 hint_key = (
                     "model_thinking"
-                    if session._response_phase == "thinking"
+                    if session._response_phase != "waiting"
                     else "loading_context"
                 )
                 elements.append(_loading_hint_element(hint_key))
@@ -219,7 +219,7 @@ class UnifiedControllerMixin:
                 else:
                     loading_hint_status = (
                         "model_thinking"
-                        if session._response_phase == "thinking"
+                        if session._response_phase != "waiting"
                         else "loading_context"
                     )
                     card = build_streaming_card_v2(
@@ -739,13 +739,15 @@ class UnifiedControllerMixin:
         return self._current_tool_label(session)
 
     async def _sync_loading_context(self, session: CardSession) -> None:
-        """Replace the upstream-waiting hint once reasoning starts."""
+        """Replace the upstream-waiting hint once the model starts responding."""
         if session.interactive_mode or session._streaming_closed:
             return
         if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
             return
 
-        if session._response_phase != "thinking":
+        # Only a session that has not received a single upstream byte still
+        # shows 等待上游模型响应 — thinking, tool, and answer all mean active.
+        if session._response_phase == "waiting":
             return
         status_key = "model_thinking"
         if status_key == session._loading_hint_state:
@@ -847,6 +849,11 @@ class UnifiedControllerMixin:
             phase_changed = session._response_phase != "thinking"
             session._response_phase = "thinking"
         elif answer:
+            # Same first-token rule as on_answer: interim text counts as the
+            # upstream's first response even without reasoning markers.
+            if session._response_phase == "waiting":
+                session._response_phase = "thinking"
+                self._schedule_linear_flush(session, force=True)
             session._response_phase = "answer"
 
         state = session.unified_state

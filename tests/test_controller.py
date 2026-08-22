@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -952,6 +952,100 @@ class TestDoUnifiedFlush:
         assert "tag" not in partial
         assert partial["i18n_content"]["zh_cn"] == "模型思考中..."
         assert session._loading_hint_state == "model_thinking"
+
+    def test_first_answer_delta_forces_thinking_flip(self) -> None:
+        """上游首字是 answer 而非 reasoning 时也要先翻到 thinking（v1.6.9）.
+
+        The placeholder must stop claiming 等待上游模型响应 the moment the
+        first upstream byte arrives, even when that byte is answer text.
+        """
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_first_answer", linear=True)
+        ctrl._sessions["msg_first_answer"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            ctrl.on_answer(message_id="msg_first_answer", text="答")
+
+        assert schedule.call_args_list[0] == call(session, force=True)
+        # Phase lands on answer for the rest of the turn.
+        assert session._response_phase == "answer"
+
+    def test_subsequent_answer_deltas_do_not_re_force(self) -> None:
+        """只有首字节触发 force 状态推送，后续增量走正常节流."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_second_answer", linear=True)
+        session._response_phase = "answer"
+        ctrl._sessions["msg_second_answer"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            ctrl.on_answer(message_id="msg_second_answer", text="案")
+
+        assert schedule.call_args_list == [call(session)]
+
+    @pytest.mark.asyncio
+    async def test_answer_phase_hint_still_updates_to_model_thinking(self) -> None:
+        """首字为 answer 时，状态推送落地后 hint 也要变成 模型思考中.
+
+        The status-only flush is asynchronous: by the time it runs, the
+        phase has already moved on to ``answer``. The hint update must not
+        be skipped just because the phase is no longer exactly ``thinking``.
+        """
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_answer_hint", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_answer_hint"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session._response_phase = "waiting"
+        ctrl._sessions["msg_answer_hint"] = session
+
+        ctrl.on_answer(message_id="msg_answer_hint", text="答")
+        await ctrl._do_unified_flush(session)
+
+        update_actions = [
+            a
+            for calls in ctrl._client.cardkit_batch_update.await_args_list
+            for a in calls.args[1]
+            if a["action"] == "partial_update_element"
+            and a["params"].get("element_id") == _LOADING_HINT_ELEMENT_ID
+        ]
+        assert update_actions, "expected a loading-hint text update"
+        partial = update_actions[0]["params"]["partial_element"]["text"]
+        assert partial["i18n_content"]["zh_cn"] == "模型思考中..."
+
+    @pytest.mark.asyncio
+    async def test_creation_snapshot_shows_thinking_after_first_answer(self) -> None:
+        """卡片创建晚于上游首字时，初始占位直接就是 模型思考中."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_late_card", linear=True)
+        session._response_phase = "answer"  # upstream already responded
+        ctrl._sessions["msg_late_card"] = session
+
+        await ctrl._do_create_linear_card(session)
+
+        card = ctrl._client.cardkit_create.await_args.args[0]
+        hint = next(
+            e for e in card["body"]["elements"]
+            if e.get("element_id") == _LOADING_HINT_ELEMENT_ID
+        )
+        assert hint["text"]["i18n_content"]["zh_cn"] == "模型思考中..."
+        assert session._loading_hint_state == "model_thinking"
+
+    @pytest.mark.asyncio
+    async def test_creation_snapshot_keeps_waiting_before_any_token(self) -> None:
+        """一个字节都没收到时，初始占位仍是 等待上游模型响应."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_early_card", linear=True)
+        assert session._response_phase == "waiting"
+        ctrl._sessions["msg_early_card"] = session
+
+        await ctrl._do_create_linear_card(session)
+
+        card = ctrl._client.cardkit_create.await_args.args[0]
+        hint = next(
+            e for e in card["body"]["elements"]
+            if e.get("element_id") == _LOADING_HINT_ELEMENT_ID
+        )
+        assert hint["text"]["i18n_content"]["zh_cn"] == "等待上游模型响应"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("code", [230020, 300309])

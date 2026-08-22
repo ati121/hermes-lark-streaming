@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.9 (2026-08-22, personal fork)
+
+### Fixed — first upstream byte always shows model thinking
+
+- The placeholder switches from `等待上游模型响应` / `Waiting for upstream
+  model...` to `模型思考中...` / `Model is thinking...` on the first upstream
+  token of any kind. Previously only reasoning/thinking callbacks triggered
+  the switch; a turn whose first delta was answer text jumped straight past
+  it, leaving the stale waiting hint (or a blank card) until the answer
+  element rendered.
+- Tool-only openings (a model call that starts with a tool call and emits no
+  text) are also treated as upstream activity for the creation-time snapshot.
+
 ## v1.6.8 (2026-08-21, personal fork)
 
 ### Fixed — distinguish upstream waiting from model thinking

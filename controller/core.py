@@ -505,6 +505,14 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         answer_text = strip_reasoning_tags(text)
         if answer_text:
+            # 上游首字即思考：the first token may be answer text rather than
+            # reasoning, but the placeholder must still stop claiming that
+            # Hermes is waiting for the upstream model. Flip to thinking and
+            # push the status-only hint update before the answer flow below
+            # renders content and deletes the hint.
+            if session._response_phase == "waiting":
+                session._response_phase = "thinking"
+                self._schedule_linear_flush(session, force=True)
             session._response_phase = "answer"
             now = time.monotonic()
             if session._first_answer_time == 0.0:
