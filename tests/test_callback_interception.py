@@ -40,6 +40,9 @@ class FakeAgent:
     def __init__(self):
         self.stream_calls = []
         self.interim_calls = []
+        self.tool_gen_calls = []
+        self.tool_progress_calls = []
+        self.first_delta_calls = []
 
         def _stream_cb(text, *args, **kwargs):
             self.stream_calls.append({"text": text, "args": args, "kwargs": kwargs})
@@ -47,9 +50,28 @@ class FakeAgent:
         def _interim_cb(text, *args, **kwargs):
             self.interim_calls.append({"text": text, "args": args, "kwargs": kwargs})
 
+        def _tool_gen_cb(tool_name, *args, **kwargs):
+            self.tool_gen_calls.append({
+                "tool_name": tool_name, "args": args, "kwargs": kwargs,
+            })
+
+        def _tool_progress_cb(*args, **kwargs):
+            self.tool_progress_calls.append({"args": args, "kwargs": kwargs})
+
+        def _streaming_call_cb(api_kwargs, *args, **kwargs):
+            self.first_delta_calls.append({
+                "api_kwargs": api_kwargs, "args": args, "kwargs": kwargs,
+            })
+            callback = kwargs.get("on_first_delta")
+            if callback:
+                callback()
+            return "stream-result"
+
         self.stream_delta_callback = _stream_cb
         self.interim_assistant_callback = _interim_cb
-        self.tool_progress_callback = lambda *a, **k: None
+        self.tool_gen_callback = _tool_gen_cb
+        self.tool_progress_callback = _tool_progress_cb
+        self._interruptible_streaming_api_call = _streaming_call_cb
         self.reasoning_callback = None
         self.background_review_callback = None
 
@@ -304,6 +326,125 @@ class TestThinkingWrapperDedup:
             # stream 也不应被调(卡片消费了)
             assert len(agent.stream_calls) == 0
 
+
+class TestUpstreamActivityCallbacks:
+    """Non-text first events must still leave the waiting state."""
+
+    def setup_method(self):
+        _clear_msg_ctx()
+
+    def teardown_method(self):
+        _clear_msg_ctx()
+
+    def test_tool_generation_marks_model_active_and_skips_original(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent.tool_gen_callback("terminal")
+
+            mock_ctrl.on_model_activity.assert_called_once_with(
+                message_id="test_eid_123456789",
+                source="tool.generating:terminal",
+            )
+            assert agent.tool_gen_calls[0]["tool_name"] == "terminal"
+
+    def test_tool_generation_falls_through_when_card_disabled(self):
+        mock_ctrl = MagicMock()
+        mock_ctrl.enabled = False
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent.tool_gen_callback("terminal")
+
+            assert agent.tool_gen_calls[0]["tool_name"] == "terminal"
+
+    def test_first_stream_delta_marks_model_active_before_payload(self):
+        mock_ctrl = _make_mock_ctrl()
+        original_first = MagicMock()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            result = agent._interruptible_streaming_api_call(
+                {"model": "test"}, on_first_delta=original_first,
+            )
+
+            assert result == "stream-result"
+            mock_ctrl.on_model_activity.assert_called_once_with(
+                message_id="test_eid_123456789",
+                source="stream.first_delta",
+            )
+            original_first.assert_called_once_with()
+
+    def test_reasoning_available_stays_inside_card(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent.tool_progress_callback(
+                "reasoning.available", "_thinking", "checking the request", None,
+            )
+
+            mock_ctrl.on_reasoning.assert_called_once_with(
+                message_id="test_eid_123456789",
+                text="checking the request",
+            )
+            assert agent.tool_progress_calls == []
+
+    def test_empty_reasoning_available_marks_model_active(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent.tool_progress_callback(
+                "reasoning.available", "_thinking", "", None,
+            )
+
+            mock_ctrl.on_model_activity.assert_called_once_with(
+                message_id="test_eid_123456789",
+                source="reasoning.available",
+            )
+            assert agent.tool_progress_calls == []
+
+    def test_cached_tool_generation_callback_uses_current_session_registry(self):
+        """A cached agent must not send the next turn's activity to the old card."""
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx("old_eid")
+            agent = FakeAgent()
+            agent.session_id = "cached-session"
+            _maybe_wrap_callbacks(agent)
+
+            _msg_ctx.set(None)
+            # The worker thread can retain the previous turn here.  The live
+            # session registry must win over this stale compatibility fallback.
+            _thread_local_ctx.data = {
+                "message_id": "old_eid",
+                "event_message_id": "old_eid",
+            }
+            with _session_contexts_lock:
+                _session_contexts[agent.session_id] = {
+                    "message_id": "new_eid",
+                    "event_message_id": "new_eid",
+                }
+
+            agent.tool_gen_callback("terminal")
+
+            mock_ctrl.on_model_activity.assert_called_once_with(
+                message_id="new_eid",
+                source="tool.generating:terminal",
+            )
+
     def test_different_text_from_stream_delta_goes_to_card(self):
         """当 interim 文字和 stream_delta 不同时, 应发到卡片."""
         mock_ctrl = _make_mock_ctrl()
@@ -408,13 +549,16 @@ class TestDoubleWrapGuard:
 
             _maybe_wrap_callbacks(agent)
             first_wrapper = agent.stream_delta_callback
+            first_streaming_call = agent._interruptible_streaming_api_call
 
             # 第二次调用应跳过
             _maybe_wrap_callbacks(agent)
             second_wrapper = agent.stream_delta_callback
+            second_streaming_call = agent._interruptible_streaming_api_call
 
             # 应该是同一个包装函数(没被重新包装)
             assert first_wrapper is second_wrapper
+            assert first_streaming_call is second_streaming_call
 
 
 # ── Full pipeline simulation test ──

@@ -8,15 +8,35 @@ from . import (
     _msg_ctx,
     _thread_local_ctx,
     _logger,
-    _get_event_message_id,
     _session_contexts,
     _session_contexts_lock,
 )
 
-def _resolve_eid(fallback_eid: str | None) -> str | None:
-    """Re-resolve the current event_message_id from _msg_ctx at call time."""
-    _eid = _get_event_message_id()
-    return _eid if _eid else fallback_eid
+def _eid_from_context(ctx: Any) -> str | None:
+    if not isinstance(ctx, dict):
+        return None
+    return ctx.get("event_message_id") or ctx.get("message_id")
+
+def _current_context_eid() -> str | None:
+    """Return only the live ContextVar id, without thread-local fallback."""
+    return _eid_from_context(_msg_ctx.get())
+
+def _thread_local_eid() -> str | None:
+    """Last-resort id for legacy executor paths without session registration."""
+    return _eid_from_context(getattr(_thread_local_ctx, "data", None))
+
+def _resolve_eid(fallback_eid: str | None, agent=None) -> str | None:
+    """Resolve the live turn id at callback time.
+
+    Cached agents can retain synthetic callbacks (notably tool_gen_callback)
+    across turns.  Prefer the live session registry before the closure's
+    fallback id so those callbacks cannot write into the previous card.
+    """
+    _eid = _current_context_eid()
+    if _eid:
+        return _eid
+    registered = _registered_eid(agent) if agent is not None else None
+    return registered or _thread_local_eid() or fallback_eid
 
 def _registered_eid(agent) -> str | None:
     """Resolve the turn id explicitly registered before the executor hop."""
@@ -33,12 +53,82 @@ def _maybe_wrap_callbacks(agent) -> None:
     """Replace streaming callbacks on *agent* with wrappers that also fire
     Feishu CardKit updates.  Skips silently when outside a Feishu message
     context (i.e. no event_message_id in context)."""
-    _logger.debug("HLS: _maybe_wrap_callbacks invoked, has_stream=%s, eid_lookup=%s", bool(getattr(agent, "stream_delta_callback", None)), bool(_get_event_message_id()))
+    _logger.debug(
+        "HLS: _maybe_wrap_callbacks invoked, has_stream=%s, eid_lookup=%s",
+        bool(getattr(agent, "stream_delta_callback", None)),
+        bool(_current_context_eid() or _registered_eid(agent) or _thread_local_eid()),
+    )
 
-    eid = _get_event_message_id() or _registered_eid(agent)
+    eid = _current_context_eid() or _registered_eid(agent) or _thread_local_eid()
     if not eid:
         _logger.debug("HLS: skip — no event_message_id in ctx")
         return  # Not in a hermes-lark-streaming context — skip
+
+    # Hermes fires ``on_first_delta`` at the wire-level boundary before it
+    # dispatches text, reasoning, or a tool name.  Some providers expose that
+    # boundary before any renderable callback, so use it as the earliest
+    # waiting -> thinking signal.  The wrapper is installed on the agent
+    # instance (not the class), is marked for idempotence, and always chains
+    # Hermes' own callback exactly once.
+    _current_streaming_call = getattr(agent, "_interruptible_streaming_api_call", None)
+    if _current_streaming_call and not getattr(_current_streaming_call, "_hls_wrapper", False):
+        _orig_streaming_call = _current_streaming_call
+
+        def _streaming_call_wrapper(api_kwargs, *args, **kwargs):
+            _orig_first_delta = kwargs.get("on_first_delta")
+
+            def _first_delta_wrapper(*first_args, **first_kwargs):
+                try:
+                    from .hooks import on_model_activity
+
+                    _first_eid = _resolve_eid(eid, agent)
+                    if _first_eid:
+                        on_model_activity(
+                            message_id=_first_eid,
+                            source="stream.first_delta",
+                        )
+                except Exception:
+                    _logger.debug("HLS: first_delta_wrapper exception", exc_info=True)
+                if _orig_first_delta:
+                    return _orig_first_delta(*first_args, **first_kwargs)
+                return None
+
+            kwargs["on_first_delta"] = _first_delta_wrapper
+            return _orig_streaming_call(api_kwargs, *args, **kwargs)
+
+        agent._interruptible_streaming_api_call = _streaming_call_wrapper
+        setattr(agent._interruptible_streaming_api_call, "_hls_wrapper", True)
+
+    # Hermes emits the first meaningful event of a tool-only model response
+    # through tool_gen_callback as soon as the function name is available.
+    # It can arrive many seconds before tool.started, so it must independently
+    # move the card from waiting to thinking.  ``on_first_delta`` is injected
+    # by conversation_loop itself, so wrapping the private streaming method
+    # here would wrap an already-correct callback and can double-fire it.
+    _current_tool_gen = getattr(agent, "tool_gen_callback", None)
+    if not (_current_tool_gen and getattr(_current_tool_gen, "_hls_wrapper", False)):
+        _orig_tool_gen = _current_tool_gen
+
+        def _tool_gen_wrapper(tool_name, *args, **kwargs):
+            _eid = _resolve_eid(eid, agent)
+            if _eid:
+                try:
+                    from .hooks import on_model_activity
+
+                    on_model_activity(
+                        message_id=_eid,
+                        source=f"tool.generating:{tool_name or 'unknown'}",
+                    )
+                    # This is a side-channel state transition, not a
+                    # replacement for Hermes' own display callback. Preserve
+                    # the original callback for CLI/TUI and other consumers.
+                except Exception:
+                    _logger.debug("HLS: tool_gen_wrapper exception", exc_info=True)
+            if _orig_tool_gen:
+                return _orig_tool_gen(tool_name, *args, **kwargs)
+
+        agent.tool_gen_callback = _tool_gen_wrapper
+        setattr(agent.tool_gen_callback, "_hls_wrapper", True)
 
     _current_stream = getattr(agent, "stream_delta_callback", None)
     _current_interim = getattr(agent, "interim_assistant_callback", None)
@@ -53,7 +143,7 @@ def _maybe_wrap_callbacks(agent) -> None:
             _orig_late = _late_reasoning
 
             def _late_reasoning_wrapper(text, *args, **kwargs):
-                _eid = _resolve_eid(eid)
+                _eid = _resolve_eid(eid, agent)
                 try:
                     from .hooks import on_reasoning_delta
                     if text and _eid:
@@ -79,7 +169,7 @@ def _maybe_wrap_callbacks(agent) -> None:
         _orig_stream = agent.stream_delta_callback
 
         def _answer_wrapper(text, *args, **kwargs):
-            _eid = _resolve_eid(eid)
+            _eid = _resolve_eid(eid, agent)
             if not _eid:
                 return _orig_stream(text, *args, **kwargs)
             try:
@@ -102,7 +192,7 @@ def _maybe_wrap_callbacks(agent) -> None:
             # (tool boundary flush / end-of-stream). Just ignore it.
             if text is None:
                 return
-            _eid = _resolve_eid(eid)
+            _eid = _resolve_eid(eid, agent)
             if not _eid:
                 return
             try:
@@ -122,7 +212,7 @@ def _maybe_wrap_callbacks(agent) -> None:
         _orig_interim = agent.interim_assistant_callback
 
         def _thinking_wrapper(text, *args, **kwargs):
-            _eid = _resolve_eid(eid)
+            _eid = _resolve_eid(eid, agent)
             if not _eid:
                 return _orig_interim(text, *args, **kwargs)
             try:
@@ -161,11 +251,30 @@ def _maybe_wrap_callbacks(agent) -> None:
         _orig_tool = agent.tool_progress_callback
 
         def _tool_wrapper(event_type, tool_name=None, preview=None, *args, **kwargs):
-            _eid = _resolve_eid(eid)
+            _eid = _resolve_eid(eid, agent)
             if not _eid:
                 return _orig_tool(event_type, tool_name, preview, *args, **kwargs)
             try:
-                from .hooks import on_tool_updated
+                from .hooks import on_model_activity, on_reasoning_delta, on_tool_updated
+
+                # Hermes 0.20.x reports completed scratch reasoning through
+                # tool_progress_callback instead of reasoning_callback on some
+                # provider paths.  Keep it inside the active card and use it
+                # as an upstream-activity signal rather than letting Gateway
+                # render a separate progress message.
+                if event_type == "_thinking" or tool_name == "_thinking":
+                    reasoning_text = (
+                        (tool_name or preview or "")
+                        if event_type == "_thinking"
+                        else (preview or "")
+                    )
+                    if reasoning_text:
+                        if on_reasoning_delta(message_id=_eid, text=reasoning_text):
+                            return
+                    elif on_model_activity(
+                        message_id=_eid, source="reasoning.available"
+                    ):
+                        return
 
                 if event_type in ("tool.started", "tool.completed"):
                     if on_tool_updated(
@@ -192,7 +301,7 @@ def _maybe_wrap_callbacks(agent) -> None:
     _orig_reasoning = getattr(agent, "reasoning_callback", None)
 
     def _reasoning_wrapper(text, *args, **kwargs):
-        _eid = _resolve_eid(eid)
+        _eid = _resolve_eid(eid, agent)
         if not _eid:
             # No ctx — call original if present
             if _orig_reasoning and not getattr(_orig_reasoning, "_hls_wrapper", False):
@@ -216,7 +325,7 @@ def _maybe_wrap_callbacks(agent) -> None:
         _orig_bg = agent.background_review_callback
 
         def _bg_wrapper(message, *args, **kwargs):
-            _eid = _resolve_eid(eid)
+            _eid = _resolve_eid(eid, agent)
             if not _eid:
                 return _orig_bg(message, *args, **kwargs)
             try:

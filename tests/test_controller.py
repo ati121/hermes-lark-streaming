@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -74,6 +75,134 @@ def test_on_message_started_registers_anchor_alias_and_cleanup() -> None:
 
     assert "msg" not in ctrl._sessions
     assert "quoted" not in ctrl._sessions
+
+
+def test_fire_and_forget_wakes_loop_from_worker_thread() -> None:
+    """Worker-thread stream callbacks must wake the gateway event loop."""
+    ctrl = StreamCardController()
+    loop = asyncio.new_event_loop()
+    loop_ready = threading.Event()
+    probe_ran = threading.Event()
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop_ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run_loop, daemon=True)
+    thread.start()
+    assert loop_ready.wait(1.0)
+
+    async def _probe() -> None:
+        probe_ran.set()
+
+    try:
+        ctrl._fire_and_forget(_probe(), loop)
+        assert probe_ran.wait(1.0)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=1.0)
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_model_activity_moves_waiting_card_to_thinking() -> None:
+    ctrl = StreamCardController()
+    _enable(ctrl)
+    session = CardSession("msg_activity", "chat", asyncio.get_running_loop())
+    session.state = STREAMING
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    ctrl._sessions[session.message_id] = session
+
+    with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+        ctrl.on_model_activity(
+            message_id=session.message_id,
+            source="tool.generating:terminal",
+        )
+
+    assert session._response_phase == "thinking"
+    schedule.assert_called_once_with(session, force=True)
+
+
+def test_model_activity_rebuilds_interactive_card_with_thinking_status() -> None:
+    ctrl = _setup_ctrl(linear=True)
+    session = _make_session("msg_interactive_activity", linear=True)
+    session.interactive_mode = True
+    session.text_sizes = {"body": {"mobile": "large"}}
+    session.state = STREAMING
+    ctrl._sessions[session.message_id] = session
+
+    ctrl.on_model_activity(
+        message_id=session.message_id,
+        source="stream.first_delta",
+    )
+
+    card = ctrl._build_interactive_linear_card(session)
+    spinner = next(
+        element for element in card["body"]["elements"]
+        if element.get("element_id") == _LOADING_ELEMENT_ID
+    )
+    assert spinner["text"]["i18n_content"]["zh_cn"].endswith("模型思考中...")
+
+
+def test_worker_first_activity_immediately_updates_interactive_card() -> None:
+    """The real Hermes worker-thread path must PATCH before the turn returns."""
+    ctrl = _setup_ctrl(linear=True)
+    session = CardSession("msg_worker_activity", "chat", asyncio.new_event_loop())
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    session.interactive_mode = True
+    session.text_sizes = {"body": {"mobile": "large"}}
+    session.state = STREAMING
+    session.card_id = "im:card-message"
+    session.card_msg_id = "card-message"
+    session.flush.set_card_message_ready(True)
+    ctrl._sessions[session.message_id] = session
+
+    loop = session._loop
+    loop_ready = threading.Event()
+    updated = threading.Event()
+    update_error: list[BaseException] = []
+
+    async def _record_update(message_id: str, card: dict) -> None:
+        try:
+            assert message_id == "card-message"
+            spinner = next(
+                element for element in card["body"]["elements"]
+                if element.get("element_id") == _LOADING_ELEMENT_ID
+            )
+            assert spinner["text"]["i18n_content"]["zh_cn"].endswith(
+                "模型思考中..."
+            )
+        except BaseException as exc:
+            update_error.append(exc)
+        finally:
+            updated.set()
+
+    ctrl._client.update_card = _record_update
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop_ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run_loop, daemon=True)
+    thread.start()
+    assert loop_ready.wait(1.0)
+
+    try:
+        ctrl.on_model_activity(
+            message_id=session.message_id,
+            source="stream.first_delta",
+        )
+        assert updated.wait(1.0), "worker callback did not wake the card event loop"
+        assert update_error == []
+        assert session._response_phase == "thinking"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=1.0)
+        loop.close()
 
 
 def test_on_interrupted_uses_new_message_id_and_anchor_alias() -> None:

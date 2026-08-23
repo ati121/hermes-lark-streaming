@@ -161,6 +161,14 @@ def on_thinking_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     return True
 
 @_safe_hook(default_return=False, log_level="debug")
+def on_model_activity(
+    *, ctrl: Any, message_id: str, source: str = "stream",
+) -> bool:
+    """Upstream activity with no visible answer/reasoning delta yet."""
+    ctrl.on_model_activity(message_id=message_id, source=source)
+    return True
+
+@_safe_hook(default_return=False, log_level="debug")
 def on_reasoning_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     """[注入点 6] reasoning_callback — native model reasoning delta."""
     ctrl.on_reasoning(message_id=message_id, text=text)

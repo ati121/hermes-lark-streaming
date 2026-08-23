@@ -4,6 +4,21 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.15 (2026-08-23, personal fork)
+
+### Fixed — first upstream activity now reaches the card immediately
+
+- Schedules CardKit updates thread-safely when Hermes delivers stream events
+  from its worker pool, so the card changes from `等待上游模型响应` to
+  `模型思考中...` as soon as the first model activity arrives.
+- Recognizes Hermes' first-delta boundary, tool-call generation, and
+  `reasoning.available` events even when they contain no visible answer text.
+- Resolves cached-agent callbacks against the current session before stale
+  thread-local fallback context, preventing a new turn from updating the
+  previous card.
+- Adds regression coverage for the worker-thread wake-up and interactive-card
+  status transition.
+
 ## v1.6.14 (2026-08-23, personal fork)
 
 ### Fixed — recovery turns keep the unified streaming card

@@ -285,20 +285,32 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
     def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
         """Schedule a coroutine for background execution without awaiting."""
+        if loop.is_closed():
+            coro.close()
+            return
+
         try:
-            task = loop.create_task(coro)
-            # Hold strong reference until task completes
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._pending_tasks.discard)
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            # Loop might be closed — try run_coroutine_threadsafe as fallback
-            try:
+            running_loop = None
+
+        try:
+            if running_loop is loop:
+                task = loop.create_task(coro)
+                # Hold strong reference until task completes.
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
+            else:
+                # Hermes invokes stream callbacks from its worker thread.  A
+                # bare ``loop.create_task`` from that thread queues work but
+                # does not wake SelectorEventLoop on Linux, so the first-token
+                # card update can sit idle until the whole API call returns.
                 fut = asyncio.run_coroutine_threadsafe(coro, loop)
                 fut.add_done_callback(self._on_bg_task_done)
-            except Exception:
-                # v1.3.2 fix: close the coroutine to avoid 'never awaited' warning
-                coro.close()
-                _logger.debug("fire_and_forget failed", exc_info=True)
+        except Exception:
+            # v1.3.2 fix: close the coroutine to avoid 'never awaited' warning
+            coro.close()
+            _logger.debug("fire_and_forget failed", exc_info=True)
 
     def on_message_started(
         self,
@@ -398,6 +410,41 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         self._linear_on_thinking(session, text)
+
+    def on_model_activity(self, *, message_id: str, source: str = "stream") -> None:
+        """Mark upstream activity that has no user-visible text yet.
+
+        Tool-call argument generation is a real first response byte, but
+        Hermes exposes it through ``tool_gen_callback`` rather than the text
+        or reasoning callbacks.  Move the card out of the waiting state
+        without inventing answer/reasoning content.
+        """
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_model_activity"):
+            return
+
+        epoch = session.create_epoch
+        if session.is_stale_create(epoch):
+            _logger.debug(
+                "on_model_activity: stale epoch, skipping msg=%s",
+                (message_id or "?")[:12],
+            )
+            return
+
+        previous_phase = session._response_phase
+        if previous_phase not in ("waiting", "tool"):
+            return
+
+        session._response_phase = "thinking"
+        if previous_phase == "waiting":
+            _logger.info(
+                "HLS: first upstream activity msg=%s source=%s",
+                (message_id or "?")[:12],
+                source,
+            )
+        self._schedule_linear_flush(session, force=True)
 
     def on_reasoning(self, *, message_id: str, text: str) -> None:
         """Native model reasoning delta (incremental append)."""
@@ -1028,6 +1075,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     def _on_bg_task_done(fut: ConcurrentFuture) -> None:
         try:
             fut.result()
+        except asyncio.CancelledError:
+            # A card can finish while a queued cross-thread flush is still
+            # waiting. Cancellation is expected during teardown; do not turn
+            # it into a noisy warning (or make it look like the first update
+            # failed).
+            return
         except Exception:
             _logger.warning("background task failed", exc_info=True)
 

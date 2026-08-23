@@ -20,6 +20,7 @@ from hermes_lark_streaming.patching.hooks import (
     on_message_completed,
     on_message_interrupted,
     on_message_started,
+    on_model_activity,
     on_reasoning_delta,
     on_thinking_delta,
     on_tool_updated,
@@ -381,6 +382,33 @@ class TestOnThinkingDelta:
 
         assert result is False
         ctrl.on_thinking.assert_not_called()
+
+
+# ── on_model_activity ──
+
+
+class TestOnModelActivity:
+    """on_model_activity delegates the text-free first-event transition."""
+
+    def test_delegates_with_source(self) -> None:
+        ctrl = _make_ctrl(enabled=True)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            result = on_model_activity(message_id="m1", source="stream.first_delta")
+
+        ctrl.on_model_activity.assert_called_once_with(
+            message_id="m1", source="stream.first_delta",
+        )
+        assert result is True
+
+    def test_returns_false_when_disabled(self) -> None:
+        ctrl = _make_ctrl(enabled=False)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            result = on_model_activity(message_id="m1")
+
+        assert result is False
+        ctrl.on_model_activity.assert_not_called()
 
 
 # ── on_reasoning_delta ──
