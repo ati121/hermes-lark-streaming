@@ -411,6 +411,80 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         self._linear_on_thinking(session, text)
 
+    def on_compression_started(
+        self, *, message_id: str, source: str = "context compression started",
+    ) -> None:
+        """Show that Hermes is compacting the conversation before the next call."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_compression_started"):
+            return
+
+        epoch = session.create_epoch
+        if session.is_stale_create(epoch):
+            _logger.debug(
+                "on_compression_started: stale epoch, skipping msg=%s",
+                (message_id or "?")[:12],
+            )
+            return
+
+        # Hermes can emit a start heartbeat more than once.  Preserve the
+        # original phase and avoid scheduling a CardKit update for every beat.
+        if session._response_phase == "compression":
+            return
+
+        session._compression_previous_phase = session._response_phase
+        session._response_phase = "compression"
+        _logger.info(
+            "HLS: context compression started msg=%s source=%s previous_phase=%s",
+            (message_id or "?")[:12],
+            source,
+            session._compression_previous_phase,
+        )
+        # ``force`` is important when the card is still being created: the
+        # transition is retained in _pending_flush and the initial snapshot
+        # opens directly on 上下文压缩中... .
+        self._schedule_linear_flush(session, force=True)
+
+    def on_compression_completed(
+        self, *, message_id: str, source: str = "context compression completed",
+    ) -> None:
+        """Leave the temporary compression phase unless model output won the race."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_compression_completed"):
+            return
+
+        epoch = session.create_epoch
+        if session.is_stale_create(epoch):
+            _logger.debug(
+                "on_compression_completed: stale epoch, skipping msg=%s",
+                (message_id or "?")[:12],
+            )
+            return
+
+        # A first stream/reasoning/answer callback may have moved the session
+        # forward while Hermes was sending its final compression heartbeat. In
+        # that case the model state is authoritative and must not be reverted.
+        if session._response_phase != "compression":
+            session._compression_previous_phase = None
+            return
+
+        previous_phase = session._compression_previous_phase or "waiting"
+        if previous_phase not in ("waiting", "thinking", "answer", "tool"):
+            previous_phase = "waiting"
+        session._compression_previous_phase = None
+        session._response_phase = previous_phase
+        _logger.info(
+            "HLS: context compression completed msg=%s source=%s restored_phase=%s",
+            (message_id or "?")[:12],
+            source,
+            previous_phase,
+        )
+        self._schedule_linear_flush(session, force=True)
+
     def on_model_activity(self, *, message_id: str, source: str = "stream") -> None:
         """Mark upstream activity that has no user-visible text yet.
 
@@ -434,11 +508,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         previous_phase = session._response_phase
-        if previous_phase not in ("waiting", "tool"):
+        if previous_phase not in ("waiting", "tool", "compression"):
             return
 
+        session._compression_previous_phase = None
         session._response_phase = "thinking"
-        if previous_phase == "waiting":
+        if previous_phase in ("waiting", "compression"):
             _logger.info(
                 "HLS: first upstream activity msg=%s source=%s",
                 (message_id or "?")[:12],
@@ -465,6 +540,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # Even with show_reasoning=false, the placeholder must stop claiming that
         # Hermes is still waiting for the upstream model.
         phase_changed = session._response_phase != "thinking"
+        session._compression_previous_phase = None
         session._response_phase = "thinking"
 
         if self._cfg.show_reasoning:
@@ -506,6 +582,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             # speed window so tool execution time cannot dilute that call.
             session._first_answer_time = 0.0
             session._last_answer_time = 0.0
+            session._compression_previous_phase = None
             session._response_phase = "tool"
             session.tool_use.record_start(tool_name, detail)
         else:
@@ -560,9 +637,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 # The spinner row carries 模型思考中 for visible answer deltas
                 # too; ``answer`` is retained here for timing and tool-phase
                 # bookkeeping.
+                session._compression_previous_phase = None
                 session._response_phase = "answer"
             else:
                 phase_changed = session._response_phase != "thinking"
+                session._compression_previous_phase = None
                 session._response_phase = "thinking"
 
             if not answer_text.strip():

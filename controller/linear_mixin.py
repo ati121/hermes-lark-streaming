@@ -106,6 +106,7 @@ _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 
 # ``_tool_emoji``); this keeps the row's shape when the turn switches between
 # thinking and a tool, so the text doesn't jump sideways.
 _THINKING_EMOJI = "💭"
+_COMPRESSION_EMOJI = "🗜️"
 
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle."""
@@ -177,11 +178,18 @@ class UnifiedControllerMixin:
                     elements.extend(action.get("params", {}).get("elements", []))
         else:
             label, status_key, emoji = self._current_loading_status(session)
-            if not elements and session._response_phase == "waiting":
-                # Nothing from upstream yet — the hint carries 等待上游模型响应.
-                # Once the first token lands the spinner row below says
-                # 模型思考中, so a second status line would be redundant.
-                elements.append(_loading_hint_element("loading_context"))
+            if not elements and session._response_phase in ("waiting", "compression"):
+                # Before the first model byte, the reversible context row owns
+                # both waiting and compression.  The spinner takes over after
+                # model activity starts (or when content already exists).
+                hint_status = (
+                    "context_compressing"
+                    if session._response_phase == "compression"
+                    else "loading_context"
+                )
+                elements.append(_loading_hint_element(hint_status))
+                if session._response_phase == "compression":
+                    label, status_key, emoji = None, None, None
             elements.append(_loading_element(
                 label,
                 status_key=status_key,
@@ -232,12 +240,19 @@ class UnifiedControllerMixin:
                     # the waiting hint entirely and let the spinner row open on
                     # 模型思考中 rather than flashing a stale 等待上游模型响应.
                     label, status_key, emoji = self._current_loading_status(session)
-                    include_hint = session._response_phase == "waiting"
+                    include_hint = session._response_phase in ("waiting", "compression")
+                    loading_hint_status = (
+                        "context_compressing"
+                        if session._response_phase == "compression"
+                        else "loading_context"
+                    )
+                    if session._response_phase == "compression":
+                        label, status_key, emoji = None, None, None
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
                         include_answer_element=False,   # Answer element added with panel
                         include_loading_hint=include_hint,  # 等待上游模型响应
-                        loading_hint_status="loading_context",
+                        loading_hint_status=loading_hint_status,
                         loading_status_key=status_key,
                         loading_status_emoji=emoji,
                         streaming_panel_expanded=self._cfg.streaming_panel_expanded,
@@ -253,7 +268,7 @@ class UnifiedControllerMixin:
                     else:
                         card_msg_id = await self._client.reply_card_by_id(reply_to, card_id)
                     session.card_id = card_id
-                    session._loading_hint_state = "loading_context"
+                    session._loading_hint_state = loading_hint_status
                     session._loading_label = label
                     session._loading_status_key = status_key
                 session.card_msg_id = card_msg_id
@@ -659,7 +674,8 @@ class UnifiedControllerMixin:
         # would state the opposite. Drop the hint on the first upstream token
         # even when that token produced nothing visible yet (show_reasoning off).
         _spinner_owns_status = (
-            session._loading_label_supported and session._response_phase != "waiting"
+            session._loading_label_supported
+            and session._response_phase in ("thinking", "answer", "tool")
         )
         if (
             (has_visible_model_content or _spinner_owns_status)
@@ -763,7 +779,7 @@ class UnifiedControllerMixin:
 
     def _current_tool_label(self, session: CardSession) -> tuple[str, str] | None:
         """Return the sticky tool label only while the model is in tool phase."""
-        if session._response_phase in ("thinking", "answer"):
+        if session._response_phase in ("compression", "thinking", "answer"):
             return None
         return session.tool_use.last_tool_names
 
@@ -780,6 +796,12 @@ class UnifiedControllerMixin:
         upstream has spoken but no tool is holding it. Both states carry an
         emoji so the text doesn't shift sideways when one replaces the other.
         """
+        if session._response_phase == "compression":
+            if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
+                # The hint row is the visible compression status until the
+                # spinner is the only remaining placeholder.
+                return None, None, None
+            return None, "context_compressing", _COMPRESSION_EMOJI
         label = self._current_tool_label(session)
         if label:
             return label, None, session.tool_use.last_tool_emoji
@@ -804,16 +826,17 @@ class UnifiedControllerMixin:
         """
         if session.interactive_mode or session._streaming_closed:
             return
-        if session._loading_label_supported:
-            return  # spinner row owns the status
         if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
             return
 
-        # Only a session that has not received a single upstream byte still
-        # shows 等待上游模型响应 — thinking, tool, and answer all mean active.
-        if session._response_phase == "waiting":
-            return
-        status_key = "model_thinking"
+        if session._response_phase == "compression":
+            status_key = "context_compressing"
+        elif session._response_phase == "waiting":
+            status_key = "loading_context"
+        elif session._loading_label_supported:
+            return  # spinner row owns model/tool status
+        else:
+            status_key = "model_thinking"
         if status_key == session._loading_hint_state:
             return
 
@@ -918,10 +941,12 @@ class UnifiedControllerMixin:
         phase_changed = False
         if reasoning:
             phase_changed = session._response_phase != "thinking"
+            session._compression_previous_phase = None
             session._response_phase = "thinking"
         elif answer:
             # Same first-token rule as on_answer: interim text counts as the
             # upstream's first response even without reasoning markers.
+            session._compression_previous_phase = None
             session._response_phase = "answer"
         elif text:
             # Some providers emit a standalone reasoning marker first (for
@@ -929,6 +954,7 @@ class UnifiedControllerMixin:
             # but the upstream has already spoken and the waiting hint must
             # yield to the thinking state.
             phase_changed = session._response_phase != "thinking"
+            session._compression_previous_phase = None
             session._response_phase = "thinking"
 
         state = session.unified_state

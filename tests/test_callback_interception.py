@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from hermes_lark_streaming.patching import (
     _msg_ctx,
@@ -403,6 +403,63 @@ class TestUpstreamActivityCallbacks:
                 source="stream.first_chunk",
             )
             assert agent.activity_calls[0]["desc"] == "receiving stream response"
+
+    def test_context_compression_activity_updates_card_state(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            started = agent._touch_activity("context compression started")
+            agent._touch_activity("context compression in progress")
+            agent._touch_activity("context compression completed")
+
+            assert started == "activity-result"
+            assert mock_ctrl.on_compression_started.call_args_list == [
+                call(
+                    message_id="test_eid_123456789",
+                    source="context compression started",
+                ),
+                call(
+                    message_id="test_eid_123456789",
+                    source="context compression in progress",
+                ),
+            ]
+            mock_ctrl.on_compression_completed.assert_called_once_with(
+                message_id="test_eid_123456789",
+                source="context compression completed",
+            )
+            assert [call["desc"] for call in agent.activity_calls] == [
+                "context compression started",
+                "context compression in progress",
+                "context compression completed",
+            ]
+
+    def test_context_compression_terminal_variants_end_card_state(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+            _maybe_wrap_callbacks(agent)
+
+            for status in (
+                "context compression failed",
+                "context compression cancelled",
+                "context compression rollback failed",
+                "context compression timed out",
+            ):
+                agent._touch_activity(status)
+
+            assert [
+                call.kwargs["source"]
+                for call in mock_ctrl.on_compression_completed.call_args_list
+            ] == [
+                "context compression failed",
+                "context compression cancelled",
+                "context compression rollback failed",
+                "context compression timed out",
+            ]
 
     def test_waiting_for_provider_activity_does_not_mark_model_active(self):
         mock_ctrl = _make_mock_ctrl()

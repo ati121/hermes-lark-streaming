@@ -36,6 +36,7 @@ class CardSession:
 
     __slots__ = (
         "_card_ready",
+        "_compression_previous_phase",
         "_continuation_reactivation_count",
         "_create_epoch_snap",
         "_creation_stages",
@@ -134,6 +135,10 @@ class CardSession:
         self._last_answer_time: float = 0.0
         self._pending_flush: bool = False
         self._response_phase: str = "waiting"
+        # Temporary response phase used while Hermes compacts the conversation
+        # before making the next model call.  The previous phase is restored
+        # only if no model activity arrived during compression.
+        self._compression_previous_phase: str | None = None
         self._streaming_closed: bool = False
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG
         self._streaming_closed_logged: bool = False

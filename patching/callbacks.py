@@ -78,7 +78,8 @@ def _maybe_wrap_callbacks(agent) -> None:
 
         def _touch_activity_wrapper(desc, *args, **kwargs):
             try:
-                if str(desc or "").startswith("receiving stream response"):
+                _activity = str(desc or "")
+                if _activity.startswith("receiving stream response"):
                     from .hooks import on_model_activity
 
                     _chunk_eid = _resolve_eid(eid, agent)
@@ -86,6 +87,33 @@ def _maybe_wrap_callbacks(agent) -> None:
                         on_model_activity(
                             message_id=_chunk_eid,
                             source="stream.first_chunk",
+                        )
+                elif _activity.startswith((
+                    "context compression started",
+                    "context compression in progress",
+                )):
+                    from .hooks import on_compression_started
+
+                    _compression_eid = _resolve_eid(eid, agent)
+                    if _compression_eid:
+                        on_compression_started(
+                            message_id=_compression_eid,
+                            source=_activity,
+                        )
+                elif _activity.startswith((
+                    "context compression completed",
+                    "context compression failed",
+                    "context compression cancelled",
+                    "context compression rollback failed",
+                    "context compression timed out",
+                )):
+                    from .hooks import on_compression_completed
+
+                    _compression_eid = _resolve_eid(eid, agent)
+                    if _compression_eid:
+                        on_compression_completed(
+                            message_id=_compression_eid,
+                            source=_activity,
                         )
             except Exception:
                 _logger.debug(

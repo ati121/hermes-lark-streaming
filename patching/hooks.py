@@ -161,6 +161,22 @@ def on_thinking_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     return True
 
 @_safe_hook(default_return=False, log_level="debug")
+def on_compression_started(
+    *, ctrl: Any, message_id: str, source: str = "context compression started",
+) -> bool:
+    """Hermes is compacting conversation context before the next model call."""
+    ctrl.on_compression_started(message_id=message_id, source=source)
+    return True
+
+@_safe_hook(default_return=False, log_level="debug")
+def on_compression_completed(
+    *, ctrl: Any, message_id: str, source: str = "context compression completed",
+) -> bool:
+    """Hermes finished (or abandoned) the current context compression pass."""
+    ctrl.on_compression_completed(message_id=message_id, source=source)
+    return True
+
+@_safe_hook(default_return=False, log_level="debug")
 def on_model_activity(
     *, ctrl: Any, message_id: str, source: str = "stream",
 ) -> bool:

@@ -964,6 +964,11 @@ class TestLoadingHintElement:
         assert el["text"]["i18n_content"]["zh_cn"] == "模型思考中..."
         assert el["text"]["i18n_content"]["en_us"] == "Model is thinking..."
 
+    def test_context_compressing_status(self) -> None:
+        el = _loading_hint_element("context_compressing")
+        assert el["text"]["i18n_content"]["zh_cn"] == "上下文压缩中..."
+        assert el["text"]["i18n_content"]["en_us"] == "Compressing context..."
+
     def test_streaming_card_does_not_include_hint(self) -> None:
         """流式占位卡片默认包含占位提示（v1.0.2: 嵌入初始卡片，不再单独API插入）."""
         card = build_streaming_card_v2()

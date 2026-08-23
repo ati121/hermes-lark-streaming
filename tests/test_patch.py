@@ -14,6 +14,8 @@ from hermes_lark_streaming.patching.hooks import (
     _safe_hook,
     on_answer_delta,
     on_background_review_message,
+    on_compression_completed,
+    on_compression_started,
     on_cron_deliver,
     on_feishu_normalize,
     on_message_aborted,
@@ -382,6 +384,47 @@ class TestOnThinkingDelta:
 
         assert result is False
         ctrl.on_thinking.assert_not_called()
+
+
+# ── context compression activity ──
+
+
+class TestOnCompressionActivity:
+    def test_start_delegates_with_source(self) -> None:
+        ctrl = _make_ctrl(enabled=True)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            result = on_compression_started(
+                message_id="m1", source="context compression in progress",
+            )
+
+        ctrl.on_compression_started.assert_called_once_with(
+            message_id="m1", source="context compression in progress",
+        )
+        assert result is True
+
+    def test_completion_delegates_with_source(self) -> None:
+        ctrl = _make_ctrl(enabled=True)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            result = on_compression_completed(
+                message_id="m1", source="context compression timed out",
+            )
+
+        ctrl.on_compression_completed.assert_called_once_with(
+            message_id="m1", source="context compression timed out",
+        )
+        assert result is True
+
+    def test_returns_false_when_disabled(self) -> None:
+        ctrl = _make_ctrl(enabled=False)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            assert on_compression_started(message_id="m1") is False
+            assert on_compression_completed(message_id="m1") is False
+
+        ctrl.on_compression_started.assert_not_called()
+        ctrl.on_compression_completed.assert_not_called()
 
 
 # ── on_model_activity ──

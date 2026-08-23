@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.17 (2026-08-23, personal fork)
+
+### Fixed — context compression is shown explicitly
+
+- Changes the initial card status from `等待上游模型响应` to `上下文压缩中...`
+  while Hermes compacts a large conversation before the next model request.
+- Restores the previous waiting/model/tool state when compression completes,
+  fails, is cancelled, or times out, while ensuring a first model stream event
+  wins the race and remains `模型思考中...`.
+- Preserves Hermes' original activity callback and covers worker-thread
+  updates, card-creation races, CardKit fallback rendering, and all known
+  compression terminal events.
+
 ## v1.6.16 (2026-08-23, personal fork)
 
 ### Fixed — thinking starts at the upstream stream boundary

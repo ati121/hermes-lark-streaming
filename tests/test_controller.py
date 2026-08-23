@@ -6,7 +6,7 @@ import asyncio
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call as mock_call, patch
 
 import pytest
 
@@ -125,6 +125,70 @@ async def test_model_activity_moves_waiting_card_to_thinking() -> None:
     schedule.assert_called_once_with(session, force=True)
 
 
+@pytest.mark.asyncio
+async def test_compression_started_moves_waiting_card_to_compression() -> None:
+    ctrl = StreamCardController()
+    _enable(ctrl)
+    session = CardSession("msg_compress", "chat", asyncio.get_running_loop())
+    session.state = STREAMING
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    ctrl._sessions[session.message_id] = session
+
+    with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+        ctrl.on_compression_started(message_id=session.message_id)
+
+    assert session._response_phase == "compression"
+    assert session._compression_previous_phase == "waiting"
+    schedule.assert_called_once_with(session, force=True)
+
+
+@pytest.mark.asyncio
+async def test_compression_completed_restores_waiting_state() -> None:
+    ctrl = StreamCardController()
+    _enable(ctrl)
+    session = CardSession("msg_compress_done", "chat", asyncio.get_running_loop())
+    session.state = STREAMING
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    session._response_phase = "compression"
+    session._compression_previous_phase = "waiting"
+    ctrl._sessions[session.message_id] = session
+
+    with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+        ctrl.on_compression_completed(message_id=session.message_id)
+
+    assert session._response_phase == "waiting"
+    assert session._compression_previous_phase is None
+    schedule.assert_called_once_with(session, force=True)
+
+
+@pytest.mark.asyncio
+async def test_model_activity_wins_race_with_compression_completion() -> None:
+    ctrl = StreamCardController()
+    _enable(ctrl)
+    session = CardSession("msg_compress_race", "chat", asyncio.get_running_loop())
+    session.state = STREAMING
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    ctrl._sessions[session.message_id] = session
+
+    with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+        ctrl.on_compression_started(message_id=session.message_id)
+        ctrl.on_model_activity(
+            message_id=session.message_id,
+            source="stream.first_chunk",
+        )
+        ctrl.on_compression_completed(message_id=session.message_id)
+
+    assert session._response_phase == "thinking"
+    assert session._compression_previous_phase is None
+    assert schedule.call_args_list == [
+        mock_call(session, force=True),
+        mock_call(session, force=True),
+    ]
+
+
 def test_model_activity_rebuilds_interactive_card_with_thinking_status() -> None:
     ctrl = _setup_ctrl(linear=True)
     session = _make_session("msg_interactive_activity", linear=True)
@@ -144,6 +208,24 @@ def test_model_activity_rebuilds_interactive_card_with_thinking_status() -> None
         if element.get("element_id") == _LOADING_ELEMENT_ID
     )
     assert spinner["text"]["i18n_content"]["zh_cn"].endswith("模型思考中...")
+
+
+def test_compression_rebuilds_interactive_card_with_compressing_status() -> None:
+    ctrl = _setup_ctrl(linear=True)
+    session = _make_session("msg_interactive_compress", linear=True)
+    session.interactive_mode = True
+    session.text_sizes = {"body": {"mobile": "large"}}
+    session.state = STREAMING
+    ctrl._sessions[session.message_id] = session
+
+    ctrl.on_compression_started(message_id=session.message_id)
+
+    card = ctrl._build_interactive_linear_card(session)
+    hint = next(
+        element for element in card["body"]["elements"]
+        if element.get("element_id") == _LOADING_HINT_ELEMENT_ID
+    )
+    assert hint["text"]["i18n_content"]["zh_cn"] == "上下文压缩中..."
 
 
 def test_worker_first_activity_immediately_updates_interactive_card() -> None:
@@ -199,6 +281,60 @@ def test_worker_first_activity_immediately_updates_interactive_card() -> None:
         assert updated.wait(1.0), "worker callback did not wake the card event loop"
         assert update_error == []
         assert session._response_phase == "thinking"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=1.0)
+        loop.close()
+
+
+def test_worker_compression_immediately_updates_interactive_card() -> None:
+    """Compression heartbeats from Hermes' worker must wake the card loop."""
+    ctrl = _setup_ctrl(linear=True)
+    session = CardSession("msg_worker_compress", "chat", asyncio.new_event_loop())
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    session.interactive_mode = True
+    session.text_sizes = {"body": {"mobile": "large"}}
+    session.state = STREAMING
+    session.card_id = "im:compression-card"
+    session.card_msg_id = "compression-card"
+    session.flush.set_card_message_ready(True)
+    ctrl._sessions[session.message_id] = session
+
+    loop = session._loop
+    loop_ready = threading.Event()
+    updated = threading.Event()
+    update_error: list[BaseException] = []
+
+    async def _record_update(message_id: str, card: dict) -> None:
+        try:
+            assert message_id == "compression-card"
+            hint = next(
+                element for element in card["body"]["elements"]
+                if element.get("element_id") == _LOADING_HINT_ELEMENT_ID
+            )
+            assert hint["text"]["i18n_content"]["zh_cn"] == "上下文压缩中..."
+        except BaseException as exc:
+            update_error.append(exc)
+        finally:
+            updated.set()
+
+    ctrl._client.update_card = _record_update
+
+    def _run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        loop_ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=_run_loop, daemon=True)
+    thread.start()
+    assert loop_ready.wait(1.0)
+
+    try:
+        ctrl.on_compression_started(message_id=session.message_id)
+        assert updated.wait(1.0), "compression callback did not wake the card event loop"
+        assert update_error == []
+        assert session._response_phase == "compression"
     finally:
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=1.0)
@@ -1155,6 +1291,30 @@ class TestDoUnifiedFlush:
         assert partial["i18n_content"]["zh_cn"] == "  💭 模型思考中..."
         assert session._loading_status_key == "model_thinking"
 
+    @pytest.mark.asyncio
+    async def test_spinner_carries_context_compression(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_hint_compress", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_hint_compress"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session._response_phase = "compression"
+        session._compression_previous_phase = "waiting"
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl._do_unified_flush(session)
+
+        actions = _all_batch_actions(ctrl)
+        update = next(
+            action for action in actions
+            if action["action"] == "partial_update_element"
+            and action["params"]["element_id"] == _LOADING_HINT_ELEMENT_ID
+        )
+        partial = update["params"]["partial_element"]["text"]
+        assert partial["i18n_content"]["zh_cn"] == "上下文压缩中..."
+        assert session._loading_hint_state == "context_compressing"
+        assert _LOADING_HINT_ELEMENT_ID in session.existing_elements
+
     def test_first_answer_delta_lands_on_answer_phase(self) -> None:
         """上游首字是 answer 时直接进入 answer 阶段，只调度一次 flush.
 
@@ -1169,7 +1329,7 @@ class TestDoUnifiedFlush:
         with patch.object(ctrl, "_schedule_linear_flush") as schedule:
             ctrl.on_answer(message_id="msg_first_answer", text="答")
 
-        assert schedule.call_args_list == [call(session)]
+        assert schedule.call_args_list == [mock_call(session)]
         assert session._response_phase == "answer"
 
     def test_subsequent_answer_deltas_schedule_normally(self) -> None:
@@ -1182,7 +1342,7 @@ class TestDoUnifiedFlush:
         with patch.object(ctrl, "_schedule_linear_flush") as schedule:
             ctrl.on_answer(message_id="msg_second_answer", text="案")
 
-        assert schedule.call_args_list == [call(session)]
+        assert schedule.call_args_list == [mock_call(session)]
 
     @pytest.mark.asyncio
     async def test_model_thinking_survives_the_flush_that_renders_content(self) -> None:
@@ -1327,6 +1487,25 @@ class TestDoUnifiedFlush:
         assert spinner["text"]["i18n_content"]["zh_cn"].endswith("模型思考中...")
         assert session._loading_status_key == "model_thinking"
         assert _LOADING_HINT_ELEMENT_ID not in session.existing_elements
+
+    @pytest.mark.asyncio
+    async def test_creation_snapshot_opens_on_context_compression(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_late_compression", linear=True)
+        session._response_phase = "compression"
+        session._compression_previous_phase = "waiting"
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl._do_create_linear_card(session)
+
+        card = ctrl._client.cardkit_create.await_args.args[0]
+        hint = next(
+            element for element in card["body"]["elements"]
+            if element.get("element_id") == _LOADING_HINT_ELEMENT_ID
+        )
+        assert hint["text"]["i18n_content"]["zh_cn"] == "上下文压缩中..."
+        assert session._loading_hint_state == "context_compressing"
+        assert _LOADING_HINT_ELEMENT_ID in session.existing_elements
 
     @pytest.mark.asyncio
     async def test_creation_snapshot_keeps_waiting_before_any_token(self) -> None:
