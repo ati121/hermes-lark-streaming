@@ -64,12 +64,44 @@ def _maybe_wrap_callbacks(agent) -> None:
         _logger.debug("HLS: skip — no event_message_id in ctx")
         return  # Not in a hermes-lark-streaming context — skip
 
+    # Hermes' ``on_first_delta`` is not the transport-level first event: the
+    # host only fires it after a chunk contains renderable text, reasoning, or
+    # a complete tool name.  OpenAI-compatible providers commonly yield an
+    # earlier role-only / empty / keepalive chunk. Opening the HTTP response
+    # itself is not enough: model prefill may still be in progress, so wait
+    # for Hermes' "receiving stream response" activity boundary below.
+    _current_touch_activity = getattr(agent, "_touch_activity", None)
+    if _current_touch_activity and not getattr(
+        _current_touch_activity, "_hls_wrapper", False
+    ):
+        _orig_touch_activity = _current_touch_activity
+
+        def _touch_activity_wrapper(desc, *args, **kwargs):
+            try:
+                if str(desc or "").startswith("receiving stream response"):
+                    from .hooks import on_model_activity
+
+                    _chunk_eid = _resolve_eid(eid, agent)
+                    if _chunk_eid:
+                        on_model_activity(
+                            message_id=_chunk_eid,
+                            source="stream.first_chunk",
+                        )
+            except Exception:
+                _logger.debug(
+                    "HLS: touch_activity_wrapper exception", exc_info=True
+                )
+            return _orig_touch_activity(desc, *args, **kwargs)
+
+        agent._touch_activity = _touch_activity_wrapper
+        setattr(agent._touch_activity, "_hls_wrapper", True)
+
     # Hermes fires ``on_first_delta`` at the wire-level boundary before it
-    # dispatches text, reasoning, or a tool name.  Some providers expose that
-    # boundary before any renderable callback, so use it as the earliest
-    # waiting -> thinking signal.  The wrapper is installed on the agent
-    # instance (not the class), is marked for idempotence, and always chains
-    # Hermes' own callback exactly once.
+    # dispatches text, reasoning, or a tool name.  It remains a useful fallback
+    # for providers that do not expose the earlier response-open/raw-chunk
+    # seams above.  The wrapper is installed on the agent instance (not the
+    # class), is marked for idempotence, and always chains Hermes' own callback
+    # exactly once.
     _current_streaming_call = getattr(agent, "_interruptible_streaming_api_call", None)
     if _current_streaming_call and not getattr(_current_streaming_call, "_hls_wrapper", False):
         _orig_streaming_call = _current_streaming_call

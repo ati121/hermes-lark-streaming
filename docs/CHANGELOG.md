@@ -4,6 +4,21 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.16 (2026-08-23, personal fork)
+
+### Fixed — thinking starts at the upstream stream boundary
+
+- Stops treating Hermes' `on_first_delta` callback as a wire-level signal: in
+  Hermes 0.20.x it fires only after a chunk contains renderable text,
+  reasoning, or a complete tool name, which can be almost the end of a model
+  call.
+- Moves the card from `等待上游模型响应` to `模型思考中...` when the upstream
+  produces its first raw stream chunk, with the existing visible delta
+  callbacks retained as provider-compatible fallbacks. Opening HTTP headers
+  alone does not change the state.
+- Preserves Hermes' activity callback and adds idempotence and regression
+  coverage for raw-chunk and waiting-state events.
+
 ## v1.6.15 (2026-08-23, personal fork)
 
 ### Fixed — first upstream activity now reaches the card immediately

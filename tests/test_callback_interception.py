@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from hermes_lark_streaming.patching import (
     _msg_ctx,
     _maybe_wrap_callbacks,
@@ -43,6 +41,7 @@ class FakeAgent:
         self.tool_gen_calls = []
         self.tool_progress_calls = []
         self.first_delta_calls = []
+        self.activity_calls = []
 
         def _stream_cb(text, *args, **kwargs):
             self.stream_calls.append({"text": text, "args": args, "kwargs": kwargs})
@@ -67,11 +66,18 @@ class FakeAgent:
                 callback()
             return "stream-result"
 
+        def _touch_activity_cb(desc, *args, **kwargs):
+            self.activity_calls.append({
+                "desc": desc, "args": args, "kwargs": kwargs,
+            })
+            return "activity-result"
+
         self.stream_delta_callback = _stream_cb
         self.interim_assistant_callback = _interim_cb
         self.tool_gen_callback = _tool_gen_cb
         self.tool_progress_callback = _tool_progress_cb
         self._interruptible_streaming_api_call = _streaming_call_cb
+        self._touch_activity = _touch_activity_cb
         self.reasoning_callback = None
         self.background_review_callback = None
 
@@ -382,6 +388,34 @@ class TestUpstreamActivityCallbacks:
             )
             original_first.assert_called_once_with()
 
+    def test_first_raw_stream_chunk_marks_model_active_before_visible_delta(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            result = agent._touch_activity("receiving stream response")
+
+            assert result == "activity-result"
+            mock_ctrl.on_model_activity.assert_called_once_with(
+                message_id="test_eid_123456789",
+                source="stream.first_chunk",
+            )
+            assert agent.activity_calls[0]["desc"] == "receiving stream response"
+
+    def test_waiting_for_provider_activity_does_not_mark_model_active(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent._touch_activity("waiting for provider response (streaming)")
+
+            mock_ctrl.on_model_activity.assert_not_called()
+            assert agent.activity_calls[0]["desc"] == "waiting for provider response (streaming)"
+
     def test_reasoning_available_stays_inside_card(self):
         mock_ctrl = _make_mock_ctrl()
         with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
@@ -550,15 +584,18 @@ class TestDoubleWrapGuard:
             _maybe_wrap_callbacks(agent)
             first_wrapper = agent.stream_delta_callback
             first_streaming_call = agent._interruptible_streaming_api_call
+            first_activity = agent._touch_activity
 
             # 第二次调用应跳过
             _maybe_wrap_callbacks(agent)
             second_wrapper = agent.stream_delta_callback
             second_streaming_call = agent._interruptible_streaming_api_call
+            second_activity = agent._touch_activity
 
             # 应该是同一个包装函数(没被重新包装)
             assert first_wrapper is second_wrapper
             assert first_streaming_call is second_streaming_call
+            assert first_activity is second_activity
 
 
 # ── Full pipeline simulation test ──
