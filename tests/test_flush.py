@@ -20,6 +20,35 @@ def _make_async(**kwargs: object) -> FlushController:
     return FlushController(**kwargs)  # type: ignore[arg-type]
 
 
+def test_explicit_loop_is_used_for_cross_thread_scheduling() -> None:
+    """A controller created off-loop must still wake its explicitly assigned loop."""
+    loop = asyncio.new_event_loop()
+    ready = threading.Event()
+    flushed = threading.Event()
+    ctrl = FlushController(throttle_ms=0.0, loop=loop)
+    ctrl.set_card_message_ready(True)
+
+    async def do_flush() -> None:
+        flushed.set()
+
+    def run_loop() -> None:
+        asyncio.set_event_loop(loop)
+        ready.set()
+        loop.run_forever()
+
+    thread = threading.Thread(target=run_loop, daemon=True)
+    thread.start()
+    assert ready.wait(1.0)
+    try:
+        ctrl.schedule_update(do_flush)
+        assert flushed.wait(1.0)
+        assert ctrl._loop is loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=1.0)
+        loop.close()
+
+
 class TestScheduleUpdate:
     @pytest.mark.asyncio
     async def test_first_call_schedules_delayed_flush(self) -> None:

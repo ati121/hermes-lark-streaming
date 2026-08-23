@@ -99,6 +99,34 @@ async def _fallback_write_answer(
         _logger.warning("HLS: fallback write answer failed: %s", e)
         return False
 
+
+def _take_answer_flush_snapshot(
+    session: CardSession,
+    state: UnifiedLinearState,
+) -> str | None:
+    """Atomically take the answer snapshot owned by one stream request.
+
+    Hermes callbacks can run on worker threads while CardKit is awaiting the
+    network request.  The lock covers both reading ``answer_text`` and
+    consuming ``answer_dirty``; a callback therefore either lands before the
+    snapshot or leaves a fresh dirty flag after it.
+    """
+    with session._stream_lock:
+        if not state.answer_dirty:
+            return None
+        content = escape_markdown_asterisks(state.answer_text or " ")
+        state.answer_dirty = False
+        return content
+
+
+def _restore_answer_flush_snapshot(
+    session: CardSession,
+    state: UnifiedLinearState,
+) -> None:
+    """Put a failed answer snapshot back into the stream queue."""
+    with session._stream_lock:
+        state.answer_dirty = True
+
 # NOTE: This is the *server-side flush interval* (how often we send
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
 
@@ -595,19 +623,29 @@ class UnifiedControllerMixin:
                     return
 
             # Note: skip markdown optimization during streaming for performance;
-            if state.answer_dirty:
-                content = escape_markdown_asterisks(state.answer_text or " ")
+            content = _take_answer_flush_snapshot(session, state)
+            if content is not None:
                 session.sequence += 1
                 try:
                     await self._client.cardkit_stream_element(
                         session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
                     )
-                    state.answer_dirty = False
+                except asyncio.CancelledError:
+                    _restore_answer_flush_snapshot(session, state)
+                    raise
                 except FeishuAPIError as e:
+                    _restore_answer_flush_snapshot(session, state)
                     if e.code == CARDKIT_STREAMING_CLOSED:
                         session._streaming_closed = True
                         return
                     _logger.debug("unified stream_element failed: %s", e)
+                except Exception as e:
+                    _restore_answer_flush_snapshot(session, state)
+                    _logger.warning(
+                        "HLS: unified stream_element unexpected failure: %s card=%s",
+                        e,
+                        session.card_id[:12] if session.card_id else "?",
+                    )
 
             if not state.panel_dirty and not state.tool_steps_dirty and not state.answer_dirty:
                 return  # Phase 2 done, nothing more to do
@@ -746,15 +784,20 @@ class UnifiedControllerMixin:
                 return
 
         # Note: skip markdown optimization during streaming for performance;
-        if state.answer_dirty and "answer" in session._creation_stages:
-            content = escape_markdown_asterisks(state.answer_text or " ")
+        content = None
+        if "answer" in session._creation_stages:
+            content = _take_answer_flush_snapshot(session, state)
+        if content is not None:
             session.sequence += 1
             try:
                 await self._client.cardkit_stream_element(
                     session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
                 )
-                state.answer_dirty = False
+            except asyncio.CancelledError:
+                _restore_answer_flush_snapshot(session, state)
+                raise
             except FeishuAPIError as e:
+                _restore_answer_flush_snapshot(session, state)
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     if session._streaming_closed_logged:
                         pass
@@ -773,6 +816,13 @@ class UnifiedControllerMixin:
                     )
                     return
                 _logger.debug("HLS: unified stream_element failed: %s", e)
+            except Exception as e:
+                _restore_answer_flush_snapshot(session, state)
+                _logger.warning(
+                    "HLS: unified stream_element unexpected failure: %s card=%s",
+                    e,
+                    session.card_id[:12] if session.card_id else "?",
+                )
 
         if state.panel_dirty or state.answer_dirty or state.tool_steps_dirty:
             self._schedule_linear_flush(session)

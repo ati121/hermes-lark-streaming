@@ -16,7 +16,12 @@ BATCH_AFTER_GAP_MS = 0.100  # 长时间空闲后等待这个时间再 flush
 class FlushController:
     """不包含飞书业务逻辑，只负责决定何时执行回调."""
 
-    def __init__(self, throttle_ms: float = CARDKIT_MS) -> None:
+    def __init__(
+        self,
+        throttle_ms: float = CARDKIT_MS,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
         self._throttle_ms = throttle_ms
         self._flush_in_progress = False
         self._needs_reflush = False
@@ -27,13 +32,15 @@ class FlushController:
         self._flush_resolvers: list[asyncio.Future[None]] = []
         # （Python 文档："Save a reference to the result of this function"）
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
+        self._loop = loop
+        if self._loop is None:
             try:
-                self._loop = asyncio.get_event_loop()
+                self._loop = asyncio.get_running_loop()
             except RuntimeError:
-                self._loop = None  # Will be lazily resolved via _get_loop()
+                try:
+                    self._loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    self._loop = None  # Will be lazily resolved via _get_loop()
 
     def _get_loop(self) -> asyncio.AbstractEventLoop:
         """In Python 3.10+ (especially 3.11.15), both get_running_loop()"""

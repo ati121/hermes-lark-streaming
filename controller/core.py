@@ -240,12 +240,13 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         self._fire_and_forget(self._do_create_linear_card(new_session), loop)
 
         try:
-            if not stale_session.is_terminal_phase and stale_session.state != COMPLETING:
-                stale_session.state = COMPLETING
-                self._fire_and_forget(
-                    self._do_linear_complete_with_fallback(stale_session),
-                    stale_session._loop,
-                )
+            with stale_session._stream_lock:
+                if not stale_session.is_terminal_phase and stale_session.state != COMPLETING:
+                    stale_session.state = COMPLETING
+                    self._fire_and_forget(
+                        self._do_linear_complete_with_fallback(stale_session),
+                        stale_session._loop,
+                    )
         except Exception:
             pass
 
@@ -265,6 +266,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # 已终态（COMPLETED/ABORTED/CREATION_FAILED/TERMINATED）的 session 不重激活
         # ——on_completed 已封卡，后续 token 是迟到的 race condition，应丢弃而非开新卡
         if stale.is_terminal_phase:
+            return None
+        # A completing card owns any final callbacks until its seal boundary.
+        # Never open a continuation merely because close_streaming happened
+        # while completion was already in progress.
+        if stale.state == COMPLETING:
             return None
         # _streaming_closed=False 说明流式仍健康，正常路径处理
         if not stale._streaming_closed:
@@ -409,7 +415,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_thinking"):
             return
 
-        self._linear_on_thinking(session, text)
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            self._linear_on_thinking(session, text)
 
     def on_compression_started(
         self, *, message_id: str, source: str = "context compression started",
@@ -421,31 +430,34 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_compression_started"):
             return
 
-        epoch = session.create_epoch
-        if session.is_stale_create(epoch):
-            _logger.debug(
-                "on_compression_started: stale epoch, skipping msg=%s",
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            epoch = session.create_epoch
+            if session.is_stale_create(epoch):
+                _logger.debug(
+                    "on_compression_started: stale epoch, skipping msg=%s",
+                    (message_id or "?")[:12],
+                )
+                return
+
+            # Hermes can emit a start heartbeat more than once.  Preserve the
+            # original phase and avoid scheduling a CardKit update for every beat.
+            if session._response_phase == "compression":
+                return
+
+            session._compression_previous_phase = session._response_phase
+            session._response_phase = "compression"
+            _logger.info(
+                "HLS: context compression started msg=%s source=%s previous_phase=%s",
                 (message_id or "?")[:12],
+                source,
+                session._compression_previous_phase,
             )
-            return
-
-        # Hermes can emit a start heartbeat more than once.  Preserve the
-        # original phase and avoid scheduling a CardKit update for every beat.
-        if session._response_phase == "compression":
-            return
-
-        session._compression_previous_phase = session._response_phase
-        session._response_phase = "compression"
-        _logger.info(
-            "HLS: context compression started msg=%s source=%s previous_phase=%s",
-            (message_id or "?")[:12],
-            source,
-            session._compression_previous_phase,
-        )
-        # ``force`` is important when the card is still being created: the
-        # transition is retained in _pending_flush and the initial snapshot
-        # opens directly on 上下文压缩中... .
-        self._schedule_linear_flush(session, force=True)
+            # ``force`` is important when the card is still being created: the
+            # transition is retained in _pending_flush and the initial snapshot
+            # opens directly on 上下文压缩中... .
+            self._schedule_linear_flush(session, force=True)
 
     def on_compression_completed(
         self, *, message_id: str, source: str = "context compression completed",
@@ -457,33 +469,36 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_compression_completed"):
             return
 
-        epoch = session.create_epoch
-        if session.is_stale_create(epoch):
-            _logger.debug(
-                "on_compression_completed: stale epoch, skipping msg=%s",
-                (message_id or "?")[:12],
-            )
-            return
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            epoch = session.create_epoch
+            if session.is_stale_create(epoch):
+                _logger.debug(
+                    "on_compression_completed: stale epoch, skipping msg=%s",
+                    (message_id or "?")[:12],
+                )
+                return
 
-        # A first stream/reasoning/answer callback may have moved the session
-        # forward while Hermes was sending its final compression heartbeat. In
-        # that case the model state is authoritative and must not be reverted.
-        if session._response_phase != "compression":
+            # A first stream/reasoning/answer callback may have moved the session
+            # forward while Hermes was sending its final compression heartbeat. In
+            # that case the model state is authoritative and must not be reverted.
+            if session._response_phase != "compression":
+                session._compression_previous_phase = None
+                return
+
+            previous_phase = session._compression_previous_phase or "waiting"
+            if previous_phase not in ("waiting", "thinking", "answer", "tool"):
+                previous_phase = "waiting"
             session._compression_previous_phase = None
-            return
-
-        previous_phase = session._compression_previous_phase or "waiting"
-        if previous_phase not in ("waiting", "thinking", "answer", "tool"):
-            previous_phase = "waiting"
-        session._compression_previous_phase = None
-        session._response_phase = previous_phase
-        _logger.info(
-            "HLS: context compression completed msg=%s source=%s restored_phase=%s",
-            (message_id or "?")[:12],
-            source,
-            previous_phase,
-        )
-        self._schedule_linear_flush(session, force=True)
+            session._response_phase = previous_phase
+            _logger.info(
+                "HLS: context compression completed msg=%s source=%s restored_phase=%s",
+                (message_id or "?")[:12],
+                source,
+                previous_phase,
+            )
+            self._schedule_linear_flush(session, force=True)
 
     def on_model_activity(self, *, message_id: str, source: str = "stream") -> None:
         """Mark upstream activity that has no user-visible text yet.
@@ -499,27 +514,30 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_model_activity"):
             return
 
-        epoch = session.create_epoch
-        if session.is_stale_create(epoch):
-            _logger.debug(
-                "on_model_activity: stale epoch, skipping msg=%s",
-                (message_id or "?")[:12],
-            )
-            return
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            epoch = session.create_epoch
+            if session.is_stale_create(epoch):
+                _logger.debug(
+                    "on_model_activity: stale epoch, skipping msg=%s",
+                    (message_id or "?")[:12],
+                )
+                return
 
-        previous_phase = session._response_phase
-        if previous_phase not in ("waiting", "tool", "compression"):
-            return
+            previous_phase = session._response_phase
+            if previous_phase not in ("waiting", "tool", "compression"):
+                return
 
-        session._compression_previous_phase = None
-        session._response_phase = "thinking"
-        if previous_phase in ("waiting", "compression"):
-            _logger.info(
-                "HLS: first upstream activity msg=%s source=%s",
-                (message_id or "?")[:12],
-                source,
-            )
-        self._schedule_linear_flush(session, force=True)
+            session._compression_previous_phase = None
+            session._response_phase = "thinking"
+            if previous_phase in ("waiting", "compression"):
+                _logger.info(
+                    "HLS: first upstream activity msg=%s source=%s",
+                    (message_id or "?")[:12],
+                    source,
+                )
+            self._schedule_linear_flush(session, force=True)
 
     def on_reasoning(self, *, message_id: str, text: str) -> None:
         """Native model reasoning delta (incremental append)."""
@@ -529,31 +547,34 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_reasoning"):
             return
 
-        # Epoch guard: if session entered terminal phase between lookup and
-        # here (concurrent message race), skip to prevent stale writes.
-        epoch = session.create_epoch
-        if session.is_stale_create(epoch):
-            _logger.debug("on_reasoning: stale epoch, skipping msg=%s", (message_id or "?")[:12])
-            return
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            # Epoch guard: if session entered terminal phase between lookup and
+            # here (concurrent message race), skip to prevent stale writes.
+            epoch = session.create_epoch
+            if session.is_stale_create(epoch):
+                _logger.debug("on_reasoning: stale epoch, skipping msg=%s", (message_id or "?")[:12])
+                return
 
-        # Detecting model activity is independent from exposing chain-of-thought.
-        # Even with show_reasoning=false, the placeholder must stop claiming that
-        # Hermes is still waiting for the upstream model.
-        phase_changed = session._response_phase != "thinking"
-        session._compression_previous_phase = None
-        session._response_phase = "thinking"
+            # Detecting model activity is independent from exposing chain-of-thought.
+            # Even with show_reasoning=false, the placeholder must stop claiming that
+            # Hermes is still waiting for the upstream model.
+            phase_changed = session._response_phase != "thinking"
+            session._compression_previous_phase = None
+            session._response_phase = "thinking"
 
-        if self._cfg.show_reasoning:
-            # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
-            # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
-            if session.unified_state is None:
-                _logger.warning(
-                    "HLS: on_reasoning but unified_state is None, status only msg=%s",
-                    (message_id or "?")[:12],
-                )
-            else:
-                session.unified_state.on_reasoning_delta(text)
-        self._schedule_linear_flush(session, force=phase_changed)
+            if self._cfg.show_reasoning:
+                # v1.1.0 (Task 1.1+1.2): linear is the only path — session.linear
+                # v1.1.1: 真飞书模式下卡片创建可能降级（unified_state=None），加保护
+                if session.unified_state is None:
+                    _logger.warning(
+                        "HLS: on_reasoning but unified_state is None, status only msg=%s",
+                        (message_id or "?")[:12],
+                    )
+                else:
+                    session.unified_state.on_reasoning_delta(text)
+            self._schedule_linear_flush(session, force=phase_changed)
 
     def on_tool_update(
         self,
@@ -570,34 +591,37 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_tool_update"):
             return
 
-        # Epoch guard: prevent stale writes from previous message's callbacks
-        epoch = session.create_epoch
-        if session.is_stale_create(epoch):
-            _logger.debug("on_tool_update: stale epoch, skipping msg=%s", (message_id or "?")[:12])
-            return
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            # Epoch guard: prevent stale writes from previous message's callbacks
+            epoch = session.create_epoch
+            if session.is_stale_create(epoch):
+                _logger.debug("on_tool_update: stale epoch, skipping msg=%s", (message_id or "?")[:12])
+                return
 
-        is_new_tool = status in ("running", "started", "tool.started")
-        if is_new_tool:
-            # The next visible answer belongs to a later model call. Reset the
-            # speed window so tool execution time cannot dilute that call.
-            session._first_answer_time = 0.0
-            session._last_answer_time = 0.0
-            session._compression_previous_phase = None
-            session._response_phase = "tool"
-            session.tool_use.record_start(tool_name, detail)
-        else:
-            is_error = status in ("error", "failed")
-            session.tool_use.record_end(
-                tool_name,
-                error=detail if is_error else "",
-                output="" if is_error else detail,
-            )
+            is_new_tool = status in ("running", "started", "tool.started")
+            if is_new_tool:
+                # The next visible answer belongs to a later model call. Reset the
+                # speed window so tool execution time cannot dilute that call.
+                session._first_answer_time = 0.0
+                session._last_answer_time = 0.0
+                session._compression_previous_phase = None
+                session._response_phase = "tool"
+                session.tool_use.record_start(tool_name, detail)
+            else:
+                is_error = status in ("error", "failed")
+                session.tool_use.record_end(
+                    tool_name,
+                    error=detail if is_error else "",
+                    output="" if is_error else detail,
+                )
 
-        if session.unified_state is None:
-            _logger.warning("HLS: on_tool_update but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
-            return
-        session.unified_state.on_tool_event(is_new_tool=is_new_tool)
-        self._schedule_linear_flush(session)
+            if session.unified_state is None:
+                _logger.warning("HLS: on_tool_update but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
+                return
+            session.unified_state.on_tool_event(is_new_tool=is_new_tool)
+            self._schedule_linear_flush(session)
 
     def on_answer(self, *, message_id: str, text: str) -> None:
         """答案文本增量（流式）."""
@@ -621,44 +645,51 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session is None or session.guard.should_skip("on_answer"):
             return
 
-        # Epoch guard: prevent stale writes from previous message's callbacks
-        epoch = session.create_epoch
-        if session.is_stale_create(epoch):
-            _logger.debug("on_answer: stale epoch, skipping msg=%s", (message_id or "?")[:12])
-            return
-
-        answer_text = strip_reasoning_tags(text)
-        if text:
-            # A stream callback can carry a reasoning marker (for example
-            # ``<think>``) before it carries any visible answer text. It is
-            # still upstream activity, so the card must leave the waiting
-            # state immediately instead of waiting for a renderable delta.
-            if answer_text.strip():
-                # The spinner row carries 模型思考中 for visible answer deltas
-                # too; ``answer`` is retained here for timing and tool-phase
-                # bookkeeping.
-                session._compression_previous_phase = None
-                session._response_phase = "answer"
-            else:
-                phase_changed = session._response_phase != "thinking"
-                session._compression_previous_phase = None
-                session._response_phase = "thinking"
-
-            if not answer_text.strip():
-                self._schedule_linear_flush(session, force=phase_changed)
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                _logger.debug(
+                    "HLS: late answer ignored after seal boundary msg=%s len=%d",
+                    (message_id or "?")[:12], len(text or ""),
+                )
+                return
+            # Epoch guard: prevent stale writes from previous message's callbacks
+            epoch = session.create_epoch
+            if session.is_stale_create(epoch):
+                _logger.debug("on_answer: stale epoch, skipping msg=%s", (message_id or "?")[:12])
                 return
 
-            # The spinner row picks up 模型思考中 from this phase on the flush
-            # scheduled below, and keeps showing it for the rest of the stream.
-            now = time.monotonic()
-            if session._first_answer_time == 0.0:
-                session._first_answer_time = now
-            session._last_answer_time = now
-            if session.unified_state is None:
-                _logger.warning("HLS: on_answer but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
-                return
-            session.unified_state.on_answer_delta(answer_text)
-            self._schedule_linear_flush(session)
+            answer_text = strip_reasoning_tags(text)
+            if text:
+                # A stream callback can carry a reasoning marker (for example
+                # ``<think>``) before it carries any visible answer text. It is
+                # still upstream activity, so the card must leave the waiting
+                # state immediately instead of waiting for a renderable delta.
+                if answer_text.strip():
+                    # The spinner row carries 模型思考中 for visible answer deltas
+                    # too; ``answer`` is retained here for timing and tool-phase
+                    # bookkeeping.
+                    session._compression_previous_phase = None
+                    session._response_phase = "answer"
+                else:
+                    phase_changed = session._response_phase != "thinking"
+                    session._compression_previous_phase = None
+                    session._response_phase = "thinking"
+
+                if not answer_text.strip():
+                    self._schedule_linear_flush(session, force=phase_changed)
+                    return
+
+                # The spinner row picks up 模型思考中 from this phase on the flush
+                # scheduled below, and keeps showing it for the rest of the stream.
+                now = time.monotonic()
+                if session._first_answer_time == 0.0:
+                    session._first_answer_time = now
+                session._last_answer_time = now
+                if session.unified_state is None:
+                    _logger.warning("HLS: on_answer but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
+                    return
+                session.unified_state.on_answer_delta(answer_text)
+                self._schedule_linear_flush(session)
 
     def on_aborted(self, *, message_id: str) -> None:
         """用户 /stop 导致消息被中断."""
@@ -874,47 +905,58 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._cleanup(message_id)
             return False
 
-        # v1.3.0 P1-06: normal-path completion log downgraded to DEBUG (fires
-        # The yield-to-gateway log above stays INFO (edge case, useful for debugging).
+        # Reconcile the authoritative completion answer and enter COMPLETING
+        # under the same lock used by worker-thread stream callbacks. This
+        # prevents a stale length snapshot from appending the same final delta
+        # twice when on_answer races on_completed.
+        with session._stream_lock:
+            if session.state in (COMPLETING, COMPLETED):
+                return True
+            if not session.accepts_stream_updates:
+                return False
 
-        if answer:
-            session.text.on_deliver(answer)
-            if (
-                session.linear
-                and session.unified_state is not None
-            ):
-                from ..state.text import strip_reasoning_tags
-                clean_answer = strip_reasoning_tags(answer)
-                if clean_answer:
-                    _existing = session.unified_state.answer_text
-                    _existing_len = len(_existing)
-                    _clean_len = len(clean_answer)
-                    if _existing_len == 0:
-                        # No answer was streamed — use the full on_completed answer
-                        session.unified_state.on_answer_delta(clean_answer)
-                        _logger.info(
-                            "on_completed: linear answer fallback, len=%d msg=%s",
-                            _clean_len, (message_id or "?")[:12],
-                        )
-                    elif _clean_len > _existing_len and clean_answer[:_existing_len] == _existing:
-                        # on_completed answer extends the streamed answer — append diff
-                        _diff = clean_answer[_existing_len:]
-                        if _diff:
-                            session.unified_state.on_answer_delta(_diff)
+            # v1.3.0 P1-06: normal-path completion log downgraded to DEBUG (fires
+            # The yield-to-gateway log above stays INFO (edge case, useful for debugging).
+            if answer:
+                session.text.on_deliver(answer)
+                if (
+                    session.linear
+                    and session.unified_state is not None
+                ):
+                    from ..state.text import strip_reasoning_tags
+                    clean_answer = strip_reasoning_tags(answer)
+                    if clean_answer:
+                        _existing = session.unified_state.answer_text
+                        _existing_len = len(_existing)
+                        _clean_len = len(clean_answer)
+                        if _existing_len == 0:
+                            # No answer was streamed — use the full on_completed answer
+                            session.unified_state.on_answer_delta(clean_answer)
                             _logger.info(
-                                "on_completed: linear answer extended, existing=%d added=%d msg=%s",
-                                _existing_len, len(_diff), (message_id or "?")[:12],
+                                "on_completed: linear answer fallback, len=%d msg=%s",
+                                _clean_len, (message_id or "?")[:12],
                             )
-                    elif _clean_len > _existing_len and clean_answer[:_existing_len] != _existing:
-                        # only a prefix. Replace with the more complete version.
-                        _logger.warning(
-                            "on_completed: linear answer MISMATCH existing_len=%d clean_len=%d msg=%s "
-                            "existing_head=%r clean_head=%r — replacing with on_completed answer",
-                            _existing_len, _clean_len, (message_id or "?")[:12],
-                            _existing[:60], clean_answer[:60],
-                        )
-                        session.unified_state.answer_text = clean_answer
-                        session.unified_state.answer_dirty = True
+                        elif _clean_len > _existing_len and clean_answer[:_existing_len] == _existing:
+                            # on_completed answer extends the streamed answer — append diff
+                            _diff = clean_answer[_existing_len:]
+                            if _diff:
+                                session.unified_state.on_answer_delta(_diff)
+                                _logger.info(
+                                    "on_completed: linear answer extended, existing=%d added=%d msg=%s",
+                                    _existing_len, len(_diff), (message_id or "?")[:12],
+                                )
+                        elif _clean_len > _existing_len and clean_answer[:_existing_len] != _existing:
+                            # only a prefix. Replace with the more complete version.
+                            _logger.warning(
+                                "on_completed: linear answer MISMATCH existing_len=%d clean_len=%d msg=%s "
+                                "existing_head=%r clean_head=%r — replacing with on_completed answer",
+                                _existing_len, _clean_len, (message_id or "?")[:12],
+                                _existing[:60], clean_answer[:60],
+                            )
+                            session.unified_state.answer_text = clean_answer
+                            session.unified_state.answer_dirty = True
+
+            session.state = COMPLETING
 
         # ── 保存错误/中断消息 ──
         # 用于在卡片正文中展示（而非仅页脚）
@@ -954,8 +996,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             **({"estimated_cost_usd": estimated_cost_usd} if estimated_cost_usd else {}),
             **({"cost_status": cost_status} if cost_status and cost_status != "unknown" else {}),
         }
-
-        session.state = COMPLETING
 
         self._complete_session(session)
         return True

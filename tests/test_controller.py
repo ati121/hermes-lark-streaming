@@ -106,6 +106,18 @@ def test_fire_and_forget_wakes_loop_from_worker_thread() -> None:
 
 
 @pytest.mark.asyncio
+async def test_card_session_flush_uses_supplied_event_loop() -> None:
+    """Continuation sessions must not bind flushes to the creator thread's loop."""
+    target_loop = asyncio.new_event_loop()
+    try:
+        session = CardSession("msg_target_loop", "chat", target_loop)
+        assert session._loop is target_loop
+        assert session.flush._loop is target_loop
+    finally:
+        target_loop.close()
+
+
+@pytest.mark.asyncio
 async def test_model_activity_moves_waiting_card_to_thinking() -> None:
     ctrl = StreamCardController()
     _enable(ctrl)
@@ -1071,6 +1083,75 @@ class TestInteractiveDeviceTextSizeTransport:
         schedule.assert_called_once_with(session)
 
     @pytest.mark.asyncio
+    async def test_cardkit_flush_keeps_answer_arriving_during_stream_dirty(self) -> None:
+        """A completed request may only clear the answer snapshot it actually sent."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_cardkit_race", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_cardkit_race"
+        session._creation_stages.update({"answer", "hint_removed"})
+        session.existing_elements = {ANSWER_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        assert session.unified_state is not None
+        session.unified_state.on_answer_delta("第一段")
+
+        async def receive_more_text(*args, **kwargs) -> None:
+            assert args[2] == "第一段"
+            session.unified_state.on_answer_delta("第二段")
+
+        ctrl._client.cardkit_stream_element = AsyncMock(side_effect=receive_more_text)
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            await ctrl._do_unified_flush(session)
+
+        assert session.unified_state.answer_text == "第一段第二段"
+        assert session.unified_state.answer_dirty is True
+        schedule.assert_called_once_with(session)
+
+    @pytest.mark.asyncio
+    async def test_cardkit_answer_snapshot_and_dirty_reset_are_atomic(self) -> None:
+        """A worker callback cannot land between snapshotting text and clearing dirty."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_cardkit_atomic", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_cardkit_atomic"
+        session._creation_stages.update({"answer", "hint_removed"})
+        session.existing_elements = {ANSWER_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        assert session.unified_state is not None
+        session.unified_state.on_answer_delta("第一段")
+        ctrl._sessions[session.message_id] = session
+
+        worker_started = threading.Event()
+        callback_done = threading.Event()
+        worker: threading.Thread | None = None
+
+        def snapshot_text(content: str) -> str:
+            nonlocal worker
+
+            def append_from_worker() -> None:
+                worker_started.set()
+                ctrl.on_answer(message_id=session.message_id, text="第二段")
+                callback_done.set()
+
+            worker = threading.Thread(target=append_from_worker, daemon=True)
+            worker.start()
+            assert worker_started.wait(1.0)
+            assert not callback_done.wait(0.1), (
+                "stream callback must wait until snapshot text and dirty reset are atomic"
+            )
+            return content
+
+        with patch(
+            "hermes_lark_streaming.controller.linear_mixin.escape_markdown_asterisks",
+            side_effect=snapshot_text,
+        ):
+            await ctrl._do_unified_flush(session)
+
+        assert callback_done.wait(1.0)
+        assert worker is not None
+        worker.join(timeout=1.0)
+        assert session.unified_state.answer_text == "第一段第二段"
+        assert session.unified_state.answer_dirty is True
+
+    @pytest.mark.asyncio
     async def test_complete_replaces_card_and_keeps_footer_rules(self) -> None:
         ctrl = _setup_ctrl(linear=True)
         self._enable_device_sizes(ctrl)
@@ -1558,6 +1639,50 @@ class TestDoUnifiedFlush:
 
         # Should not raise
         await ctrl._do_unified_flush(session)
+        assert session.unified_state.answer_dirty is True
+
+    @pytest.mark.asyncio
+    async def test_stream_element_unexpected_error_restores_dirty(self) -> None:
+        """Unexpected transport errors must leave the answer queued for retry."""
+        ctrl = _setup_ctrl()
+        ctrl._client.cardkit_stream_element = AsyncMock(
+            side_effect=RuntimeError("connection reset"),
+        )
+        session = _make_session("msg_unexpected_stream_error", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_unexpected"
+        session._creation_stages.update({"answer", "hint_removed"})
+        session.existing_elements = {ANSWER_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session.unified_state.on_answer_delta("retry me")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            await ctrl._do_unified_flush(session)
+
+        assert session.unified_state.answer_dirty is True
+        schedule.assert_called_once_with(session)
+
+    @pytest.mark.asyncio
+    async def test_phase2_stream_unexpected_error_restores_dirty(self) -> None:
+        """The initial answer-element stream path also retains failed content."""
+        ctrl = _setup_ctrl()
+        ctrl._client.cardkit_stream_element = AsyncMock(
+            side_effect=RuntimeError("connection reset"),
+        )
+        session = _make_session("msg_phase2_stream_error", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_phase2_unexpected"
+        session.existing_elements = {_LOADING_HINT_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        session.unified_state.on_answer_delta("retry initial answer")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush") as schedule:
+            await ctrl._do_unified_flush(session)
+
+        assert "answer" in session._creation_stages
+        assert session.unified_state.answer_dirty is True
+        assert ctrl._client.cardkit_stream_element.await_count == 2
+        schedule.assert_called_once_with(session)
 
 
 # ── Split/rollover tests — REMOVED in unified panel architecture ──
@@ -1876,6 +2001,43 @@ class TestDoLinearComplete:
         )
         # answer_dirty should be cleared after drain
         assert session.unified_state.answer_dirty is False
+
+    @pytest.mark.asyncio
+    async def test_answer_arriving_during_final_seal_cannot_escape_completed_card(self) -> None:
+        """The final seal closes the stream-update boundary before its API await."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_seal_race", linear=True)
+        session.state = COMPLETING
+        session.card_id = "card_seal_race"
+        session._creation_stages.update({"answer", "hint_removed"})
+        session.existing_elements = {ANSWER_ELEMENT_ID, _LOADING_ELEMENT_ID}
+        assert session.unified_state is not None
+        session.unified_state.on_answer_delta("第一段")
+        session.unified_state.answer_dirty = False
+        ctrl._sessions[session.message_id] = session
+        ctrl._release_session_data = lambda s: None
+
+        final_answer_updates: list[str] = []
+
+        async def late_answer_during_seal(card_id: str, actions: list[dict], **kwargs) -> None:
+            for action in actions:
+                if (
+                    action.get("action") == "partial_update_element"
+                    and action.get("params", {}).get("element_id") == ANSWER_ELEMENT_ID
+                ):
+                    final_answer_updates.append(
+                        action["params"]["partial_element"].get("content", "")
+                    )
+            ctrl.on_answer(message_id=session.message_id, text="第二段")
+
+        ctrl._client.cardkit_batch_update = AsyncMock(side_effect=late_answer_during_seal)
+
+        assert await ctrl._do_linear_complete(session) is True
+
+        assert session.state == COMPLETED
+        assert session.unified_state.answer_text == "第一段"
+        assert session.unified_state.answer_dirty is False
+        assert final_answer_updates == ["第一段"]
 
     @pytest.mark.asyncio
     async def test_drain_dirty_panel_before_seal(self) -> None:

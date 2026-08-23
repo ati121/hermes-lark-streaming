@@ -4,6 +4,20 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.18 (2026-08-23, personal fork)
+
+### Fixed — preserve streaming updates across races and recovery boundaries
+
+- Makes CardKit answer snapshots and dirty-flag consumption atomic, so tokens
+  arriving while an update is in flight remain queued for the next flush.
+- Restores pending answer content after cancellation, API failures, and
+  unexpected transport errors instead of leaving the card stale.
+- Seals a completing session against late answer callbacks and prevents a late
+  callback from opening an unnecessary continuation card.
+- Binds continuation flush controllers to their target event loop and adds
+  regression coverage for worker-thread scheduling, final-seal races, and
+  failed stream retries.
+
 ## v1.6.17 (2026-08-23, personal fork)
 
 ### Fixed — context compression is shown explicitly

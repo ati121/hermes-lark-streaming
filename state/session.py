@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from threading import Lock
+from threading import Lock, RLock
 from typing import TYPE_CHECKING, Any
 
 # Phase constants — single source of truth in state.phase
@@ -53,6 +53,7 @@ class CardSession:
         "_response_phase",
         "_streaming_closed",
         "_streaming_closed_logged",
+        "_stream_lock",
         "_was_aborted",
         "anchor_id",
         "card_created_at",
@@ -100,11 +101,11 @@ class CardSession:
         self.card_trace_id: str = (message_id or "??????")[-6:]
         self.text = TextState()
         self.tool_use = ToolUseTracker()
-        self.flush = FlushController()
+        self._loop = loop
+        self.flush = FlushController(loop=loop)
         self.footer: dict[str, Any] = {}
         self.text_sizes: dict[str, str | dict[str, str]] = {}
         self.sequence = 1
-        self._loop = loop
         self.created_at = time.time()
         self.deferred_background_review_closed = False
         self.deferred_background_reviews: list[tuple[str, Any]] = []
@@ -142,6 +143,11 @@ class CardSession:
         self._streaming_closed: bool = False
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG
         self._streaming_closed_logged: bool = False
+        # Streaming callbacks may arrive from Hermes worker threads while the
+        # event-loop thread is sealing the card.  This lock makes the final
+        # seal boundary atomic: events accepted before it are included, events
+        # arriving after it cannot mutate a completed session.
+        self._stream_lock = RLock()
         self._card_ready: asyncio.Event = asyncio.Event()
         self._is_continuation: bool = False
         self._continuation_reactivation_count: int = 0
@@ -152,6 +158,11 @@ class CardSession:
         # Status text on that same row when no tool is running (model_thinking).
         self._loading_status_key: str | None = None
         self._loading_hint_state: str = "loading_context"
+
+    @property
+    def accepts_stream_updates(self) -> bool:
+        """Whether model/tool callbacks may still mutate live card content."""
+        return self.state != CardPhase.COMPLETING and not self.is_terminal_phase
 
     def transition(self, to: str, source: str = "", reason: str = "") -> bool:
         """rejected.  Illegal transitions are logged but do not raise."""
