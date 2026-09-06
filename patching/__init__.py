@@ -53,6 +53,7 @@ __all__ = [
     # From gateway
     '_wrap_handle_message',
     '_wrap_handle_message_with_agent',
+    '_wrap_enrich_message_with_vision',
     '_wrap_run_agent',
     '_wrap_run_background_task',
     '_wrap_cron_deliver',
@@ -84,6 +85,8 @@ __all__ = [
     'on_tool_updated',
     'on_answer_delta',
     'on_thinking_delta',
+    'on_image_analysis_started',
+    'on_image_analysis_completed',
     'on_compression_started',
     'on_compression_completed',
     'on_model_activity',
@@ -167,6 +170,7 @@ def _get_thread_local_ctx() -> dict | None:
 from .gateway import (  # noqa: E402
     _wrap_handle_message,
     _wrap_handle_message_with_agent,
+    _wrap_enrich_message_with_vision,
     _wrap_run_agent,
     _wrap_run_background_task,
     _wrap_cron_deliver,
@@ -201,6 +205,8 @@ from .hooks import (  # noqa: E402
     on_tool_updated,
     on_answer_delta,
     on_thinking_delta,
+    on_image_analysis_started,
+    on_image_analysis_completed,
     on_compression_started,
     on_compression_completed,
     on_model_activity,
@@ -215,7 +221,7 @@ from .hooks import (  # noqa: E402
 # ── Public entry point ─────────────────────────────────────────────
 
 def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
-    """Apply the three critical GatewayRunner method patches.
+    """Apply GatewayRunner lifecycle and optional preprocessing patches.
 
     ``compat`` lets a caller that already built a :class:`HermesCompat` reuse it
     instead of paying for a second module resolution pass.
@@ -254,6 +260,12 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
             _patched_methods.append('_run_agent')
         else:
             _logger.warning("hermes-lark-streaming: GatewayRunner._run_agent not found, skipping patch")
+
+        if hasattr(GatewayRunner, '_enrich_message_with_vision'):
+            GatewayRunner._enrich_message_with_vision = _wrap_enrich_message_with_vision(
+                GatewayRunner._enrich_message_with_vision
+            )
+            _patched_methods.append('_enrich_message_with_vision')
 
         try:
             GatewayRunner._run_background_task = _wrap_run_background_task(

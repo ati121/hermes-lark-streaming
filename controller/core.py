@@ -420,6 +420,45 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return
             self._linear_on_thinking(session, text)
 
+    def on_image_analysis_started(self, *, message_id: str) -> None:
+        """Show incoming-image analysis before the main model starts."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_image_analysis_started"):
+            return
+
+        with session._stream_lock:
+            if not session.accepts_stream_updates or session._response_phase != "waiting":
+                return
+            session._response_phase = "image_analysis"
+            _logger.info("HLS: image analysis started msg=%s", (message_id or "?")[:12])
+            # Preserve the phase even if the placeholder is still being created.
+            self._schedule_linear_flush(session, force=True)
+
+    def on_image_analysis_completed(self, *, message_id: str) -> None:
+        """Restore waiting only if no later model activity has taken over."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_image_analysis_completed"):
+            return
+
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            if session._response_phase == "compression":
+                # Compression can temporarily cover image analysis. Its eventual
+                # completion must not restore an image request that already ended.
+                if session._compression_previous_phase == "image_analysis":
+                    session._compression_previous_phase = "waiting"
+                return
+            if session._response_phase != "image_analysis":
+                return
+            session._response_phase = "waiting"
+            _logger.info("HLS: image analysis completed msg=%s", (message_id or "?")[:12])
+            self._schedule_linear_flush(session, force=True)
+
     def on_compression_started(
         self, *, message_id: str, source: str = "context compression started",
     ) -> None:
@@ -488,7 +527,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return
 
             previous_phase = session._compression_previous_phase or "waiting"
-            if previous_phase not in ("waiting", "thinking", "answer", "tool"):
+            if previous_phase not in ("waiting", "image_analysis", "thinking", "answer", "tool"):
                 previous_phase = "waiting"
             session._compression_previous_phase = None
             session._response_phase = previous_phase
@@ -526,12 +565,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return
 
             previous_phase = session._response_phase
-            if previous_phase not in ("waiting", "tool", "compression"):
+            if previous_phase not in ("waiting", "image_analysis", "tool", "compression"):
                 return
 
             session._compression_previous_phase = None
             session._response_phase = "thinking"
-            if previous_phase in ("waiting", "compression"):
+            if previous_phase in ("waiting", "image_analysis", "compression"):
                 _logger.info(
                     "HLS: first upstream activity msg=%s source=%s",
                     (message_id or "?")[:12],
