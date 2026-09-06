@@ -4,6 +4,17 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.19 (2026-09-06, personal fork)
+
+### Fixed — show incoming image analysis before the main model runs
+
+- Shows `正在识别图片...` / `Analyzing images...` while Hermes preprocesses
+  incoming images with its vision model, including images sent without text.
+- Restores the waiting status when analysis returns, fails, or is cancelled;
+  later model activity keeps its current status.
+- Supports both CardKit and device-sized interactive cards, including analysis
+  that starts before the placeholder finishes being created.
+
 ## v1.6.18 (2026-08-23, personal fork)
 
 ### Fixed — preserve streaming updates across races and recovery boundaries
