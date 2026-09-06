@@ -135,11 +135,6 @@ _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 
 # thinking and a tool, so the text doesn't jump sideways.
 _THINKING_EMOJI = "💭"
 _COMPRESSION_EMOJI = "🗜️"
-_PLACEHOLDER_STATUSES = {
-    "waiting": ("loading_context", None),
-    "image_analysis": ("image_analyzing", "👁️"),
-    "compression": ("context_compressing", _COMPRESSION_EMOJI),
-}
 
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle."""
@@ -211,13 +206,17 @@ class UnifiedControllerMixin:
                     elements.extend(action.get("params", {}).get("elements", []))
         else:
             label, status_key, emoji = self._current_loading_status(session)
-            placeholder_status = _PLACEHOLDER_STATUSES.get(session._response_phase)
-            if not elements and placeholder_status is not None:
+            if not elements and session._response_phase in ("waiting", "compression"):
                 # Before the first model byte, the reversible context row owns
-                # waiting and preprocessing. The spinner takes over after
+                # both waiting and compression.  The spinner takes over after
                 # model activity starts (or when content already exists).
-                elements.append(_loading_hint_element(placeholder_status[0]))
-                if session._response_phase != "waiting":
+                hint_status = (
+                    "context_compressing"
+                    if session._response_phase == "compression"
+                    else "loading_context"
+                )
+                elements.append(_loading_hint_element(hint_status))
+                if session._response_phase == "compression":
                     label, status_key, emoji = None, None, None
             elements.append(_loading_element(
                 label,
@@ -269,10 +268,13 @@ class UnifiedControllerMixin:
                     # the waiting hint entirely and let the spinner row open on
                     # 模型思考中 rather than flashing a stale 等待上游模型响应.
                     label, status_key, emoji = self._current_loading_status(session)
-                    placeholder_status = _PLACEHOLDER_STATUSES.get(session._response_phase)
-                    include_hint = placeholder_status is not None
-                    loading_hint_status = placeholder_status[0] if include_hint else "loading_context"
-                    if include_hint and session._response_phase != "waiting":
+                    include_hint = session._response_phase in ("waiting", "compression")
+                    loading_hint_status = (
+                        "context_compressing"
+                        if session._response_phase == "compression"
+                        else "loading_context"
+                    )
+                    if session._response_phase == "compression":
                         label, status_key, emoji = None, None, None
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
@@ -827,7 +829,7 @@ class UnifiedControllerMixin:
 
     def _current_tool_label(self, session: CardSession) -> tuple[str, str] | None:
         """Return the sticky tool label only while the model is in tool phase."""
-        if session._response_phase in ("image_analysis", "compression", "thinking", "answer"):
+        if session._response_phase in ("compression", "thinking", "answer"):
             return None
         return session.tool_use.last_tool_names
 
@@ -844,13 +846,12 @@ class UnifiedControllerMixin:
         upstream has spoken but no tool is holding it. Both states carry an
         emoji so the text doesn't shift sideways when one replaces the other.
         """
-        placeholder_status = _PLACEHOLDER_STATUSES.get(session._response_phase)
-        if placeholder_status is not None and session._response_phase != "waiting":
+        if session._response_phase == "compression":
             if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
-                # The hint row is the visible preprocessing status until the
+                # The hint row is the visible compression status until the
                 # spinner is the only remaining placeholder.
                 return None, None, None
-            return None, placeholder_status[0], placeholder_status[1]
+            return None, "context_compressing", _COMPRESSION_EMOJI
         label = self._current_tool_label(session)
         if label:
             return label, None, session.tool_use.last_tool_emoji
@@ -878,9 +879,10 @@ class UnifiedControllerMixin:
         if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
             return
 
-        placeholder_status = _PLACEHOLDER_STATUSES.get(session._response_phase)
-        if placeholder_status is not None:
-            status_key = placeholder_status[0]
+        if session._response_phase == "compression":
+            status_key = "context_compressing"
+        elif session._response_phase == "waiting":
+            status_key = "loading_context"
         elif session._loading_label_supported:
             return  # spinner row owns model/tool status
         else:

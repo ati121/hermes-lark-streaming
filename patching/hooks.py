@@ -161,18 +161,6 @@ def on_thinking_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     return True
 
 @_safe_hook(default_return=False, log_level="debug")
-def on_image_analysis_started(*, ctrl: Any, message_id: str) -> bool:
-    """Hermes is describing incoming images before the main model runs."""
-    ctrl.on_image_analysis_started(message_id=message_id)
-    return True
-
-@_safe_hook(default_return=False, log_level="debug")
-def on_image_analysis_completed(*, ctrl: Any, message_id: str) -> bool:
-    """Image preprocessing returned, failed, or was cancelled."""
-    ctrl.on_image_analysis_completed(message_id=message_id)
-    return True
-
-@_safe_hook(default_return=False, log_level="debug")
 def on_compression_started(
     *, ctrl: Any, message_id: str, source: str = "context compression started",
 ) -> bool:

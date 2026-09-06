@@ -251,44 +251,6 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     return wrapper
 
-def _wrap_enrich_message_with_vision(orig: Callable) -> Callable:
-    """Report image preprocessing before AIAgent's stream callbacks exist."""
-    if getattr(orig, "_hls_image_analysis_wrapped", False) is True:
-        return orig
-
-    @functools.wraps(orig)
-    async def wrapper(self, user_text, image_paths, *args, **kwargs):
-        # This gateway coroutine already owns the START context, but _run_agent
-        # has not filled event_message_id yet. Capture its id for both hooks;
-        # never use a worker's stale thread-local context for an unrelated turn.
-        ctx = _msg_ctx.get()
-        mid = (ctx or {}).get("event_message_id") or (ctx or {}).get("message_id")
-        if not mid or not image_paths:
-            return await orig(self, user_text, image_paths, *args, **kwargs)
-
-        try:
-            from .hooks import on_image_analysis_started
-
-            on_image_analysis_started(message_id=mid)
-        except Exception:  # noqa: BLE001 — display hooks must not abort image processing
-            _logger.debug("HLS: image analysis START hook failed", exc_info=True)
-
-        try:
-            return await orig(self, user_text, image_paths, *args, **kwargs)
-        finally:
-            # Also leave the status on errors and asyncio cancellation, while
-            # preserving Hermes' original result/exception and image handling.
-            try:
-                from .hooks import on_image_analysis_completed
-
-                on_image_analysis_completed(message_id=mid)
-            except Exception:  # noqa: BLE001 — preserve the original result or exception
-                _logger.debug("HLS: image analysis COMPLETE hook failed", exc_info=True)
-
-    wrapper._hls_image_analysis_wrapped = True
-    return wrapper
-
-
 def _wrap_run_agent(orig: Callable) -> Callable:
     """Inject COMPLETE hook after agent runs; propagate event_message_id."""
 

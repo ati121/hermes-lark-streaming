@@ -4,6 +4,14 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.20 (2026-09-06, personal fork)
+
+### Reverted — incoming image analysis status
+
+- Withdraws the image-preprocessing status changes introduced in v1.6.19.
+- Restores the runtime code and existing tests from v1.6.18, including its
+  earlier streaming recovery, race handling, and context-compression fixes.
+
 ## v1.6.19 (2026-09-06, personal fork)
 
 ### Fixed — show incoming image analysis before the main model runs
