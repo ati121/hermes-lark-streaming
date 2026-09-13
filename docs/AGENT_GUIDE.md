@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装与维护指南
 
 > 高信息密度参考文档，供 Hermes Agent 或其他自动化 Agent 解析。
-> 最后更新：2026-08-13（v1.6.2，个人复刻版）
+> 最后更新：2026-09-14（v1.6.21，个人复刻版）
 
 ## 项目概览
 
@@ -195,6 +195,23 @@ interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。�
 `on_message_completed`、`on_message_aborted`、`on_message_interrupted`、
 `on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、`on_tool_updated`、
 `on_background_review_message`、`on_cron_deliver`。
+
+## OpenViking 工具显示
+
+卡片按 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)
+识别模型调用的六个 `viking_*` 工具，状态行显示如下，工具面板同步使用对应的中英文名称和操作图标：
+
+| 工具 | 状态行 | 用途 |
+|------|--------|------|
+| `viking_search` | 🧠 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
+| `viking_read` | 🧠 读取记忆 | 按摘要、概览或全文读取指定内容 |
+| `viking_browse` | 🧠 浏览记忆库 | 查看目录、层级或条目元信息 |
+| `viking_remember` | 🧠 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
+| `viking_forget` | 🗑️ 删除记忆 | 按精确 URI 删除一条指定记忆 |
+| `viking_add_resource` | 📚 导入资料 | 导入网址、本地文件或目录并建立索引 |
+
+检索、读取和浏览也涵盖记忆库中的知识资料。“记住信息”表示提交记忆提炼，
+不代表每次都会新建独立的记忆文件。工具详情保留完整的 `viking://` URI 和结果。
 
 ## 故障排查
 

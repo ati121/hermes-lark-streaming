@@ -138,13 +138,21 @@ _TOOL_SPECS: dict[str, tuple[str, str, str, str | None, bool]] = {
     "skill_manage": ("管理技能", "Manage skill", "app-default_outlined", None, False),
     "skills_list": ("技能列表", "List skills", "app-default_outlined", None, False),
     "setup_mcp": ("配置 MCP", "Set up MCP", "setting-inter_outlined", None, False),
-    # Memory — Hindsight's three operations (retain / recall / reflect)
+    # Memory — Hindsight
     "memory": ("记忆", "Memory", "time_outlined", None, False),
     "hindsight_retain": ("记忆写入", "Retain memory", "time_outlined", None, True),
     "hindsight_recall": ("记忆回溯", "Recall memory", "time_outlined", "search", False),
     "hindsight_reflect": ("记忆推演", "Reflect on memory", "time_outlined", "search", False),
     "session_search": ("会话检索", "Search sessions", "doc-search_outlined", "search", False),
     "hindsight_operation": ("记忆操作", "Memory operation", "time_outlined", None, False),
+    # OpenViking memory provider — Hermes exposes six literal viking_* names.
+    # Search/read/browse also cover knowledge resources in the memory store.
+    "viking_search": ("检索记忆", "Search memory", "doc-search_outlined", None, False),
+    "viking_read": ("读取记忆", "Read memory", "file-link-text_outlined", None, False),
+    "viking_browse": ("浏览记忆库", "Browse memory store", "folder_outlined", None, False),
+    "viking_remember": ("记住信息", "Remember information", "time_outlined", None, False),
+    "viking_forget": ("删除记忆", "Delete memory", "time_outlined", None, False),
+    "viking_add_resource": ("导入资料", "Import resources", "file-link-text_outlined", None, False),
     # Delegation / planning
     "delegate_task": ("派发子任务", "Delegate task", "robot_outlined", None, False),
     "todo": ("待办清单", "Todo", "list-check_outlined", None, True),
@@ -261,6 +269,12 @@ _TOOL_EMOJI_BY_NAME: dict[str, str] = {
     "hindsight_recall": "🧠",
     "hindsight_reflect": "🧠",
     "hindsight_operation": "🧠",
+    "viking_search": "🧠",
+    "viking_read": "🧠",
+    "viking_browse": "🧠",
+    "viking_remember": "🧠",
+    "viking_forget": "🗑️",
+    "viking_add_resource": "📚",
     "cronjob": "⏰",
     "clarify": "❓",
     "todo": "📋",

@@ -4,6 +4,14 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.21 (2026-09-14, personal fork)
+
+### Added — OpenViking tool labels and icons
+
+- Maps Hermes' six `viking_*` tools to localized names and operation icons in
+  the tool panel, with memory, deletion, and resource-import emoji in the status row.
+- Documents each operation, including OpenViking's memory extraction behavior.
+
 ## v1.6.20 (2026-09-06, personal fork)
 
 ### Reverted — incoming image analysis status
