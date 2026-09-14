@@ -49,7 +49,7 @@ class TestRealHermesToolNames:
             ("read_file", "读取文件"),
             ("write_file", "写入文件"),
             ("patch", "修改文件"),
-            ("memory", "记忆"),
+            ("memory", "Hermes · 内置记忆"),
             ("vision_analyze", "图像分析"),
             ("browser_exec", "浏览器执行"),
             ("delegate_task", "派发子任务"),
@@ -64,12 +64,12 @@ class TestRealHermesToolNames:
 
 
 class TestHindsightMemoryTools:
-    """Hindsight's three operations, all named around 记忆."""
+    """Hindsight's three operations, with the memory provider in each label."""
 
     def test_all_three_named_after_memory(self) -> None:
-        assert _tool_display_names("hindsight_retain")[1] == "记忆写入"
-        assert _tool_display_names("hindsight_recall")[1] == "记忆回溯"
-        assert _tool_display_names("hindsight_reflect")[1] == "记忆推演"
+        assert _tool_display_names("hindsight_retain")[1] == "Hindsight · 记忆写入"
+        assert _tool_display_names("hindsight_recall")[1] == "Hindsight · 记忆回溯"
+        assert _tool_display_names("hindsight_reflect")[1] == "Hindsight · 记忆推演"
 
     def test_all_three_present(self) -> None:
         for name in ("hindsight_retain", "hindsight_recall", "hindsight_reflect"):
@@ -137,7 +137,7 @@ class TestToolEmoji:
             ("web_search", "🔍"),
             ("delegate_task", "🤖"),
             # by-name overrides where the shared icon token is too coarse
-            ("hindsight_recall", "🧠"),   # time_outlined, shared with cron
+            ("hindsight_recall", "👁️"),   # time_outlined, shared with cron
             ("cronjob", "⏰"),
             ("image_generate", "🎨"),     # report_outlined, shared with video
             ("video_generate", "🎬"),

@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装与维护指南
 
 > 高信息密度参考文档，供 Hermes Agent 或其他自动化 Agent 解析。
-> 最后更新：2026-09-14（v1.6.21，个人复刻版）
+> 最后更新：2026-09-14（v1.6.22，个人复刻版）
 
 ## 项目概览
 
@@ -194,21 +194,37 @@ interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。�
 `pre_gateway_dispatch`、`on_feishu_normalize`、`on_message_started`、
 `on_message_completed`、`on_message_aborted`、`on_message_interrupted`、
 `on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、`on_tool_updated`、
-`on_background_review_message`、`on_cron_deliver`。
+`on_memory_prefetch_updated`、`on_background_review_message`、`on_cron_deliver`。
 
-## OpenViking 工具显示
+## 记忆工具显示
 
-卡片按 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)
-识别模型调用的六个 `viking_*` 工具，状态行显示如下，工具面板同步使用对应的中英文名称和操作图标：
+状态行按记忆来源使用不同图标，所有文案都带上来源名称。Hindsight 的四个工具映射
+统一用 👁️，OpenViking 的六个工具统一用 📖；Hermes 内置记忆用 🧠，会话检索用 🔎。
+工具面板同步使用带来源的中英文名称。
+
+Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片显示
+`📖 OpenViking · 自动检索记忆`，结束后恢复等待模型的提示。此过程包含
+`POST /api/v1/search/search`，以及检索降级、读取记忆内容等自动预取工作。
+插件包装当前 agent 的 `MemoryManager._prefetch_provider` 等待边界，因此请求失败或
+达到 Hermes 的等待超时后也会结束提示；自动预取不计入模型的工具调用记录。
+正常的模型输出、工具调用和上下文压缩优先于此准备状态。
 
 | 工具 | 状态行 | 用途 |
 |------|--------|------|
-| `viking_search` | 🧠 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
-| `viking_read` | 🧠 读取记忆 | 按摘要、概览或全文读取指定内容 |
-| `viking_browse` | 🧠 浏览记忆库 | 查看目录、层级或条目元信息 |
-| `viking_remember` | 🧠 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
-| `viking_forget` | 🗑️ 删除记忆 | 按精确 URI 删除一条指定记忆 |
-| `viking_add_resource` | 📚 导入资料 | 导入网址、本地文件或目录并建立索引 |
+| `memory` | 🧠 Hermes · 内置记忆 | 新增、替换或删除内置记忆 |
+| `session_search` | 🔎 Hermes · 会话检索 | 检索历史会话 |
+| `hindsight_retain` | 👁️ Hindsight · 记忆写入 | 写入长期记忆 |
+| `hindsight_recall` | 👁️ Hindsight · 记忆回溯 | 检索历史记忆 |
+| `hindsight_reflect` | 👁️ Hindsight · 记忆推演 | 综合已有记忆进行推演 |
+| `hindsight_operation` | 👁️ Hindsight · 记忆操作 | 其他记忆操作的显示映射 |
+| `viking_search` | 📖 OpenViking · 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
+| `viking_read` | 📖 OpenViking · 读取记忆 | 按摘要、概览或全文读取指定内容 |
+| `viking_browse` | 📖 OpenViking · 浏览记忆库 | 查看目录、层级或条目元信息 |
+| `viking_remember` | 📖 OpenViking · 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
+| `viking_forget` | 📖 OpenViking · 删除记忆 | 按精确 URI 删除一条指定记忆 |
+| `viking_add_resource` | 📖 OpenViking · 导入资料 | 导入网址、本地文件或目录并建立索引 |
+
+OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)。
 
 检索、读取和浏览也涵盖记忆库中的知识资料。“记住信息”表示提交记忆提炼，
 不代表每次都会新建独立的记忆文件。工具详情保留完整的 `viking://` URI 和结果。

@@ -420,6 +420,30 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return
             self._linear_on_thinking(session, text)
 
+    def on_memory_prefetch_update(
+        self, *, message_id: str, request_id: object, active: bool,
+    ) -> None:
+        """Track automatic retrieval without changing the model/tool phase."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_memory_prefetch_update"):
+            return
+
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            was_active = bool(session._memory_prefetch_requests)
+            if active:
+                session._memory_prefetch_requests.add(request_id)
+            else:
+                session._memory_prefetch_requests.discard(request_id)
+            if (
+                session._response_phase == "waiting"
+                and bool(session._memory_prefetch_requests) != was_active
+            ):
+                self._schedule_linear_flush(session, force=True)
+
     def on_compression_started(
         self, *, message_id: str, source: str = "context compression started",
     ) -> None:

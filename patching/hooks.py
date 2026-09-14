@@ -149,6 +149,16 @@ def on_tool_updated(
     return True
 
 @_safe_hook(default_return=False, log_level="debug")
+def on_memory_prefetch_updated(
+    *, ctrl: Any, message_id: str, request_id: object, active: bool,
+) -> bool:
+    """OpenViking's automatic retrieval before the model's first response."""
+    ctrl.on_memory_prefetch_update(
+        message_id=message_id, request_id=request_id, active=active,
+    )
+    return True
+
+@_safe_hook(default_return=False, log_level="debug")
 def on_answer_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     """[注入点 4] _stream_delta_cb — answer.delta."""
     ctrl.on_answer(message_id=message_id, text=text)

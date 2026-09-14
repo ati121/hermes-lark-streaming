@@ -49,6 +49,7 @@ class CardSession:
         "_loading_hint_state",
         "_last_answer_time",
         "_loop",
+        "_memory_prefetch_requests",
         "_pending_flush",
         "_response_phase",
         "_streaming_closed",
@@ -136,6 +137,9 @@ class CardSession:
         self._last_answer_time: float = 0.0
         self._pending_flush: bool = False
         self._response_phase: str = "waiting"
+        # Automatic recall is preparation, not a model-issued tool step. Each
+        # request owns its token so a late completion cannot clear a newer one.
+        self._memory_prefetch_requests: set[object] = set()
         # Temporary response phase used while Hermes compacts the conversation
         # before making the next model call.  The previous phase is restored
         # only if no model activity arrived during compression.

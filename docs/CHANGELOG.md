@@ -4,6 +4,23 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.22 (2026-09-14, personal fork)
+
+### Added — OpenViking automatic recall status
+
+- Shows `📖 OpenViking · 自动检索记忆` while Hermes prepares OpenViking memory
+  before a model turn, including its session-aware `/api/v1/search/search` request.
+- Restores the waiting status when retrieval returns, fails, or times out;
+  later model/tool activity takes precedence. Automatic recall does not add a
+  model tool step.
+
+### Changed — distinguish memory providers in tool status
+
+- Adds Hermes, Hindsight, and OpenViking names to memory-tool labels in both
+  languages, including session search, deletion, and resource import.
+- Uses distinct status-row emoji for built-in memory (🧠), all Hindsight
+  operations (👁️), and all OpenViking operations (📖).
+
 ## v1.6.21 (2026-09-14, personal fork)
 
 ### Added — OpenViking tool labels and icons

@@ -208,16 +208,11 @@ class UnifiedControllerMixin:
             label, status_key, emoji = self._current_loading_status(session)
             if not elements and session._response_phase in ("waiting", "compression"):
                 # Before the first model byte, the reversible context row owns
-                # both waiting and compression.  The spinner takes over after
+                # waiting, memory retrieval and compression. The spinner takes over after
                 # model activity starts (or when content already exists).
-                hint_status = (
-                    "context_compressing"
-                    if session._response_phase == "compression"
-                    else "loading_context"
-                )
+                hint_status = self._loading_hint_status(session)
                 elements.append(_loading_hint_element(hint_status))
-                if session._response_phase == "compression":
-                    label, status_key, emoji = None, None, None
+                label, status_key, emoji = None, None, None
             elements.append(_loading_element(
                 label,
                 status_key=status_key,
@@ -269,12 +264,8 @@ class UnifiedControllerMixin:
                     # 模型思考中 rather than flashing a stale 等待上游模型响应.
                     label, status_key, emoji = self._current_loading_status(session)
                     include_hint = session._response_phase in ("waiting", "compression")
-                    loading_hint_status = (
-                        "context_compressing"
-                        if session._response_phase == "compression"
-                        else "loading_context"
-                    )
-                    if session._response_phase == "compression":
+                    loading_hint_status = self._loading_hint_status(session)
+                    if include_hint:
                         label, status_key, emoji = None, None, None
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
@@ -833,6 +824,14 @@ class UnifiedControllerMixin:
             return None
         return session.tool_use.last_tool_names
 
+    def _loading_hint_status(self, session: CardSession) -> str:
+        """Preparation status used by initial cards and subsequent updates."""
+        if session._response_phase == "compression":
+            return "context_compressing"
+        if session._response_phase == "waiting" and session._memory_prefetch_requests:
+            return "openviking_prefetch"
+        return "loading_context"
+
     def _current_loading_status(
         self, session: CardSession,
     ) -> tuple[tuple[str, str] | None, str | None, str | None]:
@@ -852,6 +851,10 @@ class UnifiedControllerMixin:
                 # spinner is the only remaining placeholder.
                 return None, None, None
             return None, "context_compressing", _COMPRESSION_EMOJI
+        if session._response_phase == "waiting" and session._memory_prefetch_requests:
+            if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
+                return None, None, None
+            return None, "openviking_prefetch", None
         label = self._current_tool_label(session)
         if label:
             return label, None, session.tool_use.last_tool_emoji
@@ -879,10 +882,8 @@ class UnifiedControllerMixin:
         if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
             return
 
-        if session._response_phase == "compression":
-            status_key = "context_compressing"
-        elif session._response_phase == "waiting":
-            status_key = "loading_context"
+        if session._response_phase in ("waiting", "compression"):
+            status_key = self._loading_hint_status(session)
         elif session._loading_label_supported:
             return  # spinner row owns model/tool status
         else:

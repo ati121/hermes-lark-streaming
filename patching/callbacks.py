@@ -11,6 +11,7 @@ from . import (
     _session_contexts,
     _session_contexts_lock,
 )
+from .memory import _maybe_wrap_memory_prefetch
 
 def _eid_from_context(ctx: Any) -> str | None:
     if not isinstance(ctx, dict):
@@ -63,6 +64,10 @@ def _maybe_wrap_callbacks(agent) -> None:
     if not eid:
         _logger.debug("HLS: skip — no event_message_id in ctx")
         return  # Not in a hermes-lark-streaming context — skip
+
+    # The manager is initialized with the agent, before turn-context prefetch.
+    # Recheck before the callback guard so late/replaced managers are covered.
+    _maybe_wrap_memory_prefetch(agent, lambda: _resolve_eid(None, agent))
 
     # Hermes' ``on_first_delta`` is not the transport-level first event: the
     # host only fires it after a chunk contains renderable text, reasoning, or
