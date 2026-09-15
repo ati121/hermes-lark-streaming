@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装与维护指南
 
 > 高信息密度参考文档，供 Hermes Agent 或其他自动化 Agent 解析。
-> 最后更新：2026-09-14（v1.6.22，个人复刻版）
+> 最后更新：2026-09-15（v1.6.23，个人复刻版）
 
 ## 项目概览
 
@@ -123,9 +123,12 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 可选的页脚字段名：`status`、`elapsed`、`speed`、`model`、`tokens`、`context`、
 `cache`、`cost`、`api_calls`、`history_offset`、`compression_exhausted`。未知字段名
 会被静默跳过。`speed` 默认开启，显示最后一次模型调用的可见输出速度（如 `50 t/s`）：
-分子为该调用的输出 token 扣除 reasoning token，分母为工具调用之后最终可见正文的
-首个到末个流式块间隔。无法取得可靠 usage、答案一次性突发返回，或窗口短于 0.3 秒时
-不显示。不想要可以从 `fields` 里去掉。
+分子为该调用的可见输出 token，分母为工具调用之后最终可见正文的首个到末个流式块
+间隔。标准 OpenAI 用量中的输出数包含 reasoning token，需要扣除；部分 Gemini 兼容
+接口的输出数已排除推理，插件根据接口原始的输入、输出、推理和总数识别此口径，
+避免重复扣除。原始计数在 Hermes 归一化前单独保存，不影响其用量和费用统计。
+无法取得可靠 usage、答案一次性突发返回，或窗口短于 0.3 秒时不显示。
+不想要可以从 `fields` 里去掉。
 
 基础示例：
 

@@ -4,6 +4,17 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.23 (2026-09-15, personal fork)
+
+### Fixed — output speed for separately counted reasoning tokens
+
+- Preserves the provider's original usage totals before Hermes normalizes them.
+  Gemini-compatible endpoints that count completion and reasoning separately no
+  longer lose their speed field or have visible output tokens undercounted.
+- Keeps standard OpenAI reasoning subtraction and the minimum streaming window.
+  Missing usage or a failed final request cannot reuse an earlier call's counts.
+- Refreshes usage ownership for cached agents without wrapping callbacks twice.
+
 ## v1.6.22 (2026-09-14, personal fork)
 
 ### Added — OpenViking automatic recall status
