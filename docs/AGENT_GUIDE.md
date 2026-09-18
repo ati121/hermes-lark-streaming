@@ -298,6 +298,39 @@ Profile，并且会**按 profile 各加载一次目录插件**（模块名
 在 Profile 一致。若出现 3 次或 `230002 Bot/User can NOT be out of the chat`，
 说明去重或作用域失效。
 
+### 陷阱：`hermes plugins install` 的中断残留会顶掉正式副本
+
+`hermes plugins install` 会在 `$HERMES_HOME/plugins/` 下建一个临时目录
+`.install-<随机串>`（`hermes_cli/plugins_cmd.py` 里的
+`tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir)`），克隆、校验、
+扫描都在里面做完才移入正式名字；正常结束时自动删除。
+
+但**克隆失败时目录会留下**——网络断、代理中断都会触发。而 Hermes 的目录插件发现是
+`for child in sorted(path.iterdir())`（`hermes_cli/plugins_discovery.py`），
+`.` 的 ASCII 码小于字母，于是这个残留目录**排在正式目录前面被当成另一个插件加载**。
+
+后果是静默的：两份副本共用进程级去重标记（类属性 + `_hls_wrapped`），
+**先加载者先抢到 wrapper**，而 wrapper 内部 `from ..controller import get_controller`
+解析到的是它自己那份 `cardkit` / `state`——于是新代码可能一行都不上卡，
+日志里却仍有 `patches applied ✓`。表现就是"改了但没效果"。
+
+排查与处置：
+
+```bash
+# 每个 home 都要看，不要只看默认 home
+ls -a "$HERMES_HOME/plugins/" "$HERMES_HOME"/profiles/*/plugins/
+
+# 有 .install-* 就挪出 plugins/（不要直接删，先隔离）
+mkdir -p "$HERMES_HOME/.quarantine"
+mv "$HERMES_HOME/plugins/.install-"* "$HERMES_HOME/.quarantine/"
+
+# 重启后确认只剩一个版本号，且次数 = profile 数
+grep -oE "hermes-lark-streaming v[0-9.]+" "$HERMES_HOME/logs/agent.log" | sort | uniq -c
+grep -oE "capability_check plugin=[^ ]+" "$HERMES_HOME/logs/agent.log" | sort -u
+```
+
+正常时 `capability_check` 里**不应出现** `.install-` 前缀的条目。
+
 ## 故障排查
 
 | 现象 | 检查项 |
@@ -309,6 +342,7 @@ Profile，并且会**按 profile 各加载一次目录插件**（模块名
 | 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
 | 速度时有时无 | `grep "HLS: speed hidden" "$HERMES_HOME/logs/agent.log"`；`window_too_short` 表示该次上游整段下发，`no_visible_output` 表示该次收尾没拿到用量——先看这行前面约 50ms 内是否有 `thread=bg-review` 创建 agent（后台复审 fork 曾抢走本回合用量归属，v1.6.28 已修） |
 | 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |
+| 改了但没效果 | 先看上面「陷阱：`hermes plugins install` 的中断残留」：`ls -a` 每个 home 的 `plugins/`，有 `.install-*` 就隔离掉再重启 |
 | Profile 用错 bot | 核对 `FeishuClient initialized` 的 `app_id`/`home` 对应该 Profile |
 
 ## 验证安装

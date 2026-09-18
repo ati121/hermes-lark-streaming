@@ -45,6 +45,27 @@ filesystem paths.
   `TestToolStepTitleRendersEmoji` (emoji leads the text, sits outside the bold
   run, and no `standard_icon` slot survives).
 
+### Fixed — an interrupted install leaving a second copy that outranked the real one
+
+- Removes the `.install-*` staging directories an interrupted `hermes plugins
+  install` leaves behind. `hermes_cli/plugins_cmd.py` clones into
+  `tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir)`, which is
+  cleaned up on the normal path — but a failed clone (dead network, aborted
+  proxy) leaves it. Plugin discovery walks `sorted(path.iterdir())`
+  (`hermes_cli/plugins_discovery.py`), and `.` sorts before any letter, so the
+  leftover is loaded as a *second* plugin ahead of the real one.
+- The failure is silent: the process-wide dedup markers (class attributes plus
+  `_hls_wrapped` on each wrapped function) make the copy that loads first win
+  the wrapper, and that wrapper's `from ..controller import get_controller`
+  resolves to its own older `cardkit` / `state`. The log still prints
+  `patches applied ✓`, so a correctly deployed build can appear to do nothing.
+  On this deployment two such directories were parked at the previous version
+  and won the wrapper, which would have hidden this very change.
+- Documents the check and the quarantine step in `AGENT_GUIDE.md`, and adds a
+  troubleshooting row: after a restart, `capability_check plugin=` must never
+  list a `.install-` entry, and the version-count should equal the profile count.
+
+
 ## v1.6.28 (2026-09-19, personal fork)
 
 ### Fixed — the speed field losing the live turn's usage to a background fork
