@@ -185,7 +185,20 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         try:
             yield
         finally:
-            reset_secret_scope(token)
+            # The reset is the only cleanup step here, so it must never be the
+            # thing that turns a successful turn into a crash: a host API change
+            # to this signature would otherwise propagate out of ``enabled`` and
+            # take every hook on the hot path down with it.  A failure to reset
+            # is still worth a warning — the scope stays installed for this
+            # context, which the next caller's own check handles.
+            try:
+                reset_secret_scope(token)
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                _logger.warning(
+                    "HLS: reset_secret_scope failed after profile scope (home=%s)",
+                    self._profile_home,
+                    exc_info=True,
+                )
 
     async def _ensure_init(self) -> None:
         if self._initialized:

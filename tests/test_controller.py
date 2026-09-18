@@ -3137,3 +3137,33 @@ class TestCredentialScope:
             await ctrl._ensure_init()
         assert created["cfg"].app_id == "cli_scoped"
         assert str(home.resolve()) in caplog.text
+
+    def test_reset_failure_does_not_escape_the_scope(self, monkeypatch, tmp_path) -> None:
+        """宿主 reset 接口改形状时必须只记警告，不能把正常流程带崩.
+
+        ``finally`` 里的重置是唯一的清理步骤：它一旦抛异常，异常会穿过
+        ``enabled`` 冒到热路径上每一个 hook。
+        """
+        state = self._fake_secret_scope(monkeypatch, multiplex=True, scope=None)
+        import sys
+
+        fake = sys.modules["agent.secret_scope"]
+
+        def _boom(token):
+            raise TypeError("host API changed shape")
+
+        fake.reset_secret_scope = _boom
+        ctrl = StreamCardController(tmp_path)
+
+        with ctrl._credential_scope():
+            assert state["scope"] is not None
+        # 未崩溃即通过；scope 仍留在原地，由下一个调用方自己的检查兜住。
+        assert state["scope"] is not None
+
+    def test_scope_still_resets_on_normal_exit(self, monkeypatch, tmp_path) -> None:
+        """加保险丝不能把正常路径的重置也吃掉."""
+        state = self._fake_secret_scope(monkeypatch, multiplex=True, scope=None)
+        ctrl = StreamCardController(tmp_path)
+        with ctrl._credential_scope():
+            assert state["scope"] is not None
+        assert state["scope"] is None

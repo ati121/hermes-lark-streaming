@@ -32,6 +32,21 @@ filesystem paths.
   work; the surviving copies are the ones that assert behaviour, plus new
   coverage for the reload contract, the profile-bound card config, and the
   inherited-marker case above.
+- No longer lets a host secret-scope API change take the hot path down. The
+  profile scope's reset is the only cleanup step in that block, so a signature
+  change there would have propagated out of `enabled` and failed every hook
+  that reads it; the reset now logs a warning and leaves the scope for the next
+  caller's own check.
+
+### Tests
+
+- Extends the two-copy isolation suite to every remaining patch target
+  (`conversation_loop`, `cron._deliver_result`, the `create_adapter` hook and
+  the direct `AIAgent` patch), so the "second copy adopts, never re-wraps" rule
+  is covered wherever it applies rather than only on the two targets that
+  visibly stacked in production.
+- Covers both sides of the scope reset: a failing host reset must not escape,
+  and the normal path must still restore the previous scope.
 
 ## v1.6.25 (2026-09-19, personal fork)
 

@@ -347,3 +347,124 @@ def test_get_config_binds_the_current_profile_home(two_copies, tmp_path, monkeyp
 
     monkeypatch.setattr(config_pkg, "hermes_home", lambda: home_b)
     assert patching._get_config().gateway_cards is False
+
+# ── Remaining patch targets: same dedup contract as the two above ──────
+#
+# GatewayRunner and FeishuAdapter are covered by the tests above because they
+# are the two targets that visibly stacked in production.  The other four patch
+# their target in place (a module-level function, a class method, or a host
+# module attribute) and carry their marker on that shared object, so they rely
+# on the same "second copy adopts, never re-wraps" rule — and would be just as
+# damaging if that regressed: two wrappers means one inbound message handled
+# twice, which is the regression this file exists to catch.
+
+
+def _make_cron_module():
+    class FakeCronModule:
+        def _deliver_result(self, job, content, adapters=None, loop=None, **kwargs):
+            return "delivered"
+
+    return FakeCronModule()
+
+
+def _make_conversation_loop():
+    class FakeConversationLoop:
+        def run_conversation(self, *args, **kwargs):
+            return "conversed"
+
+    return FakeConversationLoop()
+
+
+def test_conversation_loop_is_wrapped_only_once_across_copies(two_copies) -> None:
+    """Module-level run_conversation must not collect one wrapper per copy."""
+    first, second = two_copies
+    patching_a = _sub(first, "patching")
+    patching_b = _sub(second, "patching")
+    module = _make_conversation_loop()
+
+    compat = _FakeCompat(None)
+    compat.has_conversation_loop = True
+    compat.conversation_loop_module = module
+    compat.conversation_loop_func = module.run_conversation
+
+    assert patching_a._patch_conversation_loop(compat) is True
+    first_wrapper = module.run_conversation
+    assert patching_a._already_wrapped(first_wrapper) is True
+
+    assert patching_b._patch_conversation_loop(compat) is True
+    assert module.run_conversation is first_wrapper, "second copy stacked a wrapper"
+
+
+def test_cron_deliver_is_wrapped_only_once_across_copies(two_copies) -> None:
+    """cron._deliver_result must not collect one wrapper per copy."""
+    first, second = two_copies
+    patching_a = _sub(first, "patching")
+    patching_b = _sub(second, "patching")
+    module = _make_cron_module()
+
+    compat = _FakeCompat(None)
+    compat.has_cron_scheduler = True
+    compat.cron_scheduler_module = module
+
+    assert patching_a._patch_cron(compat) is True
+    first_wrapper = module._deliver_result
+    assert patching_a._already_wrapped(first_wrapper) is True
+
+    assert patching_b._patch_cron(compat) is True
+    assert module._deliver_result is first_wrapper, "second copy stacked a wrapper"
+
+
+def test_create_adapter_hook_is_installed_only_once_across_copies(two_copies) -> None:
+    """The platform_registry.create_adapter hook notches in once, too."""
+    first, second = two_copies
+    patching_a = _sub(first, "patching")
+    patching_b = _sub(second, "patching")
+
+    class FakePlatformRegistry:
+        def create_adapter(self, name, config):
+            return None
+
+    registry = FakePlatformRegistry()
+    import types as _types
+
+    # The real host module exposes a singleton at ``platform_registry``, not a
+    # module-level ``create_adapter``; ``_apply_create_adapter_hook`` reads the
+    # attribute off that singleton and rebinds it there.
+    fake_host = _types.ModuleType("gateway.platform_registry")
+    fake_host.platform_registry = registry
+    sys.modules["gateway.platform_registry"] = fake_host
+    try:
+        assert patching_a._apply_create_adapter_hook() is True
+        installed = registry.create_adapter
+        assert getattr(installed, "_hls_create_adapter_wrapped", False) is True
+
+        assert patching_b._apply_create_adapter_hook() is True
+        assert registry.create_adapter is installed, "second copy re-hooked"
+    finally:
+        sys.modules.pop("gateway.platform_registry", None)
+
+
+def test_aiagent_direct_patch_is_applied_only_once_across_copies(two_copies) -> None:
+    """AIAgent.run_conversation carries a marker so copies cannot re-wrap it."""
+
+    def _make_agent_class():
+        class FakeAIAgent:
+            def run_conversation(self, user_message, *args, **kwargs):
+                return "done"
+
+        return FakeAIAgent
+
+    first, second = two_copies
+    patching_a = _sub(first, "patching")
+    patching_b = _sub(second, "patching")
+    agent_class = _make_agent_class()
+
+    compat = _FakeCompat(None)
+    compat.aiagent_class = agent_class
+
+    assert patching_a._apply_direct_agent_patch(compat) is True
+    installed = agent_class.run_conversation
+    assert getattr(installed, "_hls_direct_patched", False) is True
+
+    assert patching_b._apply_direct_agent_patch(compat) is True
+    assert agent_class.run_conversation is installed, "second copy re-wrapped"
