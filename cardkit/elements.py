@@ -591,22 +591,24 @@ def _build_tool_step_title(
     title = step.get("title", step.get("name", "tool"))
     title_zh = step.get("title_zh") or title
     color = status_info["color"]
-    content = f"<font color='{color}'>**{_escape_md(title)}**</font>"
+    # The mark is the tool's emoji, in the text rather than in the div's icon
+    # slot: Feishu's standard_icon tokens are monochrome line art, so a row
+    # built from one is grey whatever token is chosen. Emoji carry their own
+    # colour. It sits *outside* the bold run on purpose — Feishu drops a bold
+    # span that mixes emoji or punctuation into it.
+    mark = step.get("emoji") or ""
+    prefix = f"{mark} " if mark else ""
+    content = f"{prefix}<font color='{color}'>**{_escape_md(title)}**</font>"
     text: dict[str, Any] = {
         "tag": "lark_md",
         "content": content,
         "text_size": _role_text_size(text_sizes, "tool", default="notation"),
     }
     if title_zh != title:
-        zh_content = f"<font color='{color}'>**{_escape_md(title_zh)}**</font>"
+        zh_content = f"{prefix}<font color='{color}'>**{_escape_md(title_zh)}**</font>"
         text["i18n_content"] = _i18n(content, zh_content)
     return {
         "tag": "div",
-        "icon": {
-            "tag": "standard_icon",
-            "token": step.get("icon", "tool_02"),
-            "color": "grey",
-        },
         "text": text,
     }
 

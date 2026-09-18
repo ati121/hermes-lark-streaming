@@ -12,6 +12,7 @@ from hermes_lark_streaming.cardkit import (
     _loading_element,
     _loading_status_text,
     build_panel_header,
+    _build_tool_step_title,
 )
 from hermes_lark_streaming.feishu import CARDKIT_SCHEMA_ERROR, FeishuAPIError
 from hermes_lark_streaming.state.tooluse import (
@@ -61,6 +62,159 @@ class TestRealHermesToolNames:
     )
     def test_chinese_names(self, name: str, zh: str) -> None:
         assert _tool_display_names(name)[1] == zh
+# Mirrors ``_HERMES_CORE_TOOLS`` in Hermes's ``toolsets.py`` — the shared core
+# every messaging platform bundle carries (``hermes-feishu`` = core + feishu
+# tools). Module level, not a class body, so the mutable default isn't a class
+# attribute (ruff RUF012).
+_HERMES_CORE_TOOL_NAMES: tuple[str, ...] = (
+    "web_search", "web_extract", "terminal", "process_manage",
+    "read_file", "write_file", "patch", "search_files",
+    "vision_analyze", "image_generate",
+    "skills_list", "skill_view", "skill_manage",
+    "browser_navigate", "browser_snapshot", "browser_click",
+    "browser_type", "browser_scroll", "browser_back",
+    "browser_press", "browser_get_images", "browser_vision",
+    "browser_console", "browser_cdp", "browser_dialog",
+    "browser_vault_list", "browser_vault_unlock", "browser_vault_fill",
+    "browser_vault_save_login", "browser_vault_enter_code",
+    "browser_exec",
+    "text_to_speech", "todo_list", "memory", "session_search",
+    "clarify", "execute_code", "delegate_task", "cronjob_manage",
+    "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    "kanban_show", "kanban_list", "kanban_complete", "kanban_block",
+    "kanban_request_review", "kanban_request_changes", "kanban_heartbeat",
+    "kanban_comment", "kanban_create", "kanban_link", "kanban_unblock",
+    "kanban_attach", "kanban_attach_url", "kanban_attachments",
+    "computer_use", "manage_connections",
+)
+
+# The five browser-vault tools the bare ``browser`` prefix alias used to
+# swallow into a single "Browser" row.
+_BROWSER_VAULT_TOOL_NAMES: tuple[str, ...] = (
+    "browser_vault_list",
+    "browser_vault_unlock",
+    "browser_vault_fill",
+    "browser_vault_save_login",
+    "browser_vault_enter_code",
+)
+
+# Tool-name prefixes whose members must each carry a distinct emoji.
+_EMOJI_FAMILY_PREFIXES: tuple[str, ...] = ("kanban_", "spotify_", "yb_")
+
+
+class TestHermesCoreToolNamesHaveChineseLabels:
+    """Every tool the gateway can run must have a Chinese name.
+
+    The original table was written against older Hermes builds, so the live
+    names (``todo_list``/``cronjob_manage``/``process_manage``) fell through to
+    ``_humanize_tool_name`` and rendered English inside a zh_cn card. This is
+    the guard that says so out loud when Hermes renames the next one.
+
+    The list mirrors ``_HERMES_CORE_TOOLS`` in Hermes's ``toolsets.py`` — the
+    shared core every messaging platform bundle carries
+    (``hermes-feishu`` = core + feishu tools).
+    """
+
+    @pytest.mark.parametrize("name", _HERMES_CORE_TOOL_NAMES)
+    def test_every_core_tool_has_a_chinese_name(self, name: str) -> None:
+        en, zh = _tool_display_names(name)
+        assert zh != en, f"{name} 没有中文名，卡片会显示英文 {en!r}"
+        assert zh != name, f"{name} 退回了原始工具名"
+
+    @pytest.mark.parametrize("name", _HERMES_CORE_TOOL_NAMES)
+    def test_every_core_tool_has_an_emoji(self, name: str) -> None:
+        assert _tool_emoji(name) != _DEFAULT_TOOL_EMOJI, (
+            f"{name} 只有兜底 emoji，说明没配 _TOOL_EMOJI_BY_NAME"
+        )
+        # Also guards the handful that share a token whose fallback emoji is
+        # itself _DEFAULT_TOOL_EMOJI (the six on setting-inter_outlined).
+        assert _tool_emoji(name) != "🔧" or name == "setup_mcp", name
+
+
+class TestBrowserVaultToolsAreDistinct:
+    """Regression: the bare ``browser`` prefix alias swallowed these five.
+
+    ``_TOOL_DESCRIPTORS`` matches aliases by prefix, so before the exact specs
+    existed every ``browser_vault_*`` resolved to the legacy
+    ``{"aliases": ["browser", ...], "title": "Browser"}`` entry — the card said
+    "Browser" five times and never said which half of the flow ran.
+    """
+
+    NAMES = _BROWSER_VAULT_TOOL_NAMES
+
+    def test_no_longer_collapses_to_bare_browser(self) -> None:
+        for name in self.NAMES:
+            en, zh = _tool_display_names(name)
+            assert en != "Browser", name
+            assert zh != "Browser", name
+
+    def test_labels_are_all_different(self) -> None:
+        labels = [_tool_display_names(n)[1] for n in self.NAMES]
+        assert len(set(labels)) == len(labels), labels
+
+    def test_emoji_are_all_different(self) -> None:
+        marks = [_tool_emoji(n) for n in self.NAMES]
+        assert len(set(marks)) == len(marks), marks
+
+    def test_list_still_reads_as_a_vault_tool(self) -> None:
+        assert _tool_display_names("browser_vault_list")[1] == "浏览器 · 凭据列表"
+
+
+class TestNewToolEmojiAreUniqueWithinFamily:
+    """Two rows in one family must never share a mark."""
+
+    FAMILIES = _EMOJI_FAMILY_PREFIXES
+
+    @pytest.mark.parametrize("family", sorted(FAMILIES))
+    def test_no_repeats(self, family: str) -> None:
+        names = [n for n in _TOOL_SPECS if n.startswith(family)]
+        assert names, f"{family} 家族一个 spec 都没有"
+        marks = [_tool_emoji(n) for n in names]
+        dupes = {m for m in marks if marks.count(m) > 1}
+        assert not dupes, f"{family} 家族内 emoji 重复: {sorted(dupes)}"
+
+
+class TestNewToolLabelsAndEmoji:
+    """Spot-check the names a card actually shows."""
+
+    @pytest.mark.parametrize(
+        ("name", "zh", "emoji"),
+        [
+            ("process_manage", "进程管理", "⚙️"),
+            ("todo_list", "待办清单", "📋"),
+            ("cronjob_manage", "定时任务", "⏰"),
+            ("manage_connections", "管理连接账户", "🔌"),
+            ("computer_use", "电脑操作", "🖱️"),
+            ("browser_vault_unlock", "浏览器 · 解锁凭据", "🔓"),
+            ("kanban_complete", "看板 · 完成任务", "✅"),
+            ("kanban_attach_url", "看板 · 添加链接", "🌐"),
+            ("spotify_playlists", "音乐 · 播放列表", "🎵"),
+            ("discord_admin", "Discord · 服务器管理", "🛡️"),
+            ("yb_send_sticker", "元宝 · 发送表情", "🎴"),
+            ("desktop_project", "桌面项目", "📁"),
+            ("xai_video_edit", "视频编辑", "✂️"),
+            ("session_title", "会话标题", "🏷️"),
+        ],
+    )
+    def test_label_and_mark(self, name: str, zh: str, emoji: str) -> None:
+        assert _tool_display_names(name)[1] == zh
+        assert _tool_emoji(name) == emoji
+
+
+class TestProcessManageIsProcessesNotFlows:
+    """``process_manage`` polls/kills background terminal processes.
+
+    Its Hermes schema (``tools/process_registry.py``) is
+    ``terminal(background=true)`` management — poll/wait/kill/log/write/
+    submit/close/handoff. 「流程管理」 would read as workflow/approval flows,
+    which it is not.
+    """
+
+    def test_named_after_processes(self) -> None:
+        assert _tool_display_names("process_manage")[1] == "进程管理"
+
+    def test_not_named_after_flows(self) -> None:
+        assert "流程" not in _tool_display_names("process_manage")[1]
 
 
 class TestHindsightMemoryTools:
@@ -533,3 +687,60 @@ class TestSyncLoadingLabel:
 
         assert session._loading_label_supported is True
         assert session._loading_label is None  # not recorded, so it retries
+
+
+class TestToolStepTitleRendersEmoji:
+    """The panel step row must show a coloured emoji, not a grey icon token.
+
+    Feishu's ``standard_icon`` tokens are monochrome line art, so a div built
+    from one renders grey whatever token is picked — that is why five
+    ``browser_vault_*`` rows all looked like the same grey padlock. The emoji
+    now rides in the text instead, and sits *outside* the bold run because
+    Feishu drops a bold span that mixes emoji into it.
+    """
+
+    def _title(self, **overrides):
+        step = {
+            "name": "process_manage",
+            "title": "Manage processes",
+            "title_zh": "进程管理",
+            "status": "running",
+            "emoji": "⚙️",
+        }
+        step.update(overrides)
+        return _build_tool_step_title(step, text_sizes=None)
+
+    def test_no_standard_icon_slot(self) -> None:
+        el = self._title()
+        assert "icon" not in el, "灰白线稿方块应已移除"
+
+    def test_emoji_leads_the_text(self) -> None:
+        el = self._title()
+        assert el["text"]["content"].startswith("⚙️ ")
+
+    def test_emoji_sits_outside_the_bold_run(self) -> None:
+        el = self._title()
+        content = el["text"]["content"]
+        assert "**⚙️" not in content, "emoji 不能在粗体内，飞书会丢样式"
+        # The mark leads, then the colour span opens, and only inside it does
+        # the bold run start.
+        assert content.startswith("⚙️ <font")
+        assert ">**" in content
+    def test_both_locales_carry_the_emoji(self) -> None:
+        el = self._title()
+        i18n = el["text"]["i18n_content"]
+        assert i18n["zh_cn"].startswith("⚙️ ")
+        assert i18n["en_us"].startswith("⚙️ ")
+        assert "**进程管理**" in i18n["zh_cn"]
+        assert "**Manage processes**" in i18n["en_us"]
+
+    def test_missing_emoji_still_renders_a_title(self) -> None:
+        """Older callers pass no emoji — the row must not grow a stray space."""
+        el = self._title(emoji="")
+        assert el["text"]["content"].startswith("<font")
+
+    def test_status_colour_is_preserved(self) -> None:
+        running = self._title(status="running")
+        success = self._title(status="success")
+        assert running["text"]["content"] != success["text"]["content"]
+        assert "orange-300" in running["text"]["content"]

@@ -4,6 +4,47 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.29 (2026-09-19, personal fork)
+
+### Fixed — Chinese cards showing English tool rows, and five padlocks that all looked alike
+
+- Translates 53 Hermes tools that were falling back to the English
+  `_humanize_tool_name` output on a `zh_cn` card. The tool table in
+  `state/tooluse.py` had been written against older Hermes builds, so its keys
+  (`todo`, `cronjob`) no longer matched the live registrations
+  (`todo_list`, `cronjob_manage`, `process_manage`). Exact specs are added for
+  the whole reachable set: the gateway tools (`process_manage`, `todo_list`,
+  `cronjob_manage`, `browser_vault_*`, `manage_connections`, `computer_use`),
+  the kanban board (14), Spotify (7), Discord (2), Yuanbao (5), the desktop GUI
+  toolset (8), xAI video (2), Hermes-internal schemas (5) and the `ha_*` /
+  tooling helpers (7). Family labels read `家族 · 动作`, matching the existing
+  `Hindsight · 记忆写入` rows.
+- Fixes five `browser_vault_*` tools collapsing into a single "Browser" row.
+  The legacy prefix alias `browser` in `_TOOL_DESCRIPTORS` matched them first;
+  an exact spec now wins, and each half of the flow gets its own label
+  (list / unlock / fill / save login / one-time code).
+- Replaces the `standard_icon` token on a tool panel row with a coloured emoji.
+  Feishu's `standard_icon` set is monochrome line art, so every token rendered
+  as a grey block — that is why the five vault rows were indistinguishable. The
+  emoji sits *outside* the bold run (`⚙️ **进程管理**`), because Feishu drops a
+  bold span that mixes an emoji into it. `standard_icon` remains only where it
+  is not a tool row (panel collapse arrow, context clock).
+- Names `process_manage` 「进程管理」, not 「流程管理」: its Hermes schema
+  (`tools/process_registry.py`) manages `terminal(background=true)` OS
+  processes — poll / wait / kill / log / write / submit / close / handoff — so
+  "workflow" would misdescribe it.
+- MCP tools (`mcp__server__tool`) intentionally keep their English
+  lowercased rendering; not translated.
+
+### Tests
+
+- Adds `TestHermesCoreToolNamesHaveChineseLabels` (every newly covered name must
+  resolve to a non-English label and a non-default emoji),
+  `TestBrowserVaultToolsAreDistinct`, `TestNewToolEmojiAreUniqueWithinFamily`,
+  `TestNewToolLabelsAndEmoji`, `TestProcessManageIsProcessesNotFlows` and
+  `TestToolStepTitleRendersEmoji` (emoji leads the text, sits outside the bold
+  run, and no `standard_icon` slot survives).
+
 ## v1.6.28 (2026-09-19, personal fork)
 
 ### Fixed — the speed field losing the live turn's usage to a background fork

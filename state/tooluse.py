@@ -204,6 +204,79 @@ _TOOL_SPECS: dict[str, tuple[str, str, str, str | None, bool]] = {
     "ha_get_state": ("智能家居状态", "Get HA state", "setting-inter_outlined", None, False),
     "ha_list_entities": ("智能家居设备", "List HA entities", "setting-inter_outlined", None, False),
     "ha_list_services": ("智能家居服务", "List HA services", "setting-inter_outlined", None, False),
+    # ── Hermes tool names added after the original table (v1.6.29) ────────
+    # The table above was written against older Hermes builds; the live
+    # names are todo_list / cronjob_manage / process_manage. Anything not
+    # listed here falls through to _humanize_tool_name and renders English
+    # in a zh_cn card. Exact specs also win over the prefix aliases in
+    # _TOOL_DESCRIPTORS, which is what stops browser_vault_* from collapsing
+    # into the bare "Browser" row.
+    #
+    # Background-process manager for terminal(background=true)
+    # (poll/wait/kill/log/write/submit/close/handoff) — processes, not flows.
+    "process_manage": ("进程管理", "Manage processes", "setting-inter_outlined", None, False),
+    "todo_list": ("待办清单", "Todo list", "list-check_outlined", None, True),
+    "cronjob_manage": ("定时任务", "Cron job", "time_outlined", None, False),
+    "manage_connections": ("管理连接账户", "Manage connections", "app-default_outlined", None, False),
+    "computer_use": ("电脑操作", "Computer use", "setting_outlined", None, False),
+    # Browser credential vault — five distinct labels so the card says which
+    # half of the flow ran (list / unlock / fill / save / one-time code).
+    "browser_vault_list": ("浏览器 · 凭据列表", "Browser vault list", "browser-mac_outlined", None, False),
+    "browser_vault_unlock": ("浏览器 · 解锁凭据", "Unlock browser vault", "browser-mac_outlined", None, True),
+    "browser_vault_fill": ("浏览器 · 填充凭据", "Fill browser credential", "browser-mac_outlined", None, True),
+    "browser_vault_save_login": ("浏览器 · 保存登录", "Save browser login", "browser-mac_outlined", None, True),
+    "browser_vault_enter_code": ("浏览器 · 输入验证码", "Enter browser code", "browser-mac_outlined", None, True),
+    # Kanban multi-agent coordination (kanban_* in toolsets.py).
+    "kanban_show": ("看板 · 查看任务", "Show task", "list-check_outlined", None, False),
+    "kanban_list": ("看板 · 任务列表", "List tasks", "list-check_outlined", None, False),
+    "kanban_complete": ("看板 · 完成任务", "Complete task", "list-check_outlined", None, True),
+    "kanban_block": ("看板 · 阻塞任务", "Block task", "list-check_outlined", None, True),
+    "kanban_request_review": ("看板 · 请求审查", "Request review", "report_outlined", None, True),
+    "kanban_request_changes": ("看板 · 驳回修改", "Request changes", "report_outlined", None, True),
+    "kanban_heartbeat": ("看板 · 心跳", "Heartbeat", "time_outlined", None, True),
+    "kanban_comment": ("看板 · 评论", "Comment", "app-default_outlined", None, True),
+    "kanban_create": ("看板 · 新建任务", "Create task", "list-check_outlined", None, True),
+    "kanban_link": ("看板 · 关联任务", "Link tasks", "app-default_outlined", None, True),
+    "kanban_unblock": ("看板 · 解除阻塞", "Unblock task", "list-check_outlined", None, True),
+    "kanban_attach": ("看板 · 添加附件", "Attach file", "file-link-text_outlined", None, True),
+    "kanban_attach_url": ("看板 · 添加链接", "Attach URL", "file-link-text_outlined", None, True),
+    "kanban_attachments": ("看板 · 附件列表", "List attachments", "folder_outlined", None, False),
+    # Spotify playback (spotify_* in toolsets.py).
+    "spotify_playback": ("音乐 · 播放控制", "Playback control", "app-default_outlined", None, False),
+    "spotify_devices": ("音乐 · 播放设备", "List devices", "app-default_outlined", None, False),
+    "spotify_queue": ("音乐 · 播放队列", "Queue", "app-default_outlined", None, False),
+    "spotify_search": ("音乐 · 搜索", "Search music", "search_outlined", "search", False),
+    "spotify_playlists": ("音乐 · 播放列表", "Playlists", "app-default_outlined", None, False),
+    "spotify_albums": ("音乐 · 专辑", "Albums", "app-default_outlined", None, False),
+    "spotify_library": ("音乐 · 音乐库", "Library", "folder_outlined", None, False),
+    # Discord read/admin.
+    "discord": ("Discord · 消息", "Discord messages", "app-default_outlined", None, False),
+    "discord_admin": ("Discord · 服务器管理", "Discord admin", "setting-inter_outlined", None, False),
+    # Yuanbao (yb_*) platform tools.
+    "yb_query_group_info": ("元宝 · 群信息", "Group info", "app-default_outlined", None, False),
+    "yb_query_group_members": ("元宝 · 群成员", "Group members", "app-default_outlined", None, False),
+    "yb_send_dm": ("元宝 · 发送私聊", "Send DM", "app-default_outlined", None, True),
+    "yb_search_sticker": ("元宝 · 搜索表情", "Search sticker", "doc-search_outlined", "search", False),
+    "yb_send_sticker": ("元宝 · 发送表情", "Send sticker", "app-default_outlined", None, True),
+    # Desktop GUI affordances (desktop_ui toolset — GUI sessions only).
+    "annotate_preview": ("标注预览", "Annotate preview", "edit_outlined", None, True),
+    "apply_layout": ("应用布局", "Apply layout", "report_outlined", None, True),
+    "close_preview": ("关闭预览", "Close preview", "folder_outlined", None, True),
+    "desktop_preview": ("桌面预览", "Desktop preview", "folder_outlined", None, True),
+    "desktop_project": ("桌面项目", "Desktop project", "folder_outlined", None, False),
+    "drive_preview": ("云盘预览", "Drive preview", "folder_outlined", None, True),
+    "gui_tour": ("界面导览", "GUI tour", "robot_outlined", None, False),
+    "show_tip": ("显示提示", "Show tip", "info_outlined", None, False),
+    # xAI video generation variants (video_gen toolset).
+    "xai_video_edit": ("视频编辑", "Edit video", "report_outlined", None, True),
+    "xai_video_extend": ("视频延长", "Extend video", "report_outlined", None, True),
+    # Hermes-internal schemas. They rarely reach a card, but an English row is
+    # worse than a translated one when they do.
+    "allowlist": ("域名白名单", "Domain allowlist", "setting-inter_outlined", None, False),
+    "secrets": ("密钥规则", "Secret rules", "setting-inter_outlined", None, False),
+    "session_title": ("会话标题", "Session title", "app-default_outlined", None, False),
+    "example_tool": ("示例工具", "Example tool", "app-default_outlined", None, False),
+    "plugin_structured_output": ("插件结构化输出", "Plugin structured output", "app-default_outlined", None, False),
 }
 
 _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
@@ -287,8 +360,85 @@ _TOOL_EMOJI_BY_NAME: dict[str, str] = {
     "text_to_speech": "🔊",
     "send_message": "💬",
     "react_to_message": "💬",
+    # ── v1.6.29: one colourful emoji per tool ─────────────────────────────
+    # Feather/Lark standard_icon tokens are monochrome line art, so a row
+    # built from them is grey no matter which token is picked. Emoji carry
+    # their own colour, and the spinner row has always used them — these
+    # entries extend that to every tool so the panel steps match.
+    # Grouped by family; within a family no emoji repeats, so two rows are
+    # never ambiguous. Values here override _TOOL_EMOJI_BY_ICON.
+    # ── Feishu gateway ──
+    "process_manage": "⚙️",
+    "todo_list": "📋",
+    "cronjob_manage": "⏰",
+    "manage_connections": "🔌",
+    "computer_use": "🖱️",
+    # ── Browser credential vault ──
+    "browser_vault_list": "🗂️",
+    "browser_vault_unlock": "🔓",
+    "browser_vault_fill": "⌨️",
+    "browser_vault_save_login": "💾",
+    "browser_vault_enter_code": "🔢",
+    # ── Kanban ──
+    "kanban_show": "👀",
+    "kanban_list": "🗒️",
+    "kanban_complete": "✅",
+    "kanban_block": "⛔",
+    "kanban_request_review": "📤",
+    "kanban_request_changes": "↩️",
+    "kanban_heartbeat": "💓",
+    "kanban_comment": "🗨️",
+    "kanban_create": "➕",
+    "kanban_link": "🔗",
+    "kanban_unblock": "🔄",
+    "kanban_attach": "📎",
+    "kanban_attach_url": "🌐",
+    "kanban_attachments": "📂",
+    # ── Spotify ──
+    "spotify_playback": "▶️",
+    "spotify_devices": "🔊",
+    "spotify_queue": "📜",
+    "spotify_search": "🔎",
+    "spotify_playlists": "🎵",
+    "spotify_albums": "💿",
+    "spotify_library": "📚",
+    # ── Discord / Yuanbao ──
+    "discord": "💬",
+    "discord_admin": "🛡️",
+    "yb_query_group_info": "👥",
+    "yb_query_group_members": "👤",
+    "yb_send_dm": "✉️",
+    "yb_search_sticker": "😀",
+    "yb_send_sticker": "🎴",
+    # ── Desktop GUI ──
+    "annotate_preview": "📝",
+    "apply_layout": "🖼️",
+    "close_preview": "✖️",
+    "desktop_preview": "🪟",
+    "desktop_project": "📁",
+    "drive_preview": "☁️",
+    "gui_tour": "🧭",
+    "show_tip": "💡",
+    # ── xAI video ──
+    "xai_video_edit": "✂️",
+    "xai_video_extend": "➡️",
+    # ── Hermes internals ──
+    "allowlist": "🚧",
+    "secrets": "🔑",
+    "session_title": "🏷️",
+    "example_tool": "🧪",
+    "plugin_structured_output": "🧬",
+    # ── Home Assistant / tool discovery ──
+    # These sit on setting-inter_outlined, whose 🧩-tier fallback (🔧) is also
+    # _DEFAULT_TOOL_EMOJI — without an override they read as "unknown tool".
+    "ha_list_entities": "🏠",
+    "ha_get_state": "📟",
+    "ha_list_services": "🛎️",
+    "ha_call_service": "🎛️",
+    "setup_mcp": "🛠️",
+    "tool_describe": "📖",
+    "tool_call": "🎯",
 }
-
 _TOOL_EMOJI_BY_ICON: dict[str, str] = {
     "setting_outlined": "🖥️",
     "file-link-text_outlined": "📄",
@@ -304,6 +454,7 @@ _TOOL_EMOJI_BY_ICON: dict[str, str] = {
     "report_outlined": "📊",
     "browser-mac_outlined": "🌐",
     "folder_outlined": "📁",
+    "info_outlined": "💡",
 }
 
 _DEFAULT_TOOL_EMOJI = "🔧"
@@ -504,7 +655,10 @@ class ToolUseTracker:
                     "detail": detail,
                     "output": s.output,
                     "error": s.error,
+                    # Kept as the emoji-grouping key (_TOOL_EMOJI_BY_ICON);
+                    # the card renders ``emoji``, not this token.
                     "icon": desc["icon"] if desc else "setting-inter_outlined",
+                    "emoji": _tool_emoji(s.name),
                     "elapsed_ms": s.elapsed_ms,
                     "result_block": None if (desc and desc.get("no_result")) else s.result_block,
                     "error_block": s.error_block,

@@ -242,6 +242,42 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片显示
 OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)。
 
 检索、读取和浏览也涵盖记忆库中的知识资料。“记住信息”表示提交记忆提炼，
+
+## 工具面板图标与名称
+
+工具面板每一行由 **彩色 emoji + 彩色粗体名称** 组成，例如 `⚙️ **进程管理**`。
+早先版本用飞书的 `standard_icon` 图标 token 渲染行首，但该图标库是单色线稿，
+任何 token 都只能渲染成灰白方块——五个 `browser_vault_*` 工具因此看起来是同一把灰锁。
+现在行首改为 emoji，`standard_icon` 只保留在非工具位置（面板折叠箭头、上下文时钟）。
+
+emoji 必须写在粗体**外面**：飞书会丢弃混入 emoji 的粗体段，
+`**⚙️ 进程管理**` 会丢样式，`⚙️ **进程管理**` 才正常。
+
+`state/tooluse.py` 的 `_TOOL_SPECS` 是唯一名称来源，键必须是 Hermes 的**实际注册名**。
+旧表写的是更早版本的名字（`todo`、`cronjob`），而现行构建用的是
+`todo_list` / `cronjob_manage` / `process_manage`，匹配不上就会落到
+`_humanize_tool_name` 的英文兜底，中文卡片里就出现英文行。
+
+| 家族/平台 | 前缀 | 示例 | 行首 emoji |
+|-----------|------|------|-----------|
+| 浏览器凭据库 | `browser_vault_*` | `浏览器 · 解锁凭据` | 🗂️ 🔓 ⌨️ 💾 🔢 |
+| 看板协作 | `kanban_*` | `看板 · 请求审查` | 👀 🗒️ ✅ ⛔ 📤 … |
+| Spotify | `spotify_*` | `音乐 · 播放控制` | ▶️ 🔊 📜 🔎 🎵 💿 📚 |
+| Discord | `discord*` | `Discord · 服务器管理` | 💬 🛡️ |
+| 元宝 | `yb_*` | `元宝 · 发送私聊` | 👥 👤 ✉️ 😀 🎴 |
+| 桌面 GUI | `desktop_*` 等 | `桌面预览` | 📝 🖼️ ✖️ 🪟 📁 ☁️ 🧭 💡 |
+| xAI 视频 | `xai_video_*` | `视频延长` | ✂️ ➡️ |
+| Home Assistant | `ha_*` | `智能家居调用` | 🏠 📟 🛎️ 🎛️ |
+| Hermes 内部 | — | `密钥规则` | 🚧 🔑 🏷️ 🧪 🧬 |
+
+家族前缀统一写成 `家族 · 动作`，与既有的 `Hindsight · 记忆写入` 对齐。
+`process_manage` 管的是 `terminal(background=true)` 起的后台终端进程
+（poll/wait/kill/log/write/submit/close/handoff），所以是「进程管理」而非「流程管理」。
+`browser_vault_*` 必须逐个列出精确名：`_TOOL_DESCRIPTORS` 的前缀别名
+`browser` 会抢先匹配，把它们全部塌缩成一行 "Browser"。
+
+MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计如此，不做翻译。
+
 ## 多 Profile 网关（multiplex）
 
 Hermes `gateway.multiplex_profiles`（官方默认开启）用**一个进程**服务多个
