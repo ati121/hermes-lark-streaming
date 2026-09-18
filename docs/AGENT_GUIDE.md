@@ -271,7 +271,7 @@ Profile，并且会**按 profile 各加载一次目录插件**（模块名
 | Schema 错误（300315） | 检查 CardKit v2 卡片结构和字号值是否合法 |
 | 流式卡片卡住 | 增大 `card_ttl_sec`，确认卡片未被删除/撤回 |
 | 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
-| 速度时有时无 | `grep "HLS: speed hidden" "$HERMES_HOME/logs/agent.log"`；`window_too_short` 表示该次上游整段下发，仍会隐藏 |
+| 速度时有时无 | `grep "HLS: speed hidden" "$HERMES_HOME/logs/agent.log"`；`window_too_short` 表示该次上游整段下发，`no_visible_output` 表示该次收尾没拿到用量——先看这行前面约 50ms 内是否有 `thread=bg-review` 创建 agent（后台复审 fork 曾抢走本回合用量归属，v1.6.28 已修） |
 | 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |
 | Profile 用错 bot | 核对 `FeishuClient initialized` 的 `app_id`/`home` 对应该 Profile |
 

@@ -278,3 +278,63 @@ async def test_gateway_burst_answer_still_reports_speed(make_agent, monkeypatch)
     assert _render_footer_field(
         "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
     ) == ("59 t/s", "59 t/s")
+
+
+
+@pytest.mark.asyncio
+async def test_background_review_fork_cannot_steal_the_live_turn_usage(make_agent, monkeypatch):
+    """Hermes 的后台复审 fork 共用父回合上下文，不得抢走本回合的用量归属.
+
+    线上表现（2026-09-19 02:49:10、02:31:55、02:10:28）：复审线程创建 agent 后
+    约 50ms，卡片收尾就记 ``speed hidden reason=no_visible_output visible=0``，
+    而时间窗完全正常。fork 从未调用模型，用量仍是 ``None``。
+    """
+    ctrl = StreamCardController()
+    ctrl._cfg._raw = {
+        "hermes_lark_streaming": {"enabled": True},
+        "feishu": {"app_id": "test-app", "app_secret": "test-secret"},
+    }
+    monkeypatch.setattr(ctrl, "_schedule_linear_flush", Mock())
+    monkeypatch.setattr(ctrl, "_complete_session", Mock())
+    monkeypatch.setattr("hermes_lark_streaming.patching.hooks.get_controller", lambda: ctrl)
+    session = CardSession("speed-message", "chat", asyncio.get_running_loop())
+    session.state = CardPhase.STREAMING
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    ctrl._sessions[session.message_id] = session
+    agent = make_agent(_chat_usage())
+    # The review fork Hermes builds for background memory/skill review: same
+    # session id, inherited ContextVars, persistence disabled, no API call yet.
+    fork = SimpleNamespace(
+        session_id=agent.session_id,
+        _persist_disabled=True,
+        stream_delta_callback=lambda text: None,
+        interim_assistant_callback=lambda text: None,
+    )
+
+    async def run_agent(*args, **kwargs):
+        _maybe_wrap_callbacks(agent)
+        agent._interruptible_streaming_api_call({})
+        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.0):
+            agent.stream_delta_callback("first ")
+        # The review fork starts while the live answer is still streaming.
+        _maybe_wrap_callbacks(fork)
+        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.5):
+            agent.stream_delta_callback("last")
+        return {"final_response": "first last", "model": "example", "output_tokens": 135}
+
+    await _wrap_run_agent(run_agent)(
+        SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
+        event_message_id=session.message_id,
+    )
+
+    assert _msg_ctx.get()["_agent_ref"] is agent
+    assert not getattr(fork, "stream_delta_callback", None) or not getattr(
+        fork.stream_delta_callback, "_hls_wrapper", False
+    )
+    # The fork must not have replaced the live turn's captured usage.
+    assert session.footer["speed_output_tokens"] == 135
+    assert session.footer["speed_window"] == "delta"
+    assert _render_footer_field(
+        "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
+    ) == ("270 t/s", "270 t/s")

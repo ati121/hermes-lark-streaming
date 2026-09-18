@@ -4,6 +4,40 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.28 (2026-09-19, personal fork)
+
+### Fixed — the speed field losing the live turn's usage to a background fork
+
+- Keeps detached agent forks from taking over the live turn's usage ownership.
+  Hermes runs its background memory/skill review (and `/btw` side questions) on a
+  throwaway fork that deliberately shares the parent's session id and inherits
+  the parent's ContextVars, so the operator's still-open turn also looks
+  "current" to it. Wrapping that fork's callbacks overwrote the completion
+  hook's agent reference with an agent that had not answered anything yet, so a
+  turn whose own timing window was perfectly measurable was reported as
+  `speed hidden … reason=no_visible_output visible=0` and lost its `speed`
+  field. The review fork now keeps its own callbacks: `_persist_disabled` is
+  Hermes' own marker for exactly these detach-from-persistence forks.
+- Also stops the review fork's own reasoning/answer text from being routed into
+  the operator's card while it is still streaming, which the same overwrite
+  allowed.
+
+### Tests
+
+- Adds a regression test that starts a review-style fork mid-answer and asserts
+  the live turn keeps both its usage ownership and its rendered `speed` figure.
+  It fails against the previous build with the production symptom.
+
+## v1.6.27 (2026-09-19, personal fork)
+
+### Tests
+
+- Extends the two-copy isolation suite to every remaining patch target
+  (`conversation_loop`, `cron._deliver_result`, the `create_adapter` hook and
+  the direct `AIAgent` patch).
+- Covers both sides of the profile secret-scope reset: a failing host reset must
+  not escape into `enabled`, and the normal path must restore the prior scope.
+
 ## v1.6.26 (2026-09-19, personal fork)
 
 ### Fixed — follow-up hardening after the multiplex fix

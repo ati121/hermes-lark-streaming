@@ -55,6 +55,24 @@ def _maybe_wrap_callbacks(agent) -> None:
     """Replace streaming callbacks on *agent* with wrappers that also fire
     Feishu CardKit updates.  Skips silently when outside a Feishu message
     context (i.e. no event_message_id in context)."""
+    # Detached forks (the background memory/skill review, and ``/btw`` side
+    # questions) run Hermes' conversation loop on a throwaway agent that
+    # deliberately shares the parent's session id and inherits the parent's
+    # ContextVars, so the operator's live turn looks "current" to them too.
+    # Wrapping their callbacks would (a) overwrite ``ctx["_agent_ref"]``, which
+    # the completion hook reads for the output-speed numerator — the fork has
+    # not answered anything yet, so its captured usage is still ``None`` and a
+    # perfectly measurable turn turns into ``no_visible_output`` — and (b) route
+    # the fork's own reasoning/answer text into the user's card while it is
+    # still open.  ``_persist_disabled`` is Hermes' own marker for exactly these
+    # forks (see ``agent.background_review.build_cache_parity_fork``).
+    if getattr(agent, "_persist_disabled", False):
+        _logger.debug(
+            "HLS: skip detached fork (persist disabled) session=%s",
+            getattr(agent, "session_id", None),
+        )
+        return
+
     _logger.debug(
         "HLS: _maybe_wrap_callbacks invoked, has_stream=%s, eid_lookup=%s",
         bool(getattr(agent, "stream_delta_callback", None)),
