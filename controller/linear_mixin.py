@@ -1008,6 +1008,15 @@ class UnifiedControllerMixin:
             session._compression_previous_phase = None
             session._response_phase = "thinking"
 
+        # Interim text reaches the card body without going through on_answer, so
+        # the speed window must be maintained here as well: upstream activity
+        # anchors the fallback span and visible answer text is its endpoint.
+        _now = _time.monotonic()
+        if text and text.strip():
+            self._note_upstream_activity_time(session, _now)
+        if answer and answer.strip():
+            self._note_answer_time(session, _now)
+
         state = session.unified_state
         if state is None:
             self._schedule_linear_flush(session, force=phase_changed)

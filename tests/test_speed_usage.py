@@ -232,3 +232,49 @@ async def test_gateway_completion_uses_original_total_after_hermes_normalizes_it
         "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
     ) == ("348 t/s", "348 t/s")
     assert usage == _chat_usage()
+
+
+@pytest.mark.asyncio
+async def test_gateway_burst_answer_still_reports_speed(make_agent, monkeypatch):
+    """线上截图 2 的场景：短答案被上游整段下发时，速度仍必须显示."""
+    ctrl = StreamCardController()
+    ctrl._cfg._raw = {
+        "hermes_lark_streaming": {"enabled": True},
+        "feishu": {"app_id": "test-app", "app_secret": "test-secret"},
+    }
+    monkeypatch.setattr(ctrl, "_schedule_linear_flush", Mock())
+    monkeypatch.setattr(ctrl, "_complete_session", Mock())
+    monkeypatch.setattr("hermes_lark_streaming.patching.hooks.get_controller", lambda: ctrl)
+    session = CardSession("speed-message", "chat", asyncio.get_running_loop())
+    session.state = CardPhase.STREAMING
+    session.linear = True
+    session.unified_state = UnifiedLinearState()
+    # This model call started two seconds before its single visible chunk.
+    session._speed_call_start = 100.0
+    ctrl._sessions[session.message_id] = session
+    agent = make_agent(_chat_usage(output=118, reasoning=0, total=144))
+
+    async def run_agent(*args, **kwargs):
+        _maybe_wrap_callbacks(agent)
+        agent._interruptible_streaming_api_call({})
+        # The whole visible answer arrives as one chunk: no in-stream span.
+        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=102.0):
+            agent.stream_delta_callback("整段答案")
+        return {
+            "final_response": "整段答案",
+            "model": "deepseek-v4.1-flash",
+            "output_tokens": 118,
+        }
+
+    result = await _wrap_run_agent(run_agent)(
+        SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
+        event_message_id=session.message_id,
+    )
+
+    assert result["already_sent"] is True
+    assert session.footer["speed_output_tokens"] == 118
+    assert session.footer["speed_window"] == "call"
+    assert session.footer["gen_seconds"] == pytest.approx(2.0)
+    assert _render_footer_field(
+        "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
+    ) == ("59 t/s", "59 t/s")

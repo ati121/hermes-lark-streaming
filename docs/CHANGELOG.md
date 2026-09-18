@@ -4,6 +4,31 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.24 (2026-09-18, personal fork)
+
+### Fixed — speed field disappearing on burst answers
+
+- Falls back to the model call's own span (first upstream activity → last
+  visible chunk) when a provider flushes a short answer in one burst. That
+  collapsed the visible-chunk span below the 0.3 s measurement floor and hid
+  the `speed` footer field on exactly those turns, so the field appeared on
+  some replies and vanished on others.
+- Keeps the tighter visible-chunk span whenever it is measurable, so answers
+  that really stream token by token are reported unchanged. The fallback span
+  includes that call's own reasoning/prefill time, so it reports the call's
+  upstream throughput and reads low when long reasoning precedes a burst.
+- Drops the fallback anchor at every model-call boundary — a tool start, and the
+  context compaction that runs between two calls — so the reported window can
+  never span tool or compaction time and reuse the earlier call's anchor.
+- Keeps the same window in step with interim-assistant answers (verify-on-stop,
+  length continuations): they previously reached the card body without any
+  timing, so a call whose start was known still lost the speed field. An answer
+  delivered by a single interim callback with nothing streamed has no measurable
+  window and stays hidden, as before.
+- Logs one `HLS: speed hidden …` line with `reason`, `delta_span`, and
+  `call_span` when the field cannot be shown, making "sometimes shown,
+  sometimes not" diagnosable from the agent log.
+
 ## v1.6.23 (2026-09-15, personal fork)
 
 ### Fixed — output speed for separately counted reasoning tokens

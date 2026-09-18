@@ -52,6 +52,7 @@ class CardSession:
         "_memory_prefetch_requests",
         "_pending_flush",
         "_response_phase",
+        "_speed_call_start",
         "_streaming_closed",
         "_streaming_closed_logged",
         "_stream_lock",
@@ -135,6 +136,12 @@ class CardSession:
         self._first_flush_done: bool = False
         self._first_answer_time: float = 0.0
         self._last_answer_time: float = 0.0
+        # First upstream activity (reasoning, tool-call name, or stream open) of
+        # the model call that produced the current answer segment.  Resets with
+        # the answer timestamps on every tool start.  Providers that flush a
+        # short answer in one burst collapse the visible-chunk span to nearly
+        # zero; this wider anchor still measures that call's real throughput.
+        self._speed_call_start: float = 0.0
         self._pending_flush: bool = False
         self._response_phase: str = "waiting"
         # Automatic recall is preparation, not a model-issued tool step. Each

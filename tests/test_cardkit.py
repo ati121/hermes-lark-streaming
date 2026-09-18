@@ -15,6 +15,7 @@ from hermes_lark_streaming.cardkit import (
     _loading_hint_element,
     _longest_backtick_run,
     _render_footer_field,
+    _speed_window,
     _streaming_element,
     build_interactive_card_v2,
     build_preservative_seal_actions,
@@ -846,9 +847,44 @@ class TestSpeedFooterField:
         )
         assert en is None
 
+# --- 速度测量窗口选择 ---
+
+
+class TestSpeedWindowSelection:
+    """_speed_window() 选择测量窗口：优先可见正文首末块，突发下发时退回整次调用."""
+
+    def test_prefers_visible_delta_span(self) -> None:
+        """可见首末块跨度足够时用它，不被更宽的调用跨度污染."""
+        assert _speed_window(2.0, 9.0) == (2.0, "delta")
+
+    def test_falls_back_to_call_span_for_burst(self) -> None:
+        """答案被上游一次性整段下发时，用调用首个活动到末个可见块兜底."""
+        window, source = _speed_window(0.05, 1.8)
+        assert window == 1.8
+        assert source == "call"
+
+    def test_short_spans_keep_delta_value_and_stay_hidden(self) -> None:
+        """两个窗口都短于噪声下限时保留原始短窗口，渲染层据此继续隐藏."""
+        assert _speed_window(0.05, 0.1) == (0.05, "delta")
+        en, _ = _speed({"speed_output_tokens": 5, "gen_seconds": 0.05})
+        assert en is None
+
+    def test_stays_hidden_without_any_span(self) -> None:
+        """完全没有可见流式窗口时不显示速度."""
+        assert _speed_window(0.0, 0.0) == (0.0, "delta")
+        assert _speed_window(None, None) == (0.0, "delta")
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "2.0", True])
+    def test_ignores_unusable_spans(self, bad) -> None:
+        """非有限值/非数值/布尔值都不算有效窗口，避免渲染出 nan t/s."""
+        assert _speed_window(bad, bad) == (0.0, "delta")
+
+    def test_threshold_is_inclusive(self) -> None:
+        """窗口正好等于噪声下限时仍然显示."""
+        assert _speed_window(0.3, 0.0) == (0.3, "delta")
+
 
 # --- 图片提取 ---
-
 
 class TestExtractImagesFromMarkdown:
     """_extract_images_from_markdown() 图片提取测试."""

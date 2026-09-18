@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
@@ -44,6 +45,7 @@ __all__ = [
     '_compact',
     '_format_elapsed',
     '_format_speed',
+    '_speed_window',
     '_build_unified_panel_placeholder',
     'build_unified_panel',
     'build_panel_header',
@@ -1096,6 +1098,35 @@ def _format_elapsed(ms: float) -> str:
 
 # Measurement windows shorter than this make the tokens/s figure mostly noise.
 _MIN_SPEED_WINDOW_SEC = 0.3
+
+def _speed_span(value: Any) -> float:
+    """Return a usable positive span, or 0.0 for missing/non-finite values."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return 0.0
+    span = float(value)
+    if not math.isfinite(span) or span <= 0.0:
+        return 0.0
+    return span
+
+def _speed_window(delta_seconds: Any, call_seconds: Any) -> tuple[float, str]:
+    """Pick the measurement window for the output-speed figure.
+
+    ``delta_seconds`` is the span between the first and last visible answer
+    chunk, which is the tightest honest measurement.  A provider that flushes a
+    short answer in a single burst collapses it below the noise floor; the wider
+    ``call_seconds`` span (this model call's first upstream activity → last
+    visible chunk) still measures that call's real throughput, so it is used
+    instead.  Returns ``(window, source)`` with ``source`` in
+    ``{"delta", "call"}``; an unusable window stays 0.0, which keeps the field
+    hidden exactly as before.
+    """
+    delta = _speed_span(delta_seconds)
+    if delta >= _MIN_SPEED_WINDOW_SEC:
+        return delta, "delta"
+    call = _speed_span(call_seconds)
+    if call >= _MIN_SPEED_WINDOW_SEC:
+        return call, "call"
+    return delta, "delta"
 
 def _format_speed(output_tokens: int, gen_seconds: float) -> str | None:
     """Visible output tokens per second over the final streamed answer."""

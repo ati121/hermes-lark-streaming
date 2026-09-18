@@ -31,6 +31,7 @@ from hermes_lark_streaming.cardkit import (
     UNIFIED_PANEL_ELEMENT_ID,
     _LOADING_HINT_ELEMENT_ID,
     _LOADING_ELEMENT_ID,
+    _render_footer_field,
 )
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 
@@ -782,6 +783,7 @@ class TestLinearDispatch:
         session = _make_session("msg_tool_speed", linear=True)
         session._first_answer_time = 10.0
         session._last_answer_time = 12.0
+        session._speed_call_start = 9.0
         ctrl._sessions["msg_tool_speed"] = session
 
         ctrl.on_tool_update(
@@ -790,6 +792,7 @@ class TestLinearDispatch:
 
         assert session._first_answer_time == 0.0
         assert session._last_answer_time == 0.0
+        assert session._speed_call_start == 0.0
 
     def test_tool_call_excluded_from_final_answer_window(self) -> None:
         """Pre-tool text and tool duration must not enter the final-call rate."""
@@ -876,6 +879,284 @@ class TestLinearDispatch:
         with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
             ctrl.on_completed(message_id="msg_speed_none", duration=5.0)
         assert "gen_seconds" not in session.footer
+
+    def test_burst_answer_uses_call_window_for_speed(self) -> None:
+        """上游把短答案整段一次性下发时，用整次调用的窗口兜底而非隐藏速度."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_burst_speed", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_burst_speed"
+        ctrl._sessions["msg_burst_speed"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.0):
+                ctrl.on_model_activity(
+                    message_id="msg_burst_speed", source="stream.first_chunk",
+                )
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=12.0):
+                ctrl.on_answer(message_id="msg_burst_speed", text="整段答案")
+
+        # One visible chunk: the delta span is zero, the call span is 2 seconds.
+        assert session._first_answer_time == 12.0
+        assert session._last_answer_time == 12.0
+        assert session._speed_call_start == 10.0
+
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_burst_speed",
+                duration=139.2,
+                tokens={"output_tokens": 118, "speed_output_tokens": 300},
+            )
+
+        assert session.footer["speed_window"] == "call"
+        assert session.footer["gen_seconds"] == 2.0
+        assert _render_footer_field(
+            "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
+        ) == ("150 t/s", "150 t/s")
+
+    def test_visible_delta_window_wins_over_call_window(self) -> None:
+        """可见正文首末块跨度足够时仍用它，整次调用窗口只做兜底."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_delta_wins", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_delta_wins"
+        session._speed_call_start = 1.0
+        session._first_answer_time = 10.0
+        session._last_answer_time = 12.0
+        ctrl._sessions["msg_delta_wins"] = session
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_delta_wins",
+                duration=9.0,
+                tokens={"speed_output_tokens": 200},
+            )
+        assert session.footer["speed_window"] == "delta"
+        assert session.footer["gen_seconds"] == 2.0
+
+    def test_hidden_speed_logs_reason(self) -> None:
+        """速度最终为空时打印原因，让"时有时无"可排查."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_speed_log", linear=True)
+        with patch("hermes_lark_streaming.controller.core._logger") as log:
+            ctrl._log_hidden_speed(
+                session, tokens=None, window=0.0, delta_seconds=0.0, call_seconds=0.0,
+            )
+            assert log.info.call_args.args[2] == "no_usage"
+
+            log.reset_mock()
+            ctrl._log_hidden_speed(
+                session, tokens={"speed_output_tokens": 0},
+                window=5.0, delta_seconds=5.0, call_seconds=5.0,
+            )
+            assert log.info.call_args.args[2] == "no_visible_output"
+
+            log.reset_mock()
+            ctrl._log_hidden_speed(
+                session, tokens={"speed_output_tokens": 50},
+                window=0.1, delta_seconds=0.1, call_seconds=0.2,
+            )
+            assert log.info.call_args.args[2] == "window_too_short"
+
+            # A measurable speed needs no explanation.
+            log.reset_mock()
+            ctrl._log_hidden_speed(
+                session, tokens={"speed_output_tokens": 50},
+                window=2.0, delta_seconds=2.0, call_seconds=3.0,
+            )
+            log.info.assert_not_called()
+
+    def test_hidden_speed_log_skipped_without_speed_field(self) -> None:
+        """footer 里没有 speed 字段时不产生这条日志."""
+        ctrl = _setup_ctrl()
+        ctrl._cfg._raw["hermes_lark_streaming"]["footer"] = {
+            "fields": [["status", "elapsed", "model"]],
+        }
+        session = _make_session("msg_speed_log_off", linear=True)
+        with patch("hermes_lark_streaming.controller.core._logger") as log:
+            ctrl._log_hidden_speed(
+                session, tokens=None, window=0.0, delta_seconds=0.0, call_seconds=0.0,
+            )
+        log.info.assert_not_called()
+
+    def test_interim_answer_starts_speed_window(self) -> None:
+        """Hermes 经 interim 回调交答案时，正文与速度记时都必须更新."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_interim_speed", linear=True)
+        ctrl._sessions["msg_interim_speed"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"), patch(
+            "hermes_lark_streaming.controller.linear_mixin._time.monotonic",
+            return_value=30.0,
+        ):
+            ctrl._linear_on_thinking(session, "可见正文")
+
+        assert session.unified_state.answer_text == "可见正文"
+        assert session._first_answer_time == 30.0
+        assert session._last_answer_time == 30.0
+        assert session._speed_call_start == 30.0
+
+    def test_interim_reasoning_only_anchors_call_window(self) -> None:
+        """interim 只带推理时锚定调用窗口，但不算作可见答案."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_interim_reasoning", linear=True)
+        ctrl._sessions["msg_interim_reasoning"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"), patch(
+            "hermes_lark_streaming.controller.linear_mixin._time.monotonic",
+            return_value=25.0,
+        ):
+            ctrl._linear_on_thinking(session, "Reasoning:\n只想不做")
+
+        assert session._speed_call_start == 25.0
+        assert session._first_answer_time == 0.0
+        assert session._last_answer_time == 0.0
+
+    def test_compression_boundary_drops_call_anchor(self) -> None:
+        """压缩位于两次模型调用之间：锚点清零，窗口不跨过压缩."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_speed_compress", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_speed_compress"
+        # Call 1 had already produced reasoning — which is why the restored
+        # phase below is ``thinking`` and not ``waiting`` — and had answered.
+        session._response_phase = "thinking"
+        session._speed_call_start = 10.0
+        ctrl._sessions["msg_speed_compress"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl.on_compression_started(message_id="msg_speed_compress")
+        assert session._speed_call_start == 0.0
+
+        # Compaction completes by restoring the pre-compression phase, so the
+        # next call cannot use the phase to prove it is a new call.
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl.on_compression_completed(message_id="msg_speed_compress")
+        assert session._response_phase == "thinking"
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=100.0):
+                ctrl.on_model_activity(
+                    message_id="msg_speed_compress", source="stream.first_chunk",
+                )
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=101.5):
+                ctrl.on_answer(message_id="msg_speed_compress", text="整段答案")
+
+        assert session._speed_call_start == 100.0
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_speed_compress",
+                duration=95.0,
+                tokens={"speed_output_tokens": 120},
+            )
+        # Measured over the post-compaction call only (100.0 → 101.5).  Reusing
+        # call 1's anchor would have spanned the compaction and reported ~1 t/s.
+        assert session.footer["speed_window"] == "call"
+        assert session.footer["gen_seconds"] == pytest.approx(1.5)
+
+    def test_burst_after_multiple_tools_measures_only_last_call(self) -> None:
+        """多次工具调用后整段下发的答案，窗口只取最后一次模型调用."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_burst_tools", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_burst_tools"
+        ctrl._sessions["msg_burst_tools"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl.on_tool_update(
+                message_id="msg_burst_tools", tool_name="read", status="started",
+            )
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=20.0):
+                ctrl.on_answer(message_id="msg_burst_tools", text="先看结果")
+            ctrl.on_tool_update(
+                message_id="msg_burst_tools", tool_name="grep", status="started",
+            )
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=50.0):
+                ctrl.on_model_activity(
+                    message_id="msg_burst_tools", source="stream.first_chunk",
+                )
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=50.8):
+                ctrl.on_answer(message_id="msg_burst_tools", text="最终整段答案")
+
+        assert session._speed_call_start == 50.0
+        assert session._first_answer_time == 50.8
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_burst_tools",
+                duration=60.0,
+                tokens={"speed_output_tokens": 76},
+            )
+        assert session.footer["speed_window"] == "call"
+        assert session.footer["gen_seconds"] == pytest.approx(0.8)
+
+    def test_interim_answer_inside_observed_call_window_reports_speed(self) -> None:
+        """调用起点已知时，interim 交付的答案也能算出速度（正文与记时同步）."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_interim_measured", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_interim_measured"
+        ctrl._sessions["msg_interim_measured"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.0):
+                ctrl.on_model_activity(
+                    message_id="msg_interim_measured", source="stream.first_chunk",
+                )
+            with patch(
+                "hermes_lark_streaming.controller.linear_mixin._time.monotonic",
+                return_value=12.0,
+            ):
+                ctrl._linear_on_thinking(session, "整段答案")
+
+        assert session.unified_state.answer_text == "整段答案"
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_interim_measured",
+                duration=139.2,
+                tokens={"speed_output_tokens": 118},
+            )
+        assert session.footer["speed_window"] == "call"
+        assert session.footer["gen_seconds"] == pytest.approx(2.0)
+        assert _render_footer_field(
+            "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
+        ) == ("59 t/s", "59 t/s")
+
+    def test_interim_only_delivery_stays_hidden(self) -> None:
+        """纯 interim 单次交付没有可测窗口，按既有行为继续隐藏速度."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_interim_only", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_interim_only"
+        ctrl._sessions["msg_interim_only"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"), patch(
+            "hermes_lark_streaming.controller.linear_mixin._time.monotonic",
+            return_value=30.0,
+        ):
+            ctrl._linear_on_thinking(session, "整段答案")
+
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_interim_only",
+                duration=139.2,
+                tokens={"speed_output_tokens": 118},
+            )
+        # Nothing was ever streamed, so there is no honest denominator: the
+        # anchor and the first visible chunk share one timestamp.
+        assert "gen_seconds" not in session.footer
+        assert "speed_window" not in session.footer
+
+    def test_hidden_speed_log_survives_malformed_footer_fields(self) -> None:
+        """畸形 footer.fields 不能让这条诊断日志中断完成流程."""
+        ctrl = _setup_ctrl()
+        ctrl._cfg._raw["hermes_lark_streaming"]["footer"] = {"fields": [1, "status"]}
+        session = _make_session("msg_speed_log_bad", linear=True)
+
+        with patch("hermes_lark_streaming.controller.core._logger") as log:
+            ctrl._log_hidden_speed(
+                session, tokens=None, window=0.0, delta_seconds=0.0, call_seconds=0.0,
+            )
+
+        log.info.assert_called_once()
 
     def test_guard_skips_terminal(self) -> None:
         ctrl = _setup_ctrl()
