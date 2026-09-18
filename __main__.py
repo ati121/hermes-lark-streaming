@@ -150,8 +150,11 @@ def _print_usage() -> None:
 def _cmd_status() -> int:
     try:
         from hermes_lark_streaming.config import Config
+        from hermes_lark_streaming.config.reader import hermes_home
 
-        cfg = Config()
+        home = hermes_home()
+        cfg = Config(home)
+        print(f"Hermes home:          {home}")
         print(f"Config hermes_lark_streaming.enabled: {cfg.enabled}")
         print(f"Config hermes_lark_streaming.linear: {cfg.linear}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
@@ -167,8 +170,9 @@ def _cmd_status() -> int:
 def _cmd_verify() -> int:
     try:
         from hermes_lark_streaming.config import Config
+        from hermes_lark_streaming.config.reader import hermes_home
 
-        cfg = Config()
+        cfg = Config(hermes_home())
         print(f"Config hermes_lark_streaming.enabled: {cfg.enabled}")
         print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
 

@@ -4,6 +4,36 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.25 (2026-09-19, personal fork)
+
+### Fixed — correct cards on a multiplexed (multi-profile) gateway
+
+- Isolates every streaming controller by Hermes profile. The gateway's
+  `gateway.multiplex_profiles` mode (now the official default) serves several
+  profiles from one process, and loads a directory plugin once **per served
+  profile**. Each copy now resolves its own home, config and credentials, so a
+  reply for one profile can no longer be sent with another profile's bot — that
+  mismatch was rejected by Feishu with `230002 Bot/User can NOT be out of the
+  chat` and silently downgraded the card to plain text.
+- Reads credentials through the host's profile secret scope instead of
+  `os.environ`. Under multiplexing the process environment holds only the launch
+  profile's values, and the scope is fail-closed, so a profile can never borrow
+  another's app id or secret. Older Hermes builds without that API still read
+  the environment.
+- Deduplicates the runtime patches across those per-profile copies. The
+  "already patched" markers now live on the shared host objects — the
+  `GatewayRunner` / `FeishuAdapter` classes and the wrapped callables themselves
+  — instead of in per-copy module globals. Previously each copy wrapped the same
+  class again, so one inbound message was processed once per copy: it produced
+  repeated session creation and repeated card creation, all racing on the same
+  chat.
+- Shares process-wide plugin state (the per-home controller registry) through a
+  host module, so two copies cannot each build a controller for the same profile
+  and create two cards for one message.
+- Parses the gateway's nested platform credentials
+  (`gateway.platforms.<feishu|lark>.extra`) in addition to the flat `feishu:` /
+  `lark:` shape, and honours `domain: lark` for the Larksuite base URL.
+
 ## v1.6.24 (2026-09-18, personal fork)
 
 ### Fixed — speed field disappearing on burst answers

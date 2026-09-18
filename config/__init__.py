@@ -6,6 +6,8 @@ from .reader import (  # noqa: F401
     CARD_TEXT_SIZE_VALUES,
     Config,
     _get_hermes_config_path,
+    _get_secret,
+    hermes_home,
     normalize_text_sizes,
 )
 
@@ -15,5 +17,7 @@ __all__ = [
     "CARD_TEXT_SIZE_VALUES",
     "Config",
     "_get_hermes_config_path",
+    "_get_secret",
+    "hermes_home",
     "normalize_text_sizes",
 ]

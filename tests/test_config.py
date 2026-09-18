@@ -527,3 +527,183 @@ class TestConfigBackwardCompatV150:
         # But enabled/linear should work fine
         assert cfg.enabled is True
         assert cfg.linear is True
+
+
+class TestHermesHomeResolution:
+    """multiplex: hermes_home() 是 profile 作用域的唯一来源."""
+
+    def test_env_var_used_when_host_api_absent(self, monkeypatch) -> None:
+        from hermes_lark_streaming.config.reader import hermes_home
+        import sys
+        monkeypatch.setitem(sys.modules, "hermes_constants", None)
+        monkeypatch.setenv("HERMES_HOME", "/profile/from-env")
+        assert hermes_home() == Path("/profile/from-env")
+
+    def test_host_api_wins_over_env(self, monkeypatch) -> None:
+        """context-local override (per-turn profile) 优先于进程 env."""
+        import sys
+        import types
+        from hermes_lark_streaming.config.reader import hermes_home
+
+        fake = types.ModuleType("hermes_constants")
+        fake.get_hermes_home = lambda: Path("/profile/from-scope")
+        monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+        monkeypatch.setenv("HERMES_HOME", "/profile/from-env")
+        assert hermes_home() == Path("/profile/from-scope")
+
+    def test_host_api_failure_falls_back_to_env(self, monkeypatch) -> None:
+        import sys
+        import types
+        from hermes_lark_streaming.config.reader import hermes_home
+
+        fake = types.ModuleType("hermes_constants")
+
+        def _boom():
+            raise RuntimeError("no home")
+
+        fake.get_hermes_home = _boom
+        monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+        monkeypatch.setenv("HERMES_HOME", "/profile/fallback")
+        assert hermes_home() == Path("/profile/fallback")
+
+    def test_config_path_binds_explicit_home(self) -> None:
+        assert _get_hermes_config_path(Path("/profile/x")) == Path("/profile/x/config.yaml")
+
+
+class TestProfileBoundConfig:
+    """Config(home) 读的是该 profile 的 config.yaml, 不是启动 profile 的."""
+
+    def _write(self, home: Path, enabled: bool, app_id: str) -> None:
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            "hermes_lark_streaming:\n"
+            f"  enabled: {'true' if enabled else 'false'}\n"
+            "feishu:\n"
+            f"  app_id: {app_id}\n"
+            "  app_secret: s\n",
+            encoding="utf-8",
+        )
+
+    def test_bound_home_reads_its_own_file(self, tmp_path: Path) -> None:
+        home_a = tmp_path / "a"
+        home_b = tmp_path / "b"
+        self._write(home_a, enabled=True, app_id="cli_a")
+        self._write(home_b, enabled=False, app_id="cli_b")
+
+        cfg_a = Config(home_a)
+        cfg_b = Config(home_b)
+        assert cfg_a.enabled is True
+        assert cfg_b.enabled is False
+        assert cfg_a.feishu_app_id == "cli_a"
+        assert cfg_b.feishu_app_id == "cli_b"
+
+    def test_bound_home_bypasses_singleton(self, tmp_path: Path) -> None:
+        """绑定 home 的实例不共享单例, 否则两个 profile 会互相串配置."""
+        home_a = tmp_path / "a"
+        home_b = tmp_path / "b"
+        self._write(home_a, enabled=True, app_id="cli_a")
+        self._write(home_b, enabled=False, app_id="cli_b")
+        assert Config(home_a) is not Config(home_b)
+
+    def test_unbound_config_is_still_a_singleton(self) -> None:
+        assert Config() is Config()
+
+    def test_missing_file_yields_empty_config(self, tmp_path: Path) -> None:
+        cfg = Config(tmp_path / "nope")
+        assert cfg.enabled is True  # 默认 True
+
+
+class TestGatewayPlatformShape:
+    """gateway.platforms.<feishu|lark>.extra 嵌套形状 (官方 gateway 配置)."""
+
+    def test_gateway_platforms_extra(self) -> None:
+        cfg = _make_config({
+            "gateway": {"platforms": {"feishu": {"extra": {
+                "app_id": "gw_id", "app_secret": "gw_secret",
+            }}}},
+        })
+        with patch.dict(os.environ, {}, clear=True):
+            result = cfg._platform_cfg()
+        assert result["app_id"] == "gw_id"
+        assert result["app_secret"] == "gw_secret"
+
+    def test_top_level_platforms_extra(self) -> None:
+        cfg = _make_config({
+            "platforms": {"lark": {"extra": {"app_id": "lark_id", "app_secret": "ls"}}},
+        })
+        with patch.dict(os.environ, {}, clear=True):
+            assert cfg._platform_cfg()["app_id"] == "lark_id"
+
+    def test_domain_lark_selects_larksuite(self) -> None:
+        from hermes_lark_streaming.config.reader import LARK_OPEN_API_BASE
+        cfg = _make_config({
+            "gateway": {"platforms": {"feishu": {
+                "domain": "lark",
+                "extra": {"app_id": "id", "app_secret": "s"},
+            }}},
+        })
+        with patch.dict(os.environ, {}, clear=True):
+            assert cfg._platform_cfg()["base_url"] == LARK_OPEN_API_BASE
+
+    def test_platform_base_url_wins_over_domain(self) -> None:
+        cfg = _make_config({
+            "gateway": {"platforms": {"feishu": {
+                "base_url": "https://custom.example/open-apis",
+                "extra": {"app_id": "id", "app_secret": "s", "domain": "lark"},
+            }}},
+        })
+        with patch.dict(os.environ, {}, clear=True):
+            assert cfg._platform_cfg()["base_url"] == "https://custom.example/open-apis"
+
+    def test_flat_shape_still_wins_over_nested(self) -> None:
+        cfg = _make_config({
+            "feishu": {"app_id": "flat_id", "app_secret": "fs"},
+            "gateway": {"platforms": {"feishu": {"extra": {"app_id": "gw_id", "app_secret": "gs"}}}},
+        })
+        with patch.dict(os.environ, {}, clear=True):
+            assert cfg._platform_cfg()["app_id"] == "flat_id"
+
+
+class TestSecretScopeReads:
+    """凭据读取走 profile secret scope, 不借用 os.environ (multiplex fail-closed)."""
+
+    def test_get_secret_prefers_host_scope(self, monkeypatch) -> None:
+        import sys
+        import types
+        from hermes_lark_streaming.config.reader import _get_secret
+
+        fake = types.ModuleType("agent.secret_scope")
+        fake.get_secret = lambda name, default=None: {"FEISHU_APP_ID": "scoped_id"}.get(name, default)
+        monkeypatch.setitem(sys.modules, "agent.secret_scope", fake)
+        monkeypatch.setenv("FEISHU_APP_ID", "env_id")
+        assert _get_secret("FEISHU_APP_ID") == "scoped_id"
+
+    def test_get_secret_does_not_fall_back_to_environ_under_scope(self, monkeypatch) -> None:
+        """scope miss 必须返回 default —— 拿 os.environ 就是串 profile 的 bug."""
+        import sys
+        import types
+        from hermes_lark_streaming.config.reader import _get_secret
+
+        fake = types.ModuleType("agent.secret_scope")
+        fake.get_secret = lambda name, default=None: default
+        monkeypatch.setitem(sys.modules, "agent.secret_scope", fake)
+        monkeypatch.setenv("FEISHU_APP_ID", "env_id")
+        assert _get_secret("FEISHU_APP_ID") == ""
+
+    def test_get_secret_falls_back_when_host_api_absent(self, monkeypatch) -> None:
+        import sys
+        from hermes_lark_streaming.config.reader import _get_secret
+
+        monkeypatch.setitem(sys.modules, "agent.secret_scope", None)
+        monkeypatch.setenv("LARK_APP_ID", "env_lark")
+        assert _get_secret("LARK_APP_ID") == "env_lark"
+
+    def test_env_app_id_uses_scope(self, monkeypatch) -> None:
+        import sys
+        import types
+
+        fake = types.ModuleType("agent.secret_scope")
+        fake.get_secret = lambda name, default=None: {"FEISHU_APP_ID": "scoped"}.get(name, default)
+        monkeypatch.setitem(sys.modules, "agent.secret_scope", fake)
+        cfg = Config()
+        assert cfg.env_app_id == "scoped"

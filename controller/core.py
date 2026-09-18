@@ -6,12 +6,15 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future as ConcurrentFuture
+from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..config import Config
+from ..config import Config, hermes_home
 from ..cardkit.elements import _MIN_SPEED_WINDOW_SEC, _speed_window
+from ..runtime_globals import shared_dict, shared_object
 from .linear_mixin import UnifiedControllerMixin
 from .mixin import (
     ABORTED,
@@ -46,8 +49,15 @@ from ..state.session import CardSession  # noqa: F401 — re-exported for backwa
 class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     """流式卡片控制器 — 管理多条消息的卡片生命周期."""
 
-    def __init__(self) -> None:
-        self._cfg = Config()
+    def __init__(self, profile_home: Path | None = None) -> None:
+        # Multiplex: one controller per served profile home.  ``profile_home``
+        # decides which config.yaml / .env this controller reads, so a turn for
+        # profile B never borrows profile A's credentials.
+        self._profile_home = (
+            Path(profile_home) if profile_home is not None else hermes_home()
+        ).resolve()
+        self._cfg = Config(self._profile_home)
+        self._unscoped_enabled: bool | None = None
         self._client: FeishuClient | None = None
         self._sessions: dict[str, CardSession] = {}
         self._sessions_lock = threading.RLock()
@@ -103,7 +113,68 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
     @property
     def enabled(self) -> bool:
-        return self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+        unscoped = self._needs_fallback_scope()
+        if unscoped and self._unscoped_enabled is not None:
+            return self._unscoped_enabled
+        with self._credential_scope():
+            enabled = self._cfg.enabled and bool(
+                self._cfg.feishu_app_id or self._cfg.env_app_id
+            )
+        if unscoped and enabled:
+            # Cache only the positive verdict: a miss usually means the profile
+            # .env had not been hydrated yet, and we want the next access to look
+            # again.  Cheap because it is read on hot paths.
+            self._unscoped_enabled = True
+        return enabled
+
+    @staticmethod
+    def _needs_fallback_scope() -> bool:
+        """True when we must build our own profile secret scope to read credentials.
+
+        Multiplex + no scope installed means the caller path did not bind a
+        profile scope (plugin register/pre-warm, cron tick, a hook running
+        outside the turn).  ``get_secret`` fails closed there, so the controller
+        installs the scope its own ``profile_home`` implies.
+        """
+        try:
+            from agent.secret_scope import (  # type: ignore[import-not-found]
+                current_secret_scope,
+                is_multiplex_active,
+            )
+        except ImportError:
+            return False
+        try:
+            return is_multiplex_active() and current_secret_scope() is None
+        except (AttributeError, TypeError, RuntimeError):  # pragma: no cover - defensive
+            return False
+
+    @contextmanager
+    def _credential_scope(self) -> Iterator[None]:
+        """Bind this controller's profile home credentials for the block.
+
+        No-op when the host has no secret-scope API, when multiplexing is off,
+        or when a scope is already installed (the normal per-turn path installs
+        one before we are called — never clobber it).
+        """
+        try:
+            from agent.secret_scope import (  # type: ignore[import-not-found]
+                build_profile_secret_scope,
+                current_secret_scope,
+                is_multiplex_active,
+                reset_secret_scope,
+                set_secret_scope,
+            )
+        except ImportError:
+            yield
+            return
+        if not is_multiplex_active() or current_secret_scope() is not None:
+            yield
+            return
+        token = set_secret_scope(build_profile_secret_scope(self._profile_home))
+        try:
+            yield
+        finally:
+            reset_secret_scope(token)
 
     async def _ensure_init(self) -> None:
         if self._initialized:
@@ -111,28 +182,31 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         async with self._init_lock:
             if self._initialized:
                 return
-            app_id = self._cfg.feishu_app_id or self._cfg.env_app_id
-            app_secret = self._cfg.feishu_app_secret or self._cfg.env_app_secret
-            if not app_id or not app_secret:
-                _logger.error(
-                    "FeishuClient init failed: credentials not configured "
-                    "(app_id=%s, env_app_id=%s)",
-                    bool(app_id),
-                    bool(self._cfg.env_app_id),
+            with self._credential_scope():
+                app_id = self._cfg.feishu_app_id or self._cfg.env_app_id
+                app_secret = self._cfg.feishu_app_secret or self._cfg.env_app_secret
+                if not app_id or not app_secret:
+                    _logger.error(
+                        "FeishuClient init failed: credentials not configured "
+                        "(home=%s, app_id=%s, env_app_id=%s)",
+                        self._profile_home,
+                        bool(app_id),
+                        bool(self._cfg.env_app_id),
+                    )
+                    raise RuntimeError("feishu credentials not configured")
+                self._client = FeishuClient(
+                    FeishuClientConfig(
+                        app_id=app_id,
+                        app_secret=app_secret,
+                        base_url=self._cfg.feishu_base_url,
+                    )
                 )
-                raise RuntimeError("feishu credentials not configured")
-            self._client = FeishuClient(
-                FeishuClientConfig(
-                    app_id=app_id,
-                    app_secret=app_secret,
-                    base_url=self._cfg.feishu_base_url,
-                )
-            )
-            self._initialized = True
+                self._initialized = True
             _logger.info(
-                "FeishuClient initialized: app_id=%s base_url=%s",
+                "FeishuClient initialized: app_id=%s base_url=%s home=%s",
                 app_id[:8] + "..." if len(app_id) > 8 else app_id,
                 self._cfg.feishu_base_url,
+                self._profile_home,
             )
 
     def _client_ok(self) -> bool:
@@ -1341,10 +1415,33 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         except Exception:
             _logger.warning("background task failed", exc_info=True)
 
-_controller: StreamCardController | None = None
+# One controller per served profile home.  Under multiplex a single process
+# serves several profiles, and each profile owns its own config/credentials and
+# its own card sessions — sharing one controller would cross the two.  Keyed by
+# resolved home so a re-entered profile reuses its controller (and its
+# FeishuClient); a plain single-profile process keeps exactly one entry.
+#
+# The dict itself must be shared across the plugin's per-profile module copies
+# (see ``runtime_globals``): two copies each holding their own controller for the
+# same home would both create a card for the same message.
+_LOCAL_CONTROLLERS: dict[str, StreamCardController] = {}
+_controllers: dict[str, StreamCardController] = shared_dict(
+    "lark_streaming.controllers", _LOCAL_CONTROLLERS
+)
+_controller_lock = shared_object("lark_streaming.controllers.lock", threading.Lock)
 
-def get_controller() -> StreamCardController:
-    global _controller
-    if _controller is None:
-        _controller = StreamCardController()
-    return _controller
+def get_controller(profile_home: Path | None = None) -> StreamCardController:
+    """Return the controller for ``profile_home`` (default: the current home)."""
+    home = (Path(profile_home) if profile_home is not None else hermes_home()).resolve()
+    key = str(home)
+    with _controller_lock:
+        controller = _controllers.get(key)
+        if controller is None:
+            controller = StreamCardController(home)
+            _controllers[key] = controller
+        return controller
+
+def reset_controllers() -> None:
+    """Drop cached controllers (tests / unregister)."""
+    with _controller_lock:
+        _controllers.clear()

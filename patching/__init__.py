@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 from .. import __version__
+from ..runtime_globals import shared_dict, shared_object
 
 try:
     from .hermes_adapter import HermesCompat, _try_import
@@ -110,24 +111,73 @@ _msg_ctx: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar
     "hermes_lark_streaming_msg_ctx", default=None
 )
 
-_started_msg_ids: set[str] = set()
-_started_msg_ids_lock = threading.Lock()
+# ── Cross-copy shared state (multiplex) ────────────────────────────────
+#
+# The objects below are read by wrappers that may have been installed by a
+# DIFFERENT plugin copy than the one serving the current turn (only one copy wins
+# the race to wrap each shared host object).  They must therefore be process-wide,
+# not per-copy — otherwise the winning copy registers a turn into its own
+# context and every other copy's wrapper sees an empty one.  See
+# ``runtime_globals``.
+_started_msg_ids: set[str] = shared_object("patching.started_msg_ids", set)
+_started_msg_ids_lock = shared_object("patching.started_msg_ids.lock", threading.Lock)
 
-_gateway_cards: dict[str, dict[str, Any]] = {}
-_gateway_cards_lock = threading.Lock()
+_gateway_cards: dict[str, dict[str, Any]] = shared_dict("patching.gateway_cards", {})
+_gateway_cards_lock = shared_object("patching.gateway_cards.lock", threading.Lock)
 
 # Explicit cross-thread context handoff keyed by Hermes session id. Hermes
 # executes AIAgent.run_conversation in a worker thread; ContextVar propagation
 # has changed across gateway releases, while the session id is stable on both
 # sides of that boundary.
-_session_contexts: dict[str, dict[str, Any]] = {}
-_session_contexts_lock = threading.Lock()
+_session_contexts: dict[str, dict[str, Any]] = shared_dict("patching.session_contexts", {})
+_session_contexts_lock = shared_object("patching.session_contexts.lock", threading.Lock)
 
 _gw_runner_patched: bool = False
 
 _patch_status: dict[str, Any] = {}
 
 _patched_feishu_classes: set[int] = set()
+
+# ── Cross-copy wrap markers (multiplex) ────────────────────────────────
+#
+# Under ``gateway.multiplex_profiles`` Hermes loads a directory plugin ONCE PER
+# SERVED PROFILE (``hermes_cli/plugins_loader.py`` namespaces them
+# ``hermes_plugins.<slug>`` / ``.<slug>__home_<digest>``), so this module exists
+# three times in one process while the host modules it patches
+# (``gateway.run``, ``feishu_platform.adapter``, ``agent.conversation_loop`` …)
+# exist once.  A module-level "already patched" flag is therefore per-copy: every
+# copy patched the same class again, nesting N wrappers, and one inbound event ran
+# through all N (NAS: 3× ``feishu inbound ids``, 3× ``HLS: session created``,
+# 3× card create → ``230002``).
+#
+# Fix: mark the SHARED object — an attribute on the wrapped callable or on the
+# patched class — so whichever copy runs first wins and the others adopt the
+# existing wrapper instead of nesting another one.  ``functools.wraps`` copies
+# ``__dict__`` onto the wrapper, so the marker also survives introspection.
+_WRAP_MARK_ATTR = "_hls_wrapped"
+_GW_CLASS_MARK_ATTR = "__hls_gw_wrapped__"
+_FEISHU_CLASS_MARK_ATTR = "__hls_feishu_wrapped__"
+
+def _already_wrapped(fn: Any) -> bool:
+    """True when ``fn`` is an HLS wrapper already installed (possibly by another copy)."""
+    return bool(getattr(fn, _WRAP_MARK_ATTR, False))
+
+def _mark_wrapped(fn: Any) -> Any:
+    """Mark ``fn`` as an HLS wrapper; best-effort (builtins may refuse attributes)."""
+    try:
+        setattr(fn, _WRAP_MARK_ATTR, True)
+    except (AttributeError, TypeError):  # pragma: no cover - non-settable callable
+        pass
+    return fn
+
+def _class_marked(cls: Any, attr: str) -> bool:
+    return bool(getattr(cls, attr, False))
+
+def _mark_class(cls: Any, attr: str, home: str = "") -> None:
+    try:
+        setattr(cls, attr, home or True)
+    except (AttributeError, TypeError):  # pragma: no cover - exotic metaclass
+        pass
 
 # v1.6.2: per-target completion flags for the deferred retry loop.
 #
@@ -216,16 +266,40 @@ from .hooks import (  # noqa: E402
 
 # ── Public entry point ─────────────────────────────────────────────
 
+def _installing_home() -> str:
+    """The Hermes home of the plugin copy running this patch (diagnostics only)."""
+    try:
+        from ..config import hermes_home
+        return str(hermes_home())
+    except (ImportError, AttributeError, TypeError, OSError):  # pragma: no cover - defensive
+        return ""
+
+def _wrap_method_once(cls: Any, name: str, wrapper_factory: Callable) -> str:
+    """Wrap ``cls.<name>`` only when it is not an HLS wrapper yet.
+
+    Returns ``"patched"``, ``"adopted"`` (another copy already wrapped it) or
+    ``"missing"``.
+    """
+    orig = getattr(cls, name, None)
+    if orig is None:
+        return "missing"
+    if _already_wrapped(orig):
+        return "adopted"
+    setattr(cls, name, _mark_wrapped(wrapper_factory(orig)))
+    return "patched"
+
 def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
     """Apply the three critical GatewayRunner method patches.
 
     ``compat`` lets a caller that already built a :class:`HermesCompat` reuse it
     instead of paying for a second module resolution pass.
+
+    Idempotency is anchored on ``GatewayRunner`` itself (one class object for the
+    whole process) plus a marker on each wrapped method, so the extra plugin
+    copies multiplex loads cannot stack a second wrapper on top (see
+    ``_WRAP_MARK_ATTR``).
     """
     global _gw_runner_patched
-
-    if _gw_runner_patched:
-        return True  # Already patched (e.g. immediate path succeeded)
 
     if compat is None:
         compat = HermesCompat()
@@ -233,49 +307,52 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
     if GatewayRunner is None:
         return False  # Not available yet
 
+    if _class_marked(GatewayRunner, _GW_CLASS_MARK_ATTR):
+        _gw_runner_patched = True
+        return True  # Another copy patched this class (whether or not it is ours)
+
+    if _gw_runner_patched:
+        return True  # Already patched (e.g. immediate path succeeded)
+
     try:
         # Patch each method individually so one missing method
         # doesn't prevent the others from being patched.
         _patched_methods = []
-        if hasattr(GatewayRunner, '_handle_message'):
-            GatewayRunner._handle_message = _wrap_handle_message(GatewayRunner._handle_message)
-            _patched_methods.append('_handle_message')
-        else:
-            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message not found, skipping patch")
+        _adopted_methods = []
+        for _name, _factory in (
+            ('_handle_message', _wrap_handle_message),
+            ('_handle_message_with_agent', _wrap_handle_message_with_agent),
+            ('_run_agent', _wrap_run_agent),
+            ('_run_background_task', _wrap_run_background_task),
+        ):
+            _outcome = _wrap_method_once(GatewayRunner, _name, _factory)
+            if _outcome == "patched":
+                _patched_methods.append(_name)
+            elif _outcome == "adopted":
+                _adopted_methods.append(_name)
+            elif _name in ('_handle_message', '_handle_message_with_agent', '_run_agent'):
+                _logger.warning(
+                    "hermes-lark-streaming: GatewayRunner.%s not found, skipping patch", _name,
+                )
+            else:
+                _logger.debug(
+                    "hermes-lark-streaming: GatewayRunner.%s not found, "
+                    "background cards disabled", _name,
+                )
 
-        if hasattr(GatewayRunner, '_handle_message_with_agent'):
-            GatewayRunner._handle_message_with_agent = _wrap_handle_message_with_agent(
-                GatewayRunner._handle_message_with_agent
-            )
-            _patched_methods.append('_handle_message_with_agent')
-        else:
-            _logger.warning("hermes-lark-streaming: GatewayRunner._handle_message_with_agent not found, skipping patch")
-
-        if hasattr(GatewayRunner, '_run_agent'):
-            GatewayRunner._run_agent = _wrap_run_agent(GatewayRunner._run_agent)
-            _patched_methods.append('_run_agent')
-        else:
-            _logger.warning("hermes-lark-streaming: GatewayRunner._run_agent not found, skipping patch")
-
-        try:
-            GatewayRunner._run_background_task = _wrap_run_background_task(
-                GatewayRunner._run_background_task
-            )
-            _patched_methods.append('_run_background_task')
-        except AttributeError:
-            _logger.debug("hermes-lark-streaming: _run_background_task not found, background cards disabled")
-
-        if not _patched_methods:
+        if not _patched_methods and not _adopted_methods:
             _logger.error(
                 "hermes-lark-streaming: GatewayRunner patch FAILED — "
                 "no methods found. Streaming cards will NOT work."
             )
             return False
 
+        _mark_class(GatewayRunner, _GW_CLASS_MARK_ATTR, _installing_home())
         _gw_runner_patched = True
         _logger.info(
-            "hermes-lark-streaming: GatewayRunner patched methods: %s",
-            ', '.join(_patched_methods),
+            "hermes-lark-streaming: GatewayRunner patched methods: %s%s",
+            ', '.join(_patched_methods) or '(none)',
+            f" [adopted from another copy: {', '.join(_adopted_methods)}]" if _adopted_methods else "",
         )
         return True
     except (ImportError, AttributeError) as e:
@@ -293,9 +370,15 @@ def _patch_conversation_loop(compat: Any) -> bool:
         return True
     if not compat.has_conversation_loop:
         return False
+    _mod = compat.conversation_loop_module
+    if _already_wrapped(getattr(_mod, "run_conversation", None)):
+        # Another plugin copy (other profile home) already wrapped the one
+        # process-wide module function.
+        _conversation_loop_patched = True
+        return True
     try:
-        compat.conversation_loop_module.run_conversation = _wrap_run_conversation(
-            compat.conversation_loop_func
+        _mod.run_conversation = _mark_wrapped(
+            _wrap_run_conversation(compat.conversation_loop_func)
         )
         _conversation_loop_patched = True
         _logger.info("hermes-lark-streaming: agent.conversation_loop module patched ✓")
@@ -314,9 +397,14 @@ def _patch_cron(compat: Any) -> bool:
         return True
     if not compat.has_cron_scheduler:
         return False
+    _cron_mod = compat.cron_scheduler_module
+    if _already_wrapped(getattr(_cron_mod, "_deliver_result", None)):
+        _cron_patched = True
+        return True
     try:
-        _cron_mod = compat.cron_scheduler_module
-        _cron_mod._deliver_result = _wrap_cron_deliver(_cron_mod._deliver_result)
+        _cron_mod._deliver_result = _mark_wrapped(
+            _wrap_cron_deliver(_cron_mod._deliver_result)
+        )
         _cron_patched = True
         _logger.info(
             "hermes-lark-streaming: cron scheduler patched ✓ (module=%s)",
@@ -326,7 +414,6 @@ def _patch_cron(compat: Any) -> bool:
     except (AttributeError, TypeError) as e:
         _logger.debug("hermes-lark-streaming: cron.scheduler patch failed (%s)", e)
         return False
-
 def _patch_feishu(compat: Any) -> bool:
     """Patch the resolved ``FeishuAdapter`` class."""
     global _feishu_patched
@@ -499,61 +586,67 @@ def apply_patches() -> None:
     )
 
 def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) -> bool:
-    """Apply all FeishuAdapter method patches to the given class."""
+    """Apply all FeishuAdapter method patches to the given class.
+
+    Each Hermes profile loads its OWN feishu_platform directory plugin, so every
+    profile owns a distinct ``FeishuAdapter`` class object — this must run once
+    per class.  The dedup key is therefore the class itself (marker attribute
+    plus the ``id()`` registry), never a module-level flag: under multiplex the
+    same wrapper module exists once per profile, and a module-level flag would
+    let copy B re-wrap the class copy A already patched.
+    """
     if FeishuAdapter is None:
         return False
 
     cls_id = id(FeishuAdapter)
-    if cls_id in _patched_feishu_classes:
-        if is_repatch:
-            pass
-        return True
-
-    try:
-        FeishuAdapter.send = _wrap_feishu_adapter_send(FeishuAdapter.send)
-        try:
-            FeishuAdapter.edit_message = _wrap_feishu_adapter_edit(FeishuAdapter.edit_message)
-        except AttributeError:
-            _logger.debug("hermes-lark-streaming: FeishuAdapter.edit_message not found, edit interception skipped")
-        try:
-            FeishuAdapter.add_reaction = _wrap_feishu_adapter_add_reaction(FeishuAdapter.add_reaction)
-        except AttributeError:
-            try:
-                FeishuAdapter._add_reaction = _wrap_feishu_adapter_add_reaction(FeishuAdapter._add_reaction)
-            except AttributeError:
-                _logger.debug("hermes-lark-streaming: FeishuAdapter.add_reaction/_add_reaction not found, reaction interception skipped")
-        try:
-            FeishuAdapter.delete_reaction = _wrap_feishu_adapter_delete_reaction(FeishuAdapter.delete_reaction)
-        except AttributeError:
-            try:
-                FeishuAdapter._remove_reaction = _wrap_feishu_adapter_delete_reaction(FeishuAdapter._remove_reaction)
-            except AttributeError:
-                _logger.debug("hermes-lark-streaming: FeishuAdapter.delete_reaction/_remove_reaction not found, reaction interception skipped")
-        # NOTE(v0.15.4): send_image_file / send_image interceptors DELETED (2026-06-09).
-
-        try:
-            FeishuAdapter.send_clarify = _wrap_feishu_adapter_send_clarify(FeishuAdapter.send_clarify)
-            _logger.info("hermes-lark-streaming: FeishuAdapter.send_clarify patched ✓ (clarify interactive card)")
-        except AttributeError:
-            _logger.debug("hermes-lark-streaming: FeishuAdapter.send_clarify not found, clarify card skipped")
-        try:
-            FeishuAdapter._handle_card_action_event = _wrap_handle_card_action_event(FeishuAdapter._handle_card_action_event)
-            _logger.info("hermes-lark-streaming: FeishuAdapter._handle_card_action_event patched ✓ (card action /card suppression)")
-        except AttributeError:
-            _logger.debug("hermes-lark-streaming: FeishuAdapter._handle_card_action_event not found, /card suppression skipped")
-
-        # Record this class as patched AFTER successful patch (only on success,
-        # so a failed attempt can be retried later in the deferred stage).
+    if _class_marked(FeishuAdapter, _FEISHU_CLASS_MARK_ATTR) or cls_id in _patched_feishu_classes:
         _patched_feishu_classes.add(cls_id)
-        _logger.info(
-            "hermes-lark-streaming: FeishuAdapter.send/edit/reaction/image/clarify patched ✓ "
-            "(gateway message cards enabled, class_id=%s)",
-            cls_id,
-        )
         return True
+    _outcomes: dict[str, str] = {}
+    try:
+        for _name, _factory, _alt in (
+            ("send", _wrap_feishu_adapter_send, None),
+            ("edit_message", _wrap_feishu_adapter_edit, None),
+            ("add_reaction", _wrap_feishu_adapter_add_reaction, "_add_reaction"),
+            ("delete_reaction", _wrap_feishu_adapter_delete_reaction, "_remove_reaction"),
+            ("send_clarify", _wrap_feishu_adapter_send_clarify, None),
+            ("_handle_card_action_event", _wrap_handle_card_action_event, None),
+        ):
+            _outcome = _wrap_method_once(FeishuAdapter, _name, _factory)
+            if _outcome == "missing" and _alt:
+                # Older Hermes builds use the underscore-prefixed name.
+                _outcome = _wrap_method_once(FeishuAdapter, _alt, _factory)
+            _outcomes[_name] = _outcome
+            if _outcome == "patched":
+                _logger.info(
+                    "hermes-lark-streaming: FeishuAdapter.%s patched ✓ (class_id=%s)",
+                    _name, cls_id,
+                )
+            elif _outcome == "missing":
+                _logger.debug(
+                    "hermes-lark-streaming: FeishuAdapter.%s not found, interception skipped",
+                    _name,
+                )
     except AttributeError as e:
         _logger.info("hermes-lark-streaming: FeishuAdapter patch skipped (%s)", e)
         return False
+
+    if _outcomes.get("send") == "missing":
+        _logger.info("hermes-lark-streaming: FeishuAdapter.send not found, patch skipped")
+        return False
+
+    # Record this class as patched AFTER successful patch (only on success,
+    # so a failed attempt can be retried later in the deferred stage).  The
+    # marker attribute is what the OTHER plugin copies see (their own
+    # ``_patched_feishu_classes`` is per-copy).
+    _patched_feishu_classes.add(cls_id)
+    _mark_class(FeishuAdapter, _FEISHU_CLASS_MARK_ATTR, _installing_home())
+    _logger.info(
+        "hermes-lark-streaming: FeishuAdapter.send/edit/reaction/clarify patched ✓ "
+        "(gateway message cards enabled, class_id=%s, home=%s)",
+        cls_id, _installing_home() or "?",
+    )
+    return True
 
 def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
     """Verify that an adapter instance's class has been patched by HLS."""
@@ -561,6 +654,9 @@ def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
         return False
     cls = type(adapter_instance)
     cls_id = id(cls)
+    if _class_marked(cls, _FEISHU_CLASS_MARK_ATTR):
+        _patched_feishu_classes.add(cls_id)
+        return True
     if cls_id in _patched_feishu_classes:
         return True
     _logger.error(

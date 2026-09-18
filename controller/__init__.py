@@ -1,6 +1,6 @@
 """Re-exports key names from sub-modules for convenient access:"""
 
-from .core import StreamCardController, get_controller  # noqa: F401
+from .core import StreamCardController, get_controller, reset_controllers  # noqa: F401
 from .core import CardSession  # noqa: F401 — re-exported via core
 from .mixin import (  # noqa: F401
     IDLE,

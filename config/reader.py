@@ -81,9 +81,49 @@ def normalize_text_sizes(
     return normalized
 
 
-def _get_hermes_config_path() -> Path:
-    """动态获取 Hermes 配置文件路径."""
-    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "config.yaml"
+FEISHU_OPEN_API_BASE = "https://open.feishu.cn/open-apis"
+LARK_OPEN_API_BASE = "https://open.larksuite.com/open-apis"
+DEFAULT_OPEN_API_BASE = FEISHU_OPEN_API_BASE
+
+
+def hermes_home() -> Path:
+    """当前 Hermes home 的唯一来源.
+
+    优先级: ``hermes_constants.get_hermes_home()`` (multiplex 下由
+    ``_profile_runtime_scope`` 按 profile 安装的 context-local override) →
+    ``HERMES_HOME`` 环境变量 → ``~/.hermes``.
+    """
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore[import-not-found]
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    try:
+        home = get_hermes_home()
+    except (AttributeError, TypeError, OSError, ValueError, RuntimeError):
+        # Host API shape change / unresolvable home: fall back to the env var.
+        return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+        return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    return Path(home)
+
+
+def _get_secret(name: str) -> str:
+    """读取凭据: 优先 Hermes secret scope (fail-closed), 仅在无该 API 时回退 os.environ.
+
+    multiplex 下 ``agent.secret_scope.get_secret`` 会读当前 profile 的 ``.env``
+    scope, 绝不借用 ``os.environ`` (那是启动 profile 的凭据) —— 见
+    ``gateway/AGENTS.md`` §Profile scope. 无 scope 且 multiplex 开启时它会抛
+    ``UnscopedSecretError``, 由调用方的 scope 兜底负责, 这里不吞异常.
+    """
+    try:
+        from agent.secret_scope import get_secret  # type: ignore[import-not-found]
+    except ImportError:
+        return os.environ.get(name, "")
+    return get_secret(name, "") or ""
+
+
+def _get_hermes_config_path(home: Path | None = None) -> Path:
+    """Hermes 主配置路径, 可绑定到指定 profile home."""
+    return (Path(home) if home is not None else hermes_home()) / "config.yaml"
 
 _RELOAD_CACHE_TTL = 60.0  # 运行时可变配置缓存 TTL.
 
@@ -139,19 +179,28 @@ def _to_float(val: Any, default: float) -> float:
     return default
 
 class Config:
-    """插件配置, 惰性读取. 单例模式: reload() 才能清掉 controller 持有实例缓存."""
+    """插件配置, 惰性读取.
+
+    ``Config(home)`` 绑定某个 Hermes home (multiplex 下每个 profile 一份),
+    ``Config()`` 走 :func:`hermes_home()` (当前 profile/进程 home). 绑定 home 的
+    实例不做单例共享 —— 同一进程可能同时服务多个 profile.
+    """
 
     _instance: "Config | None" = None
 
-    def __new__(cls) -> "Config":
+    def __new__(cls, home: Path | None = None) -> "Config":
+        if home is not None:
+            return super().__new__(cls)
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self) -> None:
-        if getattr(self, "_initialized", False):
+    def __init__(self, home: Path | None = None) -> None:
+        bound = Path(home) if home is not None else None
+        if bound is None and getattr(self, "_initialized", False):
             return
+        self._home = bound
         self._raw: dict[str, Any] | None = None
         self._reload_cache: dict[str, Any] | None = None
         self._reload_cache_at: float = 0.0
@@ -297,11 +346,11 @@ class Config:
 
     @property
     def env_app_id(self) -> str:
-        return os.environ.get("FEISHU_APP_ID") or os.environ.get("LARK_APP_ID") or ""
+        return _get_secret("FEISHU_APP_ID") or _get_secret("LARK_APP_ID")
 
     @property
     def env_app_secret(self) -> str:
-        return os.environ.get("FEISHU_APP_SECRET") or os.environ.get("LARK_APP_SECRET") or ""
+        return _get_secret("FEISHU_APP_SECRET") or _get_secret("LARK_APP_SECRET")
 
     def _plugin_sec(self) -> dict[str, Any]:
         raw = self._load()
@@ -311,22 +360,19 @@ class Config:
         return {}
 
     def _platform_cfg(self) -> dict[str, Any]:
-        """从环境变量或平台配置找飞书凭据."""
-        if self.env_app_id and self.env_app_secret:
-            base_url = (
-                os.environ.get("FEISHU_BASE_URL")
-                or os.environ.get("LARK_BASE_URL")
-                or None
-            )
+        """从环境变量 / secret scope 或平台配置找飞书凭据."""
+        env_app_id = self.env_app_id
+        env_app_secret = self.env_app_secret
+        if env_app_id and env_app_secret:
+            base_url = _get_secret("FEISHU_BASE_URL") or _get_secret("LARK_BASE_URL") or ""
             if not base_url:
-                domain = os.environ.get("FEISHU_DOMAIN", "").lower()
-                if domain == "lark":
-                    base_url = "https://open.larksuite.com/open-apis"
-                else:
-                    base_url = "https://open.feishu.cn/open-apis"
+                domain = _get_secret("FEISHU_DOMAIN").lower()
+                base_url = (
+                    LARK_OPEN_API_BASE if domain == "lark" else FEISHU_OPEN_API_BASE
+                )
             return {
-                "app_id": self.env_app_id,
-                "app_secret": self.env_app_secret,
+                "app_id": env_app_id,
+                "app_secret": env_app_secret,
                 "base_url": base_url,
             }
         raw = self._load()
@@ -334,13 +380,38 @@ class Config:
             pf = raw.get(key)
             if isinstance(pf, dict) and pf.get("app_id"):
                 return pf
+        # Hermes gateway 平台形状: gateway.platforms.<feishu|lark>.extra 或
+        # platforms.<feishu|lark>.extra (凭据在 extra 里, domain 决定 lark 域名).
+        candidate_parents: list[dict[str, Any]] = []
+        gateway = raw.get("gateway")
+        if isinstance(gateway, dict) and isinstance(gateway.get("platforms"), dict):
+            candidate_parents.append(gateway["platforms"])
+        platforms = raw.get("platforms")
+        if isinstance(platforms, dict):
+            candidate_parents.append(platforms)
+        for parent in candidate_parents:
+            for key in ("feishu", "lark"):
+                platform = parent.get(key)
+                if not isinstance(platform, dict):
+                    continue
+                extra = platform.get("extra")
+                if not isinstance(extra, dict) or not extra.get("app_id"):
+                    continue
+                result = dict(extra)
+                if "base_url" not in result and platform.get("base_url"):
+                    result["base_url"] = platform["base_url"]
+                if "base_url" not in result:
+                    domain = str(extra.get("domain", platform.get("domain", ""))).lower()
+                    if domain == "lark":
+                        result["base_url"] = LARK_OPEN_API_BASE
+                return result
         return {}
 
     def _load(self) -> dict[str, Any]:
         with self._lock:
             if self._raw is not None:
                 return self._raw
-            config_path = _get_hermes_config_path()
+            config_path = _get_hermes_config_path(self._home)
             if config_path.exists():
                 try:
                     text = config_path.read_text(encoding="utf-8")
@@ -361,7 +432,7 @@ class Config:
         with self._lock:
             if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
                 return self._reload_cache
-            config_path = _get_hermes_config_path()
+            config_path = _get_hermes_config_path(self._home)
             if config_path.exists():
                 try:
                     text = config_path.read_text(encoding="utf-8")

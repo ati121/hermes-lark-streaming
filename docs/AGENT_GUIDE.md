@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装与维护指南
 
 > 高信息密度参考文档，供 Hermes Agent 或其他自动化 Agent 解析。
-> 最后更新：2026-09-18（v1.6.24，个人复刻版）
+> 最后更新：2026-09-19（v1.6.25，个人复刻版）
 
 ## 项目概览
 
@@ -38,8 +38,10 @@ hermes plugins install git@github.com:ati121/hermes-lark-streaming.git
 hermes gateway restart
 ```
 
-插件会读取 `HERMES_HOME` 作为安装和配置根目录，未设置时使用
-`~/.hermes`。
+插件通过 `hermes_constants.get_hermes_home()` 解析配置根目录（未安装该宿主
+API 时依次回退 `HERMES_HOME` 环境变量、`~/.hermes`）。多 Profile 网关
+（multiplex）下每次调用都返回当前 Profile 的 home，因此同一个进程服务多个
+Profile 时不会串配置或串凭据。
 
 ### 本地目录
 
@@ -240,7 +242,25 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片显示
 OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)。
 
 检索、读取和浏览也涵盖记忆库中的知识资料。“记住信息”表示提交记忆提炼，
-不代表每次都会新建独立的记忆文件。工具详情保留完整的 `viking://` URI 和结果。
+## 多 Profile 网关（multiplex）
+
+Hermes `gateway.multiplex_profiles`（官方默认开启）用**一个进程**服务多个
+Profile，并且会**按 profile 各加载一次目录插件**（模块名
+`hermes_plugins.hermes_lark_streaming__home_<digest>`）。插件为此做了三件事：
+
+1. **按 Profile 隔离**——控制器、配置、凭据都以当时 `get_hermes_home()` 的
+   home 为准；凭据读 host 的 profile secret scope，multiplex 下不再回退
+   `os.environ`（那是启动 Profile 的凭据）。`hermes ... status` 会打印 home。
+2. **跨副本去重**——补丁标记写在**共享的宿主对象**上（`GatewayRunner` /
+   `FeishuAdapter` 类属性 + 被包装函数的 `_hls_wrapped`），副本之间互相可见，
+   所以只装一层 wrapper、只建一张卡片、只回复一次。
+3. **进程级状态共享**——每个 home 一个控制器，登记表挂在宿主模块上
+   （`runtime_globals.shared_store`），避免两份副本各建一个控制器。
+
+排查时可核对：日志里 `feishu inbound ids` 与 `HLS: session created` 每条消息
+应各出现 **1 次**；`FeishuClient initialized` 的 `app_id` 与 `home` 要和消息所
+在 Profile 一致。若出现 3 次或 `230002 Bot/User can NOT be out of the chat`，
+说明去重或作用域失效。
 
 ## 故障排查
 
@@ -252,6 +272,8 @@ OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://git
 | 流式卡片卡住 | 增大 `card_ttl_sec`，确认卡片未被删除/撤回 |
 | 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
 | 速度时有时无 | `grep "HLS: speed hidden" "$HERMES_HOME/logs/agent.log"`；`window_too_short` 表示该次上游整段下发，仍会隐藏 |
+| 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |
+| Profile 用错 bot | 核对 `FeishuClient initialized` 的 `app_id`/`home` 对应该 Profile |
 
 ## 验证安装
 
