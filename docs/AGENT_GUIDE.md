@@ -298,21 +298,44 @@ Profile，并且会**按 profile 各加载一次目录插件**（模块名
 在 Profile 一致。若出现 3 次或 `230002 Bot/User can NOT be out of the chat`，
 说明去重或作用域失效。
 
-### 陷阱：`hermes plugins install` 的中断残留会顶掉正式副本
+### 陷阱：启动脚本的 `hermes plugins install` 会留下"会被加载"的暂存目录
 
-`hermes plugins install` 会在 `$HERMES_HOME/plugins/` 下建一个临时目录
-`.install-<随机串>`（`hermes_cli/plugins_cmd.py` 里的
-`tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir)`），克隆、校验、
-扫描都在里面做完才移入正式名字；正常结束时自动删除。
+本部署容器 entrypoint 是 `self-heal.sh && exec hermes-plugin-autoupdate.sh`
+（`/volume1/docker/hermes/compose.yaml`）。autoupdate 脚本在 profile 缺插件时会调用
+`hermes plugins install`。Hermes 这个命令用
+`tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir)` 克隆到
+`$HERMES_HOME/plugins/.install-<随机串>`，正常路径由 `__exit__` 删除。
 
-但**克隆失败时目录会留下**——网络断、代理中断都会触发。而 Hermes 的目录插件发现是
-`for child in sorted(path.iterdir())`（`hermes_cli/plugins_discovery.py`），
-`.` 的 ASCII 码小于字母，于是这个残留目录**排在正式目录前面被当成另一个插件加载**。
+**但它被 SIGTERM 杀掉时不会删。** 当时脚本写的是
+`run_with_timeout 120 env HERMES_HOME=... hermes plugins install --enable "$PLUGIN_URL"`——
+既没有 `--force`，也没有关掉 stdin。而本仓库自己的 `docs/AGENT_GUIDE.md` 里有一处被扫描器判为
+HIGH 的 `exfiltration` 命中（就是讲 multiplex 凭据作用域的那句 `os.environ`），
+社区来源 + CAUTION 直接 `BLOCKED`，安装器转而等待 `Install anyway? [y/N]` 确认。
+boot 脚本没有 TTY，于是它一直挂着，直到 120 秒后 `timeout` 发 SIGTERM——
+`__exit__` 来不及执行，带着完整 clone 的 `.install-*` 就留在了磁盘上。
 
-后果是静默的：两份副本共用进程级去重标记（类属性 + `_hls_wrapped`），
-**先加载者先抢到 wrapper**，而 wrapper 内部 `from ..controller import get_controller`
-解析到的是它自己那份 `cardkit` / `state`——于是新代码可能一行都不上卡，
-日志里却仍有 `patches applied ✓`。表现就是"改了但没效果"。
+2026-09-19 04:07 与 04:09 两次启动各留下一份（默认 home 与 image profile）。
+**网络是好的**（Cloning 成功、扫描有输出），卡点是扫描确认提示，不是代理断连。
+
+后果：Hermes 的目录插件发现是 `for child in sorted(path.iterdir())`
+（`hermes_cli/plugins_discovery.py`），`.` 的 ASCII 小于任何字母，于是同一 home 内
+残留目录**先于正式目录注册**（05:15 那次：`.install-4xq4qr64` 在 39.758 注册，
+真目录在 40.080 才注册）。两份副本共用进程级去重标记，**先装 wrapper 的一方生效**；
+后到者命中类标记后走**静默 early-return**（`patching/__init__.py:328`，不打印
+`adopted`），于是两份 `patch summary` 都显示 `GatewayRunner=✓`，日志上分不出归属。
+
+**但归属到底是谁，这批日志证明不了。** 05:15 那次 v1.6.28 的 `apply_patches()`
+在 31.542 开始，v1.6.29 在 32.931 开始；而 `GatewayRunner patched methods` 只在
+33.352 出现一次（`gateway_runner` 当时尚未解析，两边都先走的 deferred 轮询）。
+谁的轮询先命中，日志没有记录。所以正确定性是：**风险真实存在，但本机未取证**；
+修复前也没让真机发消息，无从反推当时卡片由谁渲染。
+
+隔离后日志里不再出现 v1.6.28，这个不确定性已消除。
+
+**已修**：`hermes-plugin-autoupdate.sh` 改为
+`hermes plugins install --force --enable "$PLUGIN_URL" </dev/null`，超时 120→300。
+`--force` 直接接受 CAUTION 判定、不再弹确认，`</dev/null` 让将来任何提示立刻失败而不是挂住；
+之后 05:15 / 05:20 两次启动均未再产生 `.install-*`。
 
 排查与处置：
 
@@ -324,12 +347,10 @@ ls -a "$HERMES_HOME/plugins/" "$HERMES_HOME"/profiles/*/plugins/
 mkdir -p "$HERMES_HOME/.quarantine"
 mv "$HERMES_HOME/plugins/.install-"* "$HERMES_HOME/.quarantine/"
 
-# 重启后确认只剩一个版本号，且次数 = profile 数
+# 重启后确认：版本计数 = profile 数，且没有 .install- 条目
 grep -oE "hermes-lark-streaming v[0-9.]+" "$HERMES_HOME/logs/agent.log" | sort | uniq -c
 grep -oE "capability_check plugin=[^ ]+" "$HERMES_HOME/logs/agent.log" | sort -u
 ```
-
-正常时 `capability_check` 里**不应出现** `.install-` 前缀的条目。
 
 ## 故障排查
 
