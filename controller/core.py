@@ -58,6 +58,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         ).resolve()
         self._cfg = Config(self._profile_home)
         self._unscoped_enabled: bool | None = None
+        # Ties the cached verdict to the config generation so /aowen config reload
+        # invalidates it (see ``enabled``).
+        self._unscoped_enabled_gen: int = -1
         self._client: FeishuClient | None = None
         self._sessions: dict[str, CardSession] = {}
         self._sessions_lock = threading.RLock()
@@ -114,17 +117,25 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     @property
     def enabled(self) -> bool:
         unscoped = self._needs_fallback_scope()
-        if unscoped and self._unscoped_enabled is not None:
+        if (
+            unscoped
+            and self._unscoped_enabled is not None
+            and self._unscoped_enabled_gen == Config._generation
+        ):
             return self._unscoped_enabled
         with self._credential_scope():
             enabled = self._cfg.enabled and bool(
                 self._cfg.feishu_app_id or self._cfg.env_app_id
             )
-        if unscoped and enabled:
+        if unscoped:
             # Cache only the positive verdict: a miss usually means the profile
             # .env had not been hydrated yet, and we want the next access to look
-            # again.  Cheap because it is read on hot paths.
-            self._unscoped_enabled = True
+            # again.  Cheap because it is read on hot paths.  The verdict is tied
+            # to the Config generation so ``/aowen config reload`` (which bumps
+            # it) still lets ``enabled: false`` take effect without a restart.
+            if enabled:
+                self._unscoped_enabled = True
+            self._unscoped_enabled_gen = Config._generation
         return enabled
 
     @staticmethod

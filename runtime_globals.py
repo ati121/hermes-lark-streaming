@@ -26,9 +26,9 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-# One anchor is enough, but the first host module that is already imported wins;
-# all copies of the plugin run inside the same process, so they converge on the
-# same host object regardless of which copy asks first.
+# Anchor modules holding the process-wide store.  ``hermes_constants`` is a leaf
+# constants module the plugin already imports elsewhere (``config.reader.
+# hermes_home``), so resolving it early is safe and side-effect free.
 _ANCHOR_MODULES = (
     "hermes_constants",
     "gateway.run",
@@ -41,12 +41,13 @@ _ANCHOR_ATTR = "__hls_shared_store__"
 # Fallback store, used when no anchor module is available (tests / CLI).
 _LOCAL_FALLBACK: dict[str, Any] = {}
 
-
 def shared_store(name: str) -> Any | None:
     """Return the process-wide store for ``name`` (a dict), or ``None``.
 
-    ``None`` means no host anchor is importable, so the caller should keep using
-    its own module-level state.
+    ``None`` means no host anchor is imported, so the caller keeps using its own
+    module-level state (the pre-multiplex behaviour).  Resolution stays a
+    ``sys.modules`` lookup: force-importing a host module on Hermes'
+    plugin-discovery thread can deadlock the gateway.
     """
     for module_name in _ANCHOR_MODULES:
         module = sys.modules.get(module_name)
@@ -97,7 +98,11 @@ def shared_object(name: str, factory: Any) -> Any:
     store = shared_store(name)
     if store is None:
         return factory()
+    # ``setdefault`` keeps the creation atomic: two copies importing
+    # concurrently have separate module locks, so a check-then-set could build
+    # two locks and defeat the mutual exclusion this exists to provide.
     key = "__hls_shared_object__"
-    if key not in store:
-        store[key] = factory()
-    return store[key]
+    existing = store.get(key)
+    if existing is not None:
+        return existing
+    return store.setdefault(key, factory())

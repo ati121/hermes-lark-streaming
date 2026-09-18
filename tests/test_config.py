@@ -707,3 +707,54 @@ class TestSecretScopeReads:
         monkeypatch.setitem(sys.modules, "agent.secret_scope", fake)
         cfg = Config()
         assert cfg.env_app_id == "scoped"
+
+
+class TestConfigReloadReachesBoundInstances:
+    """v1.6.26: /aowen config reload 必须也作废绑定 home 的实例.
+
+    Controller 持有 ``Config(profile_home)``（不是单例），早期的 reload 只清单例
+    缓存，于是热重载对控制器彻底失效 —— 改 enabled / gateway_cards 必须重启才生效。
+    """
+
+    def _write(self, home: Path, gateway_cards: bool, enabled: bool = True) -> None:
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(
+            "hermes_lark_streaming:\n"
+            f"  enabled: {'true' if enabled else 'false'}\n"
+            f"  gateway_cards: {'true' if gateway_cards else 'false'}\n",
+            encoding="utf-8",
+        )
+
+    def test_reload_invalidates_a_bound_instance(self, tmp_path: Path) -> None:
+        home = tmp_path / "profile"
+        self._write(home, gateway_cards=True)
+        bound = Config(home)
+        assert bound.gateway_cards is True
+
+        self._write(home, gateway_cards=False)
+        assert bound.gateway_cards is True  # 仍是旧值，符合惰性缓存语义
+
+        bound.reload()
+        assert bound.gateway_cards is False
+
+    def test_reload_on_another_instance_invalidates_this_one(self, tmp_path: Path) -> None:
+        """控制器实例与 /aowen 新建的实例不是同一个对象，reload 仍须全局生效."""
+        home = tmp_path / "profile"
+        self._write(home, gateway_cards=True)
+        controller_cfg = Config(home)
+        assert controller_cfg.gateway_cards is True
+
+        self._write(home, gateway_cards=False)
+        Config().reload()  # 类似 /aowen config reload: 新建实例调 reload
+
+        assert controller_cfg.gateway_cards is False
+
+    def test_reload_invalidates_plugin_sec_cached_properties(self, tmp_path: Path) -> None:
+        home = tmp_path / "profile"
+        self._write(home, gateway_cards=True, enabled=True)
+        bound = Config(home)
+        assert bound.enabled is True
+
+        self._write(home, gateway_cards=True, enabled=False)
+        Config().reload()
+        assert bound.enabled is False

@@ -104,8 +104,15 @@ _thread_local_ctx.data = None
 _logger = logging.getLogger("hermes_lark_streaming")
 
 def _get_config():
-    from ..config import Config
-    return Config()
+    """Config bound to the CURRENT profile home.
+
+    Under multiplex the unbound ``Config()`` singleton caches whichever home
+    resolved first, so a ``gateway_cards: false`` in one profile would silently
+    downgrade every other profile's cards to plain text.  Binding the home keeps
+    each profile on its own file.
+    """
+    from ..config import Config, hermes_home
+    return Config(hermes_home())
 
 _msg_ctx: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "hermes_lark_streaming_msg_ctx", default=None
@@ -171,7 +178,18 @@ def _mark_wrapped(fn: Any) -> Any:
     return fn
 
 def _class_marked(cls: Any, attr: str) -> bool:
-    return bool(getattr(cls, attr, False))
+    """True only when ``cls`` ITSELF carries ``attr``.
+
+    ``getattr`` would also see an inherited attribute, so a subclass of a class
+    we patched (a host variant, a test double overriding ``send``) would be
+    treated as already patched and silently never wrapped — cards degrade to
+    plain text while the log still reports success.  Only the class's own
+    ``__dict__`` proves THIS class was wrapped.
+    """
+    try:
+        return attr in vars(cls)
+    except TypeError:  # pragma: no cover - exotic metaclass
+        return bool(getattr(cls, attr, False))
 
 def _mark_class(cls: Any, attr: str, home: str = "") -> None:
     try:

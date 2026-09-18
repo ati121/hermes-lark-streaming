@@ -302,3 +302,48 @@ def test_patch_context_state_is_shared_across_copies(two_copies) -> None:
     patching_a._started_msg_ids.discard("msg-shared")
     patching_b._session_contexts.pop("sess-1", None)
     patching_b._gateway_cards.pop("card-1", None)
+
+
+def test_class_marker_is_not_inherited(two_copies) -> None:
+    """子类不能因为继承到标记而被当成"已补丁".
+
+    ``_class_marked`` 曾经用 ``getattr``，于是宿主变体/测试替身继承已打补丁的
+    FeishuAdapter 时会被判为已处理、静默不包装（卡片降级纯文本却打印成功日志）。
+    """
+    first, _ = two_copies
+    patching = _sub(first, "patching")
+
+    class Base:
+        pass
+
+    class Derived(Base):
+        pass
+
+    patching._mark_class(Base, patching._FEISHU_CLASS_MARK_ATTR, "/home/a")
+    assert patching._class_marked(Base, patching._FEISHU_CLASS_MARK_ATTR) is True
+    assert patching._class_marked(Derived, patching._FEISHU_CLASS_MARK_ATTR) is False
+
+
+def test_get_config_binds_the_current_profile_home(two_copies, tmp_path, monkeypatch) -> None:
+    """``_get_config()`` 必须读当前 profile 的 config.yaml.
+
+    未绑定的单例会把第一个 profile 的 ``gateway_cards`` 缓存给所有人：A 里关掉
+    gateway_cards，B 的卡片也跟着降级成纯文本。
+    """
+    first, _ = two_copies
+    patching = _sub(first, "patching")
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    for home, gateway_cards in ((home_a, True), (home_b, False)):
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            f"hermes_lark_streaming:\n  gateway_cards: {'true' if gateway_cards else 'false'}\n",
+            encoding="utf-8",
+        )
+
+    config_pkg = _sub(first, "config")
+    monkeypatch.setattr(config_pkg, "hermes_home", lambda: home_a)
+    assert patching._get_config().gateway_cards is True
+
+    monkeypatch.setattr(config_pkg, "hermes_home", lambda: home_b)
+    assert patching._get_config().gateway_cards is False

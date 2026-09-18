@@ -102,7 +102,6 @@ def hermes_home() -> Path:
     except (AttributeError, TypeError, OSError, ValueError, RuntimeError):
         # Host API shape change / unresolvable home: fall back to the env var.
         return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
-        return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
     return Path(home)
 
 
@@ -187,6 +186,13 @@ class Config:
     """
 
     _instance: "Config | None" = None
+    # v1.6.26: class-level generation.  ``reload()`` bumps it and every
+    # instance (the unbound singleton AND each per-profile bound instance a
+    # controller holds) drops its caches on the next read.  A bound instance
+    # deliberately bypasses ``_instance``, so a singleton-only reload used to
+    # leave the controllers reading stale values forever.
+    _generation: int = 0
+    _generation_lock = threading.Lock()
 
     def __new__(cls, home: Path | None = None) -> "Config":
         if home is not None:
@@ -204,16 +210,31 @@ class Config:
         self._raw: dict[str, Any] | None = None
         self._reload_cache: dict[str, Any] | None = None
         self._reload_cache_at: float = 0.0
+        self._seen_generation: int = Config._generation
         # _lock: Config singleton shared across event-loop + worker threads.
         self._lock = threading.Lock()
         self._initialized = True
 
-    def reload(self) -> None:
-        """Force reload from disk. Called by /aowen config reload."""
-        with self._lock:
+    def _sync_generation(self) -> None:
+        """Drop caches when another holder called ``reload()`` since our last read."""
+        current = Config._generation
+        if self._seen_generation != current:
             self._raw = None
             self._reload_cache = None
             self._reload_cache_at = 0.0
+            self._seen_generation = current
+
+    def reload(self) -> None:
+        """Force reload from disk. Called by /aowen config reload.
+
+        Bumps the class-level generation so EVERY instance re-reads — including
+        the per-profile instances controllers hold (they never share the
+        singleton, see ``__new__``).
+        """
+        with Config._generation_lock:
+            Config._generation += 1
+        with self._lock:
+            self._sync_generation()
         _logger.info("HLS: config reload triggered — caches cleared")
 
     @property
@@ -409,6 +430,7 @@ class Config:
 
     def _load(self) -> dict[str, Any]:
         with self._lock:
+            self._sync_generation()
             if self._raw is not None:
                 return self._raw
             config_path = _get_hermes_config_path(self._home)
@@ -430,6 +452,7 @@ class Config:
         """带 TTL 缓存的磁盘重读 (运行时可变配置项). 避免高频属性访问读磁盘."""
         now = time.monotonic()
         with self._lock:
+            self._sync_generation()
             if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
                 return self._reload_cache
             config_path = _get_hermes_config_path(self._home)

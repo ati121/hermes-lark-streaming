@@ -4,6 +4,35 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.26 (2026-09-19, personal fork)
+
+### Fixed — follow-up hardening after the multiplex fix
+
+- `/aowen config reload` reaches the per-profile controllers again. A controller
+  holds a `Config(profile_home)` instance, and those deliberately bypass the
+  shared singleton, so a reload that only cleared the singleton left every
+  controller reading the values it parsed at first access — `enabled: false` or
+  `gateway_cards: false` needed a gateway restart to take effect. `Config.reload()`
+  now bumps a class-level generation that every instance observes on its next
+  read.
+- Binds the gateway-card config lookup to the current profile. The unbound
+  singleton cached whichever home resolved first, so `gateway_cards: false` in
+  one profile silently downgraded every other profile's cards to plain text.
+- Treats a class marker as proof only for the class that carries it. The check
+  used `getattr`, which also sees an inherited marker, so a subclass of a patched
+  `FeishuAdapter` (host variant, test double) was reported as already patched and
+  never wrapped — cards degraded to plain text while the log still printed
+  success.
+- Ties the cached "enabled" verdict to the config generation, so a reload can
+  still turn cards off for a profile that had them on.
+- Creates the cross-copy lock atomically. Two plugin copies importing
+  concurrently hold separate module locks, so the previous check-then-set could
+  build two locks and defeat the mutual exclusion it exists to provide.
+- Drops the duplicated, half-written test blocks appended during the multiplex
+  work; the surviving copies are the ones that assert behaviour, plus new
+  coverage for the reload contract, the profile-bound card config, and the
+  inherited-marker case above.
+
 ## v1.6.25 (2026-09-19, personal fork)
 
 ### Fixed — correct cards on a multiplexed (multi-profile) gateway
