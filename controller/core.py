@@ -478,10 +478,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return
 
             # Compaction runs between two model calls, so the next visible answer
-            # belongs to a call whose start has not been observed yet.  Drop the
-            # anchor instead of letting the window span the earlier call plus the
-            # compaction itself.
-            self._reset_speed_call_anchor(session)
+            # belongs to a call that has not started yet.  Forget the timestamps
+            # here, exactly as a tool start does, so no window spans the earlier
+            # call plus the compaction.
+            self._reset_speed_window(session)
 
             session._compression_previous_phase = session._response_phase
             session._response_phase = "compression"
@@ -554,15 +554,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if session._speed_call_start == 0.0:
             session._speed_call_start = now
 
-    def _reset_speed_call_anchor(self, session: CardSession) -> None:
-        """Drop the fallback anchor because a new model call is about to start.
+    def _reset_speed_window(self, session: CardSession) -> None:
+        """Forget every speed timestamp because a new model call is starting.
 
-        The anchor only ever measures the call it belongs to.  Tool start
-        already resets it together with the answer timestamps; compaction runs
-        between two calls and then restores the pre-compression phase, so
-        without this reset the following call would reuse the earlier call's
-        anchor and report a window spanning the compaction itself.
+        Called at both model-call boundaries: a tool start, and the compaction
+        that runs between two calls.  The next visible answer belongs to a later
+        call, so reusing these timestamps would report a window spanning the tool
+        or the compaction — and after a compaction restored the pre-compression
+        phase, the following call would even reuse the earlier call's anchor.
         """
+        session._first_answer_time = 0.0
+        session._last_answer_time = 0.0
         session._speed_call_start = 0.0
 
     def _log_hidden_speed(
@@ -724,10 +726,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             is_new_tool = status in ("running", "started", "tool.started")
             if is_new_tool:
                 # The next visible answer belongs to a later model call. Reset the
-                # speed window so tool execution time cannot dilute that call.
-                session._first_answer_time = 0.0
-                session._last_answer_time = 0.0
-                self._reset_speed_call_anchor(session)
+                # The next visible answer belongs to a later model call. Reset the
+                # whole speed window so tool execution time cannot dilute it.
+                self._reset_speed_window(session)
                 session._compression_previous_phase = None
                 session._response_phase = "tool"
                 session.tool_use.record_start(tool_name, detail)

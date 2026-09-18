@@ -1053,6 +1053,49 @@ class TestLinearDispatch:
         assert session.footer["speed_window"] == "call"
         assert session.footer["gen_seconds"] == pytest.approx(1.5)
 
+    def test_compaction_boundary_resets_answer_timestamps(self) -> None:
+        """压缩是调用边界：可见正文首末块窗口同样不得跨过压缩."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_compress_delta", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_compress_delta"
+        session._response_phase = "answer"
+        session._first_answer_time = 12.0
+        session._last_answer_time = 13.0
+        session._speed_call_start = 10.0
+        ctrl._sessions["msg_compress_delta"] = session
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            ctrl.on_compression_started(message_id="msg_compress_delta")
+
+        assert session._first_answer_time == 0.0
+        assert session._last_answer_time == 0.0
+        assert session._speed_call_start == 0.0
+
+        # The post-compaction call streams two visible chunks of its own.
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=100.0):
+                ctrl.on_model_activity(
+                    message_id="msg_compress_delta", source="stream.first_chunk",
+                )
+            with patch(
+                "hermes_lark_streaming.controller.core.time.monotonic",
+                side_effect=[101.0, 103.0],
+            ):
+                ctrl.on_answer(message_id="msg_compress_delta", text="final part 1")
+                ctrl.on_answer(message_id="msg_compress_delta", text=" final part 2")
+
+        with patch.object(ctrl, "_do_linear_complete_with_fallback", new_callable=AsyncMock):
+            ctrl.on_completed(
+                message_id="msg_compress_delta",
+                duration=95.0,
+                tokens={"speed_output_tokens": 200},
+            )
+        # 103.0 − 101.0: the pre-compaction answer (12.0) must not be the start,
+        # which would have reported 200/91 ≈ 2 t/s instead of 100 t/s.
+        assert session.footer["speed_window"] == "delta"
+        assert session.footer["gen_seconds"] == pytest.approx(2.0)
+
     def test_burst_after_multiple_tools_measures_only_last_call(self) -> None:
         """多次工具调用后整段下发的答案，窗口只取最后一次模型调用."""
         ctrl = _setup_ctrl()

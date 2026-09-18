@@ -17,9 +17,12 @@ filesystem paths.
   that really stream token by token are reported unchanged. The fallback span
   includes that call's own reasoning/prefill time, so it reports the call's
   upstream throughput and reads low when long reasoning precedes a burst.
-- Drops the fallback anchor at every model-call boundary — a tool start, and the
-  context compaction that runs between two calls — so the reported window can
-  never span tool or compaction time and reuse the earlier call's anchor.
+- Resets the whole measurement window at every model-call boundary — a tool
+  start, and the context compaction that runs between two calls. Neither the
+  visible-chunk span nor the fallback span can then include the tool or the
+  compaction, and the next call cannot reuse the earlier call's anchor; a
+  compaction used to leave the visible-chunk span open across it and report a
+  badly deflated figure.
 - Keeps the same window in step with interim-assistant answers (verify-on-stop,
   length continuations): they previously reached the card body without any
   timing, so a call whose start was known still lost the speed field. An answer
