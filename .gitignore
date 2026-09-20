@@ -16,3 +16,4 @@ tests/samples/
 # quote paths that the plugin security scanner flags.
 .cortexkit/
 .zcode/
+.pi/

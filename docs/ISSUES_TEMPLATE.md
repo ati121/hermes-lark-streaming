@@ -86,25 +86,25 @@
 
 > ⚠️ **必须提供**：没有日志的 Bug 报告几乎无法定位问题。请务必附上相关日志。
 
-请运行以下命令获取插件相关日志：
+请运行以下命令获取插件相关日志（`$HERMES_HOME` 未设置时默认为 `~/.hermes`；多 Profile 部署要用出问题的那个 Profile 的 home）：
 
 ```bash
 # 自动检测 Hermes Python 路径：
-HERMES_PYTHON=$(python3 ~/.hermes/plugins/hermes-lark-streaming/__main__.py python)
-grep hermes_lark_streaming ~/.hermes/logs/agent.log | tail -200
+HERMES_PYTHON=$(python3 "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" python)
+grep hermes_lark_streaming "$HERMES_HOME/logs/agent.log" | tail -200
 ```
 
 如果有报错，也可以查看完整日志：
 
 ```bash
 # 查看最近 500 行日志
-tail -500 ~/.hermes/logs/agent.log
+tail -500 "$HERMES_HOME/logs/agent.log"
 
 # 搜索特定错误码（如 300313、300317、300305、300309）
-grep -E "300313|300317|300305|300309|element_limit" ~/.hermes/logs/agent.log | tail -50
+grep -E "300313|300317|300305|300309|element_limit" "$HERMES_HOME/logs/agent.log" | tail -50
 
 # 查看 HLS: 前缀的插件日志（v1.1.0+ 统一前缀）
-grep 'HLS:' ~/.hermes/logs/agent.log | tail -100
+grep 'HLS:' "$HERMES_HOME/logs/agent.log" | tail -100
 ```
 
 **贴日志时请注意**：
@@ -173,12 +173,12 @@ HLS: unified flush phase 2 batch_update failed: cardkit_batch_update: code=30031
 ```
 
 **如何使用 log_id**：
-1. 在插件日志（`~/.hermes/logs/agent.log`）中搜索报错行，找到 `[log_id=...]`
+1. 在插件日志（`$HERMES_HOME/logs/agent.log`）中搜索报错行，找到 `[log_id=...]`
 2. 提交 Issue 时附上 `log_id`——维护者可凭此去飞书开放平台后台查具体请求链路，精确定位是插件构造的卡片 JSON 有问题，还是飞书服务端的问题
 
 ```bash
 # 提取所有 log_id
-grep -oP '\[log_id=\K[A-Z0-9]+' ~/.hermes/logs/agent.log | sort -u
+grep -oP '\[log_id=\K[A-Z0-9]+' "$HERMES_HOME/logs/agent.log" | sort -u
 ```
 
 ---

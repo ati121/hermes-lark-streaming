@@ -36,6 +36,10 @@
 - 文档、测试和安装脚本指向当前 GitHub 仓库；不保留上游的私有邮箱、群链接、Gitee
   部署路径、凭据、Token、日志或服务器信息。
 
+上面只列了最初分叉时的差异。此后本地又加了多 Profile 隔离、页脚速度字段、
+工具中文标签、思考过程块等，逐项见 `docs/CHANGELOG.md` 中标注 `personal fork`
+的版本；同步上游时这些都属于需要人工核对的本地修改。
+
 ## 不变量
 
 修改卡片渲染、配置读取或控制器传递时必须保持：
@@ -58,7 +62,7 @@
 - `tests/test_config.py`：配置校验、继承和默认值。
 - `tests/test_cardkit.py`：无配置 JSON 不变、设备别名和各角色渲染。
 - `tests/test_controller.py`：快照传递和整卡更新路径。
-- `docs/AGENT_GUIDE.md`、`README.md`、`README.zh-CN.md`：公开使用说明。
+- `docs/AGENT_GUIDE.md`、`README.md`：公开使用说明。
 
 ## 默认验证
 
@@ -96,14 +100,14 @@ git fetch upstream github_sync
 
 # 对比上次记录的上游基线和最新分支
 git diff --stat 4793ac08a9f8d5979c045c49756e95f51901134d upstream/github_sync
-git diff 4793ac08a9f8d5979c045c49756e95f51901134d upstream/github_sync -- . ':!README.md' ':!README.zh-CN.md' ':!docs/AGENT_GUIDE.md' ':!docs/MAINTENANCE_CONTEXT.md'
+git diff 4793ac08a9f8d5979c045c49756e95f51901134d upstream/github_sync -- . ':!README.md' ':!docs/AGENT_GUIDE.md' ':!docs/MAINTENANCE_CONTEXT.md'
 ```
 
 确认差异后，将上游代码变更作为补丁应用到当前分支，并人工解决字号代码和公开文档的
 冲突：
 
 ```bash
-git diff --binary 4793ac08a9f8d5979c045c49756e95f51901134d upstream/github_sync -- . ':!README.md' ':!README.zh-CN.md' ':!docs/AGENT_GUIDE.md' ':!docs/MAINTENANCE_CONTEXT.md' > /tmp/hermes-upstream.patch
+git diff --binary 4793ac08a9f8d5979c045c49756e95f51901134d upstream/github_sync -- . ':!README.md' ':!docs/AGENT_GUIDE.md' ':!docs/MAINTENANCE_CONTEXT.md' > /tmp/hermes-upstream.patch
 git apply --3way /tmp/hermes-upstream.patch
 ```
 

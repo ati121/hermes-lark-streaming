@@ -1,7 +1,7 @@
 # hermes-lark-streaming 安装与维护指南
 
 > 高信息密度参考文档，供 Hermes Agent 或其他自动化 Agent 解析。
-> 最后更新：2026-09-19（v1.6.27，个人复刻版）
+> 版本号以 `plugin.yaml` 为准，变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 项目概览
 
@@ -124,23 +124,29 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 
 可选的页脚字段名：`status`、`elapsed`、`speed`、`model`、`tokens`、`context`、
 `cache`、`cost`、`api_calls`、`history_offset`、`compression_exhausted`。未知字段名
-会被静默跳过。`speed` 默认开启，显示最后一次模型调用的可见输出速度（如 `50 t/s`）：
-分子为该调用的可见输出 token，分母默认是工具调用之后最终可见正文的首个到末个流式块
-间隔。部分上游会把一段短答案整段一次性下发，这个间隔会塌缩到测量下限以下；此时改用
-同一次模型调用内「首个上游活动（推理、工具名或首个可见块）→ 末个可见块」的间隔兜底，
-所以短答案不再让速度消失。兜底窗口计入该次调用先前的推理/预填时间，因此它衡量的是这次调用
-的上游窗口吞吐：若一次调用先有长推理再整段下发答案，数值会明显偏低，可见正文间隔可测量时
-始终优先使用它。两个窗口都在每次模型调用边界被清零——工具开始执行，或两次调用之间的上下文
-压缩——因此既不会把工具耗时、压缩耗时算进去，也不会跨调用拼接相邻两次调用的正文。
-Hermes 经 interim 回调交付答案（verify_on_stop、截断续写等）时正文与记时同步更新，该次调用起点
-已知就能算出速度；若整段答案只经一次 interim 回调下发（非流式重放），没有任何窗口可测，
-仍按原行为隐藏。标准 OpenAI 用量中的
-输出数包含 reasoning token，需要扣除；部分 Gemini 兼容接口的输出数已排除推理，插件根据
-接口原始的输入、输出、推理和总数识别此口径，避免重复扣除。原始计数在 Hermes 归一化前
-单独保存，不影响其用量和费用统计。
-无法取得可靠 usage、没有可见输出，或两个窗口都短于 0.3 秒时不显示。完成时若速度为空，
-日志会打印一行 `HLS: speed hidden …`，含 `reason`（`no_usage`/`no_visible_output`/
-`window_too_short`）、`delta_span` 与 `call_span` 便于排查。不想要可以从 `fields` 里去掉。
+会被静默跳过。
+
+`speed` 默认开启，显示最后一次模型调用的可见输出速度（如 `50 t/s`）。不想要可以从
+`fields` 里去掉。计算规则：
+
+- 分子是该次调用的可见输出 token。标准 OpenAI 用量的输出数包含 reasoning token，
+  需要扣除；部分 Gemini 兼容接口的输出数已排除推理，插件按接口原始的输入、输出、
+  推理和总数识别口径，避免重复扣除。原始计数在 Hermes 归一化前单独保存，不影响
+  其用量和费用统计。
+- 分母优先用最终可见正文的首个到末个流式块间隔。
+- 上游把短答案整段一次性下发时，这个间隔会塌缩到测量下限以下，改用同一次调用内
+  「首个上游活动（推理、工具名或首个可见块）→ 末个可见块」的间隔兜底。兜底窗口
+  计入该次调用先前的推理/预填时间，衡量的是整个上游窗口吞吐：先长推理再整段下发
+  答案的调用数值会明显偏低，所以可见正文间隔可测时始终优先用它。
+- 两个窗口都在每次模型调用边界清零（工具开始执行，或两次调用之间的上下文压缩），
+  不会把工具耗时、压缩耗时算进去，也不会跨调用拼接正文。
+- Hermes 经 interim 回调交付答案（verify_on_stop、截断续写等）时，正文与计时同步
+  更新，该次调用起点已知就能算出速度；整段答案只经一次 interim 回调下发（非流式
+  重放）时没有任何窗口可测，仍隐藏。
+- 无法取得可靠 usage、没有可见输出，或两个窗口都短于 0.3 秒时不显示。完成时若
+  速度为空，日志会打印一行 `HLS: speed hidden …`，含 `reason`
+  （`no_usage`/`no_visible_output`/`window_too_short`）、`delta_span` 与
+  `call_span` 便于排查。
 
 基础示例：
 
@@ -191,6 +197,20 @@ hermes_lark_streaming:
 interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。字号配置在卡片创建时
 快照，同一张卡片整个流式生命周期固定不变；`/aowen config reload` 只影响新卡片。
 
+### 思考过程块
+
+`display.show_reasoning: true` 且配置了 `text_sizes`（即走普通 IM 交互卡片）时，
+卡片顶部在折叠面板之外常显一个 `🫧 思考过程` 按钮：
+
+- 生成中：按钮下方自动跟随最新约两行思考（按显示宽度计，中文算两格）。
+- 正文输出完：只留按钮，思考自动收起。
+- 点按钮：展开全部思考过程（超过 5000 字截断并标注总字数），再点收起。
+
+按钮在会话释放后仍可用：插件保留最近 60 张封口卡的整卡快照，用封口同一条整卡
+PATCH 重渲染。更早的卡片快照已被挤掉，点按钮会回一条文本说明。流式正文里带的
+`<think>`/`<thinking>`/`Reasoning:` 段也会被抽到这里，不再丢弃；标签对劈在两个
+chunk 之间时按会话保持开合状态，正确分流。
+
 ## `/aowen` 命令
 
 | 命令 | 说明 |
@@ -210,6 +230,7 @@ interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。�
 `on_message_completed`、`on_message_aborted`、`on_message_interrupted`、
 `on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、`on_tool_updated`、
 `on_memory_prefetch_updated`、`on_background_review_message`、`on_cron_deliver`。
+编号与职责见 [SKILL.md「Hook 索引」](SKILL.md#9-hook-索引)。
 
 ## 记忆工具显示
 
@@ -242,6 +263,7 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片显示
 OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)。
 
 检索、读取和浏览也涵盖记忆库中的知识资料。“记住信息”表示提交记忆提炼，
+是否真正写入由 OpenViking 决定（提炼、合并或跳过）。
 
 ## 工具面板图标与名称
 
@@ -268,7 +290,7 @@ emoji 必须写在粗体**外面**：飞书会丢弃混入 emoji 的粗体段，
 | 桌面 GUI | `desktop_*` 等 | `桌面预览` | 📝 🖼️ ✖️ 🪟 📁 ☁️ 🧭 💡 |
 | xAI 视频 | `xai_video_*` | `视频延长` | ✂️ ➡️ |
 | Home Assistant | `ha_*` | `智能家居调用` | 🏠 📟 🛎️ 🎛️ |
-| Hermes 内部 | — | `密钥规则` | 🚧 🔑 🏷️ 🧪 🧬 |
+| Hermes 内部 | 无 | `密钥规则` | 🚧 🔑 🏷️ 🧪 🧬 |
 
 家族前缀统一写成 `家族 · 动作`，与既有的 `Hindsight · 记忆写入` 对齐。
 `process_manage` 管的是 `terminal(background=true)` 起的后台终端进程
@@ -298,44 +320,32 @@ Profile，并且会**按 profile 各加载一次目录插件**（模块名
 在 Profile 一致。若出现 3 次或 `230002 Bot/User can NOT be out of the chat`，
 说明去重或作用域失效。
 
-### 陷阱：启动脚本的 `hermes plugins install` 会留下"会被加载"的暂存目录
+### 陷阱：被中断的 `hermes plugins install` 会留下"会被加载"的暂存目录
 
-本部署容器 entrypoint 是 `self-heal.sh && exec hermes-plugin-autoupdate.sh`
-（`/volume1/docker/hermes/compose.yaml`）。autoupdate 脚本在 profile 缺插件时会调用
-`hermes plugins install`。Hermes 这个命令用
+Hermes 的 `hermes plugins install` 用
 `tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir)` 克隆到
 `$HERMES_HOME/plugins/.install-<随机串>`，正常路径由 `__exit__` 删除。
+**但进程被 SIGTERM 杀掉时不会删。** 典型触发链：
 
-**但它被 SIGTERM 杀掉时不会删。** 当时脚本写的是
-`run_with_timeout 120 env HERMES_HOME=... hermes plugins install --enable "$PLUGIN_URL"`——
-既没有 `--force`，也没有关掉 stdin。而本仓库自己的 `docs/AGENT_GUIDE.md` 里有一处被扫描器判为
-HIGH 的 `exfiltration` 命中（就是讲 multiplex 凭据作用域的那句 `os.environ`），
-社区来源 + CAUTION 直接 `BLOCKED`，安装器转而等待 `Install anyway? [y/N]` 确认。
-boot 脚本没有 TTY，于是它一直挂着，直到 120 秒后 `timeout` 发 SIGTERM——
-`__exit__` 来不及执行，带着完整 clone 的 `.install-*` 就留在了磁盘上。
-
-2026-09-19 04:07 与 04:09 两次启动各留下一份（默认 home 与 image profile）。
-**网络是好的**（Cloning 成功、扫描有输出），卡点是扫描确认提示，不是代理断连。
+1. 自动化脚本（容器 entrypoint、自愈脚本）在 profile 缺插件时调用该命令，
+   没加 `--force`，也没关掉 stdin。
+2. Hermes 的插件安全扫描把本仓库 `docs/AGENT_GUIDE.md` 里讲 multiplex 凭据作用域
+   的那句 `os.environ` 判为 HIGH `exfiltration`；社区来源 + CAUTION 直接
+   `BLOCKED`，安装器转而等待 `Install anyway? [y/N]` 确认。
+3. 脚本没有 TTY，命令一直挂着，直到外层 `timeout` 发 SIGTERM，`__exit__` 来不及
+   执行，带着完整 clone 的 `.install-*` 留在磁盘上。网络是好的，卡点是确认提示。
 
 后果：Hermes 的目录插件发现是 `for child in sorted(path.iterdir())`
 （`hermes_cli/plugins_discovery.py`），`.` 的 ASCII 小于任何字母，于是同一 home 内
-残留目录**先于正式目录注册**（05:15 那次：`.install-4xq4qr64` 在 39.758 注册，
-真目录在 40.080 才注册）。两份副本共用进程级去重标记，**先装 wrapper 的一方生效**；
-后到者命中类标记后走**静默 early-return**（`patching/__init__.py:328`，不打印
-`adopted`），于是两份 `patch summary` 都显示 `GatewayRunner=✓`，日志上分不出归属。
+残留目录**先于正式目录注册**，日志里表现为 `capability_check plugin=.install-<id>/plugin`。
+两份副本共用进程级去重标记，**先装 wrapper 的一方生效**；后到者命中类标记后走
+**静默 early-return**（`patching/__init__.py`，不打印 `adopted`），于是两份
+`patch summary` 都显示 `GatewayRunner=✓`，日志上分不出到底是哪份在渲染卡片。
+残留的是安装当时的版本，之后 `git pull` 更新正式目录也不会影响它。
 
-**但归属到底是谁，这批日志证明不了。** 05:15 那次 v1.6.28 的 `apply_patches()`
-在 31.542 开始，v1.6.29 在 32.931 开始；而 `GatewayRunner patched methods` 只在
-33.352 出现一次（`gateway_runner` 当时尚未解析，两边都先走的 deferred 轮询）。
-谁的轮询先命中，日志没有记录。所以正确定性是：**风险真实存在，但本机未取证**；
-修复前也没让真机发消息，无从反推当时卡片由谁渲染。
-
-隔离后日志里不再出现 v1.6.28，这个不确定性已消除。
-
-**已修**：`hermes-plugin-autoupdate.sh` 改为
-`hermes plugins install --force --enable "$PLUGIN_URL" </dev/null`，超时 120→300。
-`--force` 直接接受 CAUTION 判定、不再弹确认，`</dev/null` 让将来任何提示立刻失败而不是挂住；
-之后 05:15 / 05:20 两次启动均未再产生 `.install-*`。
+**修法**：调用改为 `hermes plugins install --force --enable "$PLUGIN_URL" </dev/null`，
+并把超时放宽（例如 120→300 秒）。`--force` 直接接受 CAUTION 判定、不再弹确认，
+`</dev/null` 让将来任何提示立刻失败而不是挂住。
 
 排查与处置：
 
@@ -365,6 +375,7 @@ grep -oE "capability_check plugin=[^ ]+" "$HERMES_HOME/logs/agent.log" | sort -u
 | 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |
 | 改了但没效果 | 先看上面「陷阱：`hermes plugins install` 的中断残留」：`ls -a` 每个 home 的 `plugins/`，有 `.install-*` 就隔离掉再重启 |
 | Profile 用错 bot | 核对 `FeishuClient initialized` 的 `app_id`/`home` 对应该 Profile |
+| 思考过程按钮没反应 | `grep "reasoning toggle" "$HERMES_HOME/logs/agent.log"`：`no live session and no snapshot` 表示快照已被挤掉（只保留最近 60 张）；`card update failed` 多半是整卡超过约 30KB，降低 `REASONING_EXPANDED_LIMIT` |
 
 ## 验证安装
 

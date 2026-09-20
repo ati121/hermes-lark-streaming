@@ -10,7 +10,7 @@
 
 | 属性 | 值 |
 |------|-----|
-| 版本 | 1.6.2（个人复刻版） |
+| 版本 | 见 `plugin.yaml`（个人复刻版，变更记录见 [CHANGELOG.md](CHANGELOG.md)） |
 | 协议 | MIT |
 | Python | >=3.11 |
 | 与原版 | ⚠️ **不兼容** |
@@ -52,17 +52,19 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ hooks.py` | Hook 函数层 | `_safe_hook` 统一 enabled 检查 + 异常捕获 |
 | `├ gateway.py` | GatewayRunner 包装 | 6 个 wrapper + 时间前缀注入 + cron/background |
 | `├ callbacks.py` | 回调包装 | 5 个内部 wrapper + `already_streamed` 透传 + 长度去重 |
-| `└ adapter.py` | FeishuAdapter 包装 | send/edit/reaction/clarify 包装 + gateway card 注册 |
+| `├ adapter.py` | FeishuAdapter 包装 | send/edit/reaction/clarify 包装 + gateway card 注册 + 卡片按钮回调（`hls_action`）路由 |
+| `├ memory.py` | 记忆预取状态 | 包装 `MemoryManager._prefetch_provider` 边界，把自动检索显示为状态行 |
+| `└ usage.py` | 用量保留 | 在 Hermes 归一化前保存接口原始 token 计数，供页脚 `speed` 使用 |
 | **cardkit/** | **卡片构建子包** | |
 | `├ __init__.py` | 重导出门面 | `from .elements/cards/special import *` |
-| `├ elements.py` | 原始元素构建器 | 统一面板 + answer streaming + footer + `build_panel_header/children` |
-| `├ cards.py` | 卡片组装器 | streaming/complete/IM-fallback 卡片 |
+| `├ elements.py` | 原始元素构建器 | 统一面板 + answer streaming + footer + `build_panel_header/children` + 思考过程块（`build_pinned_reasoning_elements*`） |
+| `├ cards.py` | 卡片组装器 | CardKit 流式卡片 + 普通 IM 交互卡片（`text_sizes` 配置后使用）+ 元素上限安全网 |
 | `├ special.py` | 专用卡片类型 | cron/gateway/clarify 三态卡片 + `normalize_clarify_choices` (v1.3.0) |
 | `├ i18n.py` | 中英双语映射 | `_T` dict + `_i18n()`/`_t()` |
 | `└ md.py` | Markdown 处理 | 标题/表格降级、长文本分块 |
 | **controller/** | **主控制器子包** | |
 | `├ __init__.py` | 重导出门面 | StreamCardController + CardSession + 状态常量 |
-| `├ core.py` | 主控制器(单例) | 管理生命周期 + 并发限流 (v1.1.0) + epoch 校验 + _sessions/_interrupt_map 线程安全锁 (v1.3.0) |
+| `├ core.py` | 主控制器（每个 home 一个） | 管理生命周期 + 并发限流 (v1.1.0) + epoch 校验 + _sessions/_interrupt_map 线程安全锁 (v1.3.0) + 思考块按钮回调与封口后快照 |
 | `├ mixin.py` | cron/gateway 编排 | `_do_cron_deliver`/`_do_gateway_deliver` + 共享工具方法 |
 | `└ linear_mixin.py` | 线性模式编排(主路径) | 统一面板更新、保留式封卡、卡片级安全网、300309 fallback、300313 fallback |
 | **state/** | **状态与数据子包** | |
@@ -70,7 +72,7 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ phase.py` | 卡片生命周期状态机 | `CardPhase`/`TerminalReason` + `PHASE_TRANSITIONS` |
 | `├ session.py` | CardSession 数据类 | __slots__ + `_creation_stages` set (v1.1.0) + `card_trace_id` + `transition()`/`should_proceed()` |
 | `├ linear.py` | 统一面板状态 | `ReasoningRound` 数据类 + `UnifiedLinearState` 扁平管理 |
-| `├ text.py` | 文本增量追踪 | `<think|thinking|thought>` 标签拆分 |
+| `├ text.py` | 文本增量追踪 | `<think|thinking|thought|antthinking>` 标签拆分；`ReasoningStreamSplitter` 跨 chunk 保持开合状态 |
 | `└ tooluse.py` | 工具调用追踪 | `ToolStep`/`ToolSession`，敏感信息脱敏 |
 | **feishu/** | **飞书 API 客户端子包** | |
 | `├ __init__.py` | 重导出门面 | `FeishuClient`, `UnavailableGuard`, 错误码常量 + 判断函数 |
@@ -102,7 +104,7 @@ Background: _run_background_task ── [Hook 1/2]
 
 **4.5 时间感知格式**: XML 标签 `<time>HH:MM:SS</time>`，LLM 不模仿，无日期/时区后缀。
 
-**4.6 统一面板架构 (v1.0.2)**: 所有推理轮次和工具步骤放在 1 个可折叠面板中（图标 `robot_filled`），回答使用 1 个流式元素。无论对话多长，卡片始终只有 3–4 个元素。面板标题动态显示 `agent loop · N rounds · M tools · Xs`。`display.show_reasoning` 控制推理内容是否出现在面板中。`panel_events` 时间线记录事件发生顺序，面板内容按时间线交错渲染。
+**4.6 统一面板架构 (v1.0.2)**: 所有推理轮次和工具步骤放在 1 个可折叠面板中（图标 `robot_filled`），回答使用 1 个流式元素。无论对话多长，面板和回答只占 2 个元素（加上加载行、页脚和思考过程块，整卡也只有个位数元素）。面板标题动态显示 `agent loop · N rounds · M tools · Xs`。`display.show_reasoning` 控制推理内容是否出现在面板中。`panel_events` 时间线记录事件发生顺序，面板内容按时间线交错渲染。
 
 **4.7 卡片生命周期 (v1.0.2)**: 4 阶段渐进式卡片构建：Phase 1 用户消息 → 仅创建 "等待上游模型响应" + 加载图标的占位卡片（2 元素）；Phase 2 首个上游模型事件 → 删加载提示、通过 `add_elements` 添加统一面板 + 回答元素；Phase 3 流式更新；Phase 4 完成 → 添加页脚。加载提示只承载"尚未收到任何上游字节"这一个语义，首字一到即删；流式期间的状态由加载图标那一行承载（见架构章节「状态行」）。
 
@@ -128,6 +130,14 @@ Background: _run_background_task ── [Hook 1/2]
 
 **4.17 PC/手机端独立字号（个人复刻版）**: `hermes_lark_streaming.text_sizes` 支持 `body`、`reasoning`、`tool`、`notice`、`footer` 五种角色，每种角色可写单一字号或 `default`/`pc`/`mobile` 映射。未配置时绝不能改变原 Card JSON；配置后使用普通 interactive IM 卡片的整卡更新路径。`_do_create_linear_card()` 将配置快照保存到 `CardSession.text_sizes`，保证同一张卡生命周期内字号固定。
 
+**4.18 多 Profile 网关隔离 (v1.6.25)**: Hermes multiplex 用一个进程按 profile 各加载一次插件。控制器按 `get_hermes_home()` 分 home 建立；补丁标记写在共享的宿主对象上做跨副本去重；进程级登记表挂在 `runtime_globals.shared_store`。细节和排查见 [AGENT_GUIDE.md「多 Profile 网关」](AGENT_GUIDE.md#多-profile-网关multiplex)。
+
+**4.19 记忆自动预取状态 (v1.6.22)**: `patching/memory.py` 包装 `MemoryManager._prefetch_provider` 的等待边界，预取期间状态行显示`📖 OpenViking · 自动检索记忆`，结束或超时后恢复；不计入工具调用记录。
+
+**4.20 页脚速度字段 (v1.6.23–v1.6.28)**: `speed` 取最后一次模型调用的可见输出 token 除以时间窗口。窗口优先用可见正文首末块间隔，整段下发时回退到该次调用「首个上游活动 → 末个可见块」；两个窗口都在模型调用边界清零。原始用量由 `patching/usage.py` 在归一化前保存。窗口选择规则见 [AGENT_GUIDE.md「配置项」](AGENT_GUIDE.md#配置项)。
+
+**4.21 思考过程块 (v1.6.30)**: 在统一面板之外常显一个 `🫧 思考过程` 按钮。流式期间按钮下方自动跟随最新约两行思考，封口后只留按钮；点按钮展开全部（`REASONING_EXPANDED_LIMIT` 截断），再点收起。会话释放后按钮仍可用：控制器保留最近 `_REASONING_SNAPSHOT_CARDS` 张封口卡的整卡快照，用同一条整卡 PATCH 重渲染；快照被挤掉时回一条提示。仅在 interactive 路径渲染，且需要 `display.show_reasoning: true`。
+
 ---
 
 ## 5. CardSession 状态机
@@ -148,7 +158,7 @@ IDLE ──────► CREATING ──────► STREAMING ────
 
 > v1.1.0 变更：`FAILED` 作为 `CREATION_FAILED` 的别名保留（值均为 `"creation_failed"`），`CardPhase.FAILED` 类属性仍存在。新代码应使用 `CREATION_FAILED`。
 
-### 5.2 TerminalReason — 终端原因追踪
+### 5.2 TerminalReason——终端原因追踪
 
 | TerminalReason | 终端阶段 | 说明 |
 |---|---|---|
@@ -186,11 +196,13 @@ CardKit v2 Streaming → CardKit v2 Create+Patch → Hermes 纯文本
 
 v1.5.0 删除 IM 降级路径（生产从未触发）。CardKit v2 创建失败直接标记 CREATION_FAILED，hermes 回退纯文本回复。
 
+例外：配置了 `text_sizes` 时，卡片从创建起就走普通 IM 交互卡片（`session.interactive_mode=True`），每次刷新和封口都是整卡 PATCH；这不是降级，而是飞书只在这条传输上可靠应用设备字号别名。思考过程块的按钮也只在这条路径渲染。
+
 ---
 
 ## 7. 统一面板架构
 
-**核心思想**: 1 个可折叠面板承载所有推理轮次和工具步骤，1 个流式元素承载回答文本。无论对话多长，卡片元素总数恒为 3–4 个。
+**核心思想**: 1 个可折叠面板承载所有推理轮次和工具步骤，1 个流式元素承载回答文本。无论对话多长，卡片元素总数保持在个位数，不随轮次增长。
 
 **统一面板结构**:
 ```
@@ -218,16 +230,16 @@ v1.5.0 删除 IM 降级路径（生产从未触发）。CardKit v2 创建失败�
 ```
 
 **元素 ID**:
-- `UNIFIED_PANEL_ELEMENT_ID` — 统一面板
-- `ANSWER_ELEMENT_ID` — 回答流式元素
-- `_LOADING_HINT_ELEMENT_ID` — 等待提示，首字到达即删
-- `_LOADING_ELEMENT_ID` — 加载图标行，活到封卡，承载流式期间的状态文案
+- `UNIFIED_PANEL_ELEMENT_ID`——统一面板
+- `ANSWER_ELEMENT_ID`——回答流式元素
+- `_LOADING_HINT_ELEMENT_ID`——等待提示，首字到达即删
+- `_LOADING_ELEMENT_ID`——加载图标行，活到封卡，承载流式期间的状态文案
 
 **卡片生命周期 (4 Phases)**:
-- **Phase 1** — 用户发送消息 → 创建占位卡片，仅含"等待上游模型响应" + 加载图标（2 个元素）。若卡片创建时上游已开口（首字早于建卡完成），则跳过等待提示，加载图标行直接以"模型思考中..."开场（1 个元素）
-- **Phase 2** — 首个上游模型事件到达 → 删除加载提示，通过 `add_elements` 添加统一面板 + 回答元素
-- **Phase 3** — 流式更新面板内容（推理/工具）+ 回答文本
-- **Phase 4** — 完成 → 添加页脚
+- **Phase 1**——用户发送消息 → 创建占位卡片，仅含"等待上游模型响应" + 加载图标（2 个元素）。若卡片创建时上游已开口（首字早于建卡完成），则跳过等待提示，加载图标行直接以"模型思考中..."开场（1 个元素）
+- **Phase 2**——首个上游模型事件到达 → 删除加载提示，通过 `add_elements` 添加统一面板 + 回答元素
+- **Phase 3**——流式更新面板内容（推理/工具）+ 回答文本
+- **Phase 4**——完成 → 添加页脚
 
 **状态行 (v1.6.10，文案 v1.6.11)**: 加载图标那一行是唯一活到封卡的占位元素，因此由它承载流式状态——首字后显示“💭 模型思考中...”，工具运行期间显示“<emoji> 工具名”（如“🖥️ 终端命令”），工具结束切回思考中。工具 emoji 由 `_tool_emoji` 两层解析：先查按工具名的覆盖表（`time_outlined` 同时是记忆和定时任务、`report_outlined` 覆盖全部媒体工具，这类粗粒度 token 需要精确覆盖），再回退到 icon token 映射（一条覆盖一整族，`_TOOL_SPECS` 和 legacy `_TOOL_DESCRIPTORS` 都适用），最后回退默认标记——MCP 和未知工具也不会让行首塌陷。行内不带“正在调用”前缀：转圈动画已表达进行中，工具名本身又是动宾短语（读取文件、写入文件），前缀会让“执行 读取文件”这类读起来像病句；面板标题的降级路径保留前缀，因为那里是拼在 `agent loop · …` 后面，需要动词才通顺。行首用 EN SPACE (U+2002) 而非 ASCII 空格做留白，避免被渲染器折叠。文案只用 Unicode emoji（飞书渲染为彩色但静态）——飞书动画表情需要 `lark_md`，而该行必须保持 `plain_text`：飞书拒绝 partial update 改 tag，改了会把状态行打进降级路径。等待提示不适合承载状态：它在渲染首屏内容的同一次 flush 里就会被删除，写进去的文案随元素一起消失。仅当飞书拒绝该行的 `partial_update_element` 时（`_loading_label_supported=False`）才回落到改写等待提示。
 
@@ -268,23 +280,27 @@ display:
 
 ---
 
-## 9. Hook 索引 (13 个注入点)
+## 9. Hook 索引
+
+编号与 `patching/hooks.py` 各函数 docstring 里的「注入点 N」以及第 2 节架构图一致。
 
 | # | Hook | 签名 | 说明 |
 |---|------|------|------|
-| 0 | `pre_gateway_dispatch` | sync→dict | 消息分发前拦截（v1.1.0 新增）。返回 `{"action":"skip"}` 阻止消息进入 agent，用于 /aowen 命令 |
-| 1 | `on_feishu_normalize` | sync | 修正飞书引用消息虚假 thread_id |
-| 2 | `on_message_started` | sync | 创建 CardSession |
-| 3 | `on_message_completed` | sync→bool | 完成态卡片，返回是否已发卡片 |
-| 4 | `on_tool_updated` | sync | 工具调用状态更新 |
-| 5 | `on_answer_delta` | sync | AI 回复增量文本 |
-| 6 | `on_thinking_delta` | sync | 思考内容（被跳过防重复） |
-| 7 | `on_reasoning_delta` | sync | 原生推理增量 |
-| 8 | `on_background_review_message` | sync | 后台审查通知 |
-| 9 | `on_message_aborted` | sync | 消息异常终止 |
-| 10 | `on_message_interrupted` | sync | 新消息打断旧消息 |
-| 11 | `on_cron_deliver` | **async** | Cron 推送卡片 |
-| 12 | `on_message_completed`(bg) | sync | 后台任务卡片（复用 Hook 3，但用 task_id 作为 message_id，调用场景不同） |
+| 0 | `on_feishu_normalize` | sync | 修正飞书引用消息虚假 thread_id |
+| 1 | `on_message_started` | sync | 创建 CardSession |
+| 2 | `on_message_completed` | sync→bool | 完成态卡片，返回是否已发卡片。后台任务复用此 hook，用 task_id 作为 message_id |
+| 3 | `on_tool_updated` | sync | 工具调用状态更新 |
+| 4 | `on_answer_delta` | sync | AI 回复增量文本；内含 `<think>` 段由 `ReasoningStreamSplitter` 分流到推理面板 |
+| 5 | `on_thinking_delta` | sync | interim 思考内容（长度去重后透传） |
+| 6 | `on_reasoning_delta` | sync | 原生推理增量 |
+| 7 | `on_background_review_message` | sync | 后台审查通知 |
+| 8 | `on_message_aborted` | sync | 消息异常终止 |
+| 9 | `on_message_interrupted` | sync | 新消息打断旧消息 |
+| 10 | `on_cron_deliver` | **async** | Cron 推送卡片 |
+| — | `pre_gateway_dispatch` | sync→dict | Hermes 原生插件 hook（v1.1.0），实现在 `aowen/`。返回 `{"action":"skip"}` 阻止消息进入 agent，用于 /aowen 命令 |
+| — | `on_memory_prefetch_updated` | sync→bool | 记忆自动预取开始/结束（v1.6.22），由 `patching/memory.py` 触发 |
+
+`plugin.yaml` 的 `provides_hooks` 与上表同步维护。
 
 ---
 
@@ -306,18 +322,27 @@ tests/
   test_phase.py                — 卡片生命周期状态机
   test_gateway_card.py         — 网关卡片构建
   test_callback_interception.py — 回调拦截
-  test_clarify_card.py         — 交互式明义卡片
+  test_clarify_card.py         — 交互式明义卡片 + 卡片按钮回调路由
+  test_concurrency_v130.py     — _sessions/_clarify/Config 锁 (v1.3.0)
+  test_v121_fixes.py           — v1.2.1 修复回归
+  test_import_deadlock.py      — 宿主导入不得阻塞在模块导入锁 (v1.6.2)
+  test_tool_status_label.py    — 状态行工具名、中文映射、面板降级
+  test_memory_prefetch.py      — 记忆自动预取状态行
+  test_speed_usage.py          — 接口原始用量保留与页脚速度
+  test_multiplex_isolation.py  — 多 Profile 同进程两份副本不重复包装
+  conftest.py                  — 把仓库根注册为 hermes_lark_streaming 包
   e2e/                         — 端到端测试 (v1.1.0)
     framework.py               — E2ETestRunner (mock/真飞书自动切换)
     mock_feishu.py             — MockFeishuServer
     test_e2e_full.py           — 全链路测试用例
+    test_e2e_clarify.py        — Clarify 交互卡片端到端
     conftest.py                — runner fixture + 模式检测
     .env.example               — 真飞书环境变量说明
   integration/
     test_hermes_compat.py      — Hermes 源码兼容性验证（需 HERMES_SRC_DIR）
 ```
 
-运行: `HERMES_PYTHON=$(python3 ~/.hermes/plugins/hermes-lark-streaming/__main__.py python) -m pytest tests/`
+运行: `HERMES_PYTHON=$(python3 "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" python) -m pytest tests/`
 
 ### CLI 命令参考
 
@@ -341,10 +366,10 @@ git clone https://github.com/ati121/hermes-lark-streaming.git
 hermes plugins install /path/to/hermes-lark-streaming
 
 # 查看日志
-grep 'HLS:' ~/.hermes/logs/agent.log
+grep 'HLS:' "$HERMES_HOME/logs/agent.log"
 
 # 运行测试（需要 Hermes venv 的 Python，因为依赖 lark-oapi）
-HERMES_PYTHON=$(python3 ~/.hermes/plugins/hermes-lark-streaming/__main__.py python)
+HERMES_PYTHON=$(python3 "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" python)
 $HERMES_PYTHON -m pytest tests/
 
 # 真飞书 e2e 测试（可选，需要测试 bot）
@@ -354,7 +379,7 @@ set -a && source tests/e2e/.env && set +a
 $HERMES_PYTHON -m pytest tests/e2e/ -v
 
 # 清理 + 重装
-$HERMES_PYTHON ~/.hermes/plugins/hermes-lark-streaming/__main__.py cleanup
+$HERMES_PYTHON "$HERMES_HOME/plugins/hermes-lark-streaming/__main__.py" cleanup
 hermes plugins uninstall hermes-lark-streaming
 hermes plugins install https://github.com/ati121/hermes-lark-streaming.git
 hermes gateway restart
@@ -368,4 +393,4 @@ hermes gateway restart
 
 ---
 
-*Last updated: 2026-08-13 | Version: 1.6.2 personal fork*
+*版本号以 `plugin.yaml` 为准；本文随功能变更同步更新，不单独维护日期。*
