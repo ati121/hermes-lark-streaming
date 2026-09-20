@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.34 (2026-09-21, personal fork)
+
+### Added — image-generation scripts run through terminal render as 🎨 生成图片
+
+- The image bot drives its generators as `python3 …/zimage_gen.py "prompt"`,
+  `gpt_image_gen.py` and friends, which the card showed as 🖥️ 终端命令.
+  Terminal matching now looks past an interpreter (`python3`, `bash`, `node`
+  …) to the script it runs, and a new pattern table maps any program or
+  script whose basename contains `image` to the native `image_generate`
+  title and emoji. `image` appearing only in arguments (`pip install
+  imageio`, `ls …/images/`) does not match. The detail line drops the
+  interpreter and script and keeps the arguments.
+
 ## v1.6.33 (2026-09-21, personal fork)
 
 ### Added

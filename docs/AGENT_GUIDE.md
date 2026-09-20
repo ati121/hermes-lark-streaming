@@ -303,10 +303,18 @@ emoji 必须写在粗体**外面**：飞书会丢弃混入 emoji 的粗体段，
 MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计如此，不做翻译。
 
 自装的命令行工具经 `terminal` 调用时，Hermes 上报的工具名是 `terminal`，卡片会显示
-🖥️ 终端命令。想让它以自己的名字出现，在 `state/tooluse.py` 的 `_TERMINAL_PROGRAM_SPECS`
-里加一行 `程序名: (中文名, 英文名, emoji)`。匹配的是每个 shell 段开头的程序名（跳过
-`sudo`/`env`/变量赋值，去掉路径），只出现在参数里不算；命中后工具行、状态行和面板
-标题都按该程序显示，detail 里去掉程序名只留参数。目前已有 `smart-search` → 🔍、`gh` → 🐙 GitHub（Unicode 没有 GitHub 图形，用章鱼代指 Octocat）。
+🖥️ 终端命令。想让它以自己的名字出现，在 `state/tooluse.py` 里加规则：
+
+- `_TERMINAL_PROGRAM_SPECS`：精确匹配，`程序名或脚本名: (中文名, 英文名, emoji)`。
+  目前有 `smart-search` → 🔍、`gh` → 🐙 GitHub（Unicode 没有 GitHub 图形，用章鱼代指 Octocat）。
+- `_TERMINAL_PROGRAM_PATTERNS`：正则匹配程序/脚本名，精确表没命中时才用。目前有一条：
+  名字含 `image` 的一律显示为 🎨 生成图片（image bot 的 `zimage_gen.py`、`gpt_image_gen.py`
+  等都走这条，不必逐个列）。
+
+匹配的是每个 shell 段开头的程序名，跳过 `sudo`/`env`/变量赋值并去掉路径；程序是
+`python3`/`bash`/`node` 这类解释器时，看它后面的脚本名。只出现在参数里不算
+（`pip install imageio`、`ls …/images/` 仍是终端命令）。命中后工具行、状态行和面板
+标题都按该程序显示，detail 里去掉程序名和脚本名只留参数。
 
 ## 多 Profile 网关（multiplex）
 

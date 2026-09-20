@@ -819,3 +819,33 @@ class TestTerminalProgramAliases:
     def test_ghq_or_ghost_are_not_gh(self) -> None:
         assert _tool_display_names("terminal", "ghq get foo/bar") == ("Terminal", "终端命令")
         assert _tool_display_names("terminal", "ghost run") == ("Terminal", "终端命令")
+
+    @pytest.mark.parametrize("command", [
+        'python3 /opt/data/.hermes/profiles/image/workspace/scripts/zimage_gen.py "Eye-level shot"',
+        'python3 /opt/data/.hermes/profiles/image/workspace/scripts/gpt_image_gen.py --size 1024 "a cat"',
+        './gpt_image_gen.py "x"',
+        "cd /tmp && python run_gpt_image.py --n 2",
+        "bash make_image.sh",
+    ])
+    def test_any_image_script_renders_as_image_generation(self, command: str) -> None:
+        """老大 2026-09-21：脚本名里含 image 的一律按生成图片显示，不逐个列脚本名。"""
+        assert _tool_display_names("terminal", command) == ("Generate image", "生成图片")
+        assert _tool_emoji("terminal", command) == "🎨"
+
+    @pytest.mark.parametrize("command", [
+        "ls -l /opt/x/cache/images/a.png",          # image 只在参数路径里
+        "python3 -m pip install imageio",           # 解释器后面是选项，不是脚本
+        '/opt/hermes/.venv/bin/python -c "print(1)"',
+        "docker logs octopus | grep -i images/generations",
+        "cat << EOF > /tmp/x.py\nimport image\nEOF",
+    ])
+    def test_image_only_in_arguments_stays_terminal(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("Terminal", "终端命令")
+
+    def test_image_script_detail_drops_interpreter_and_script(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", 'python3 /opt/data/x/scripts/gpt_image_gen.py --size 1024 "a cat"')
+        step = tracker.build_display_steps()[0]
+        assert step["title_zh"].startswith("生成图片")
+        assert step["emoji"] == "🎨"
+        assert step["detail"] == '--size 1024 "a cat"'

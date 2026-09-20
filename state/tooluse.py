@@ -335,54 +335,94 @@ def _normalize_tool_name(name: str) -> str:
 # with the command line as the preview. Listed programs render as themselves
 # (own title and emoji) instead of a generic 🖥️ 终端命令 row, and the
 # program name is dropped from the detail line so it is not printed twice.
-# program → (zh title, en title, emoji)
+# program or script basename → (zh title, en title, emoji)
 _TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
     "smart-search": ("smart-search", "smart-search", "🔍"),
     # Unicode has no GitHub glyph; the octopus is the usual Octocat stand-in.
     "gh": ("GitHub", "GitHub", "🐙"),
 }
 
+# Rules matched against the program/script basename when no exact entry
+# hits. The image bot drives its generators through terminal
+# (``python3 …/zimage_gen.py``, ``gpt_image_gen.py`` …), so any script with
+# "image" in its name renders like the native ``image_generate`` tool
+# (老大 2026-09-21).
+_TERMINAL_PROGRAM_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, str, str]], ...] = (
+    (re.compile(r"image", re.IGNORECASE), ("生成图片", "Generate image", "🎨")),
+)
+
 # Words that can precede the real program on a command line.
 _COMMAND_WRAPPERS = frozenset({"sudo", "env", "nohup", "time", "exec", "command", "nice"})
-_COMMAND_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+# Interpreters: the *next* token names the script the row should be about.
+_SCRIPT_INTERPRETER_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|py|bash|sh|zsh|node|perl|ruby)(?:\.exe)?$", re.IGNORECASE)
+_COMMAND_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\r?\n)\s*")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-def _command_programs(command: str) -> list[str]:
-    """Program names (basenames) at the head of each segment of a shell command."""
-    programs: list[str] = []
+def _command_programs(command: str) -> list[list[str]]:
+    """Leading program tokens (basenames) of each segment of a shell command.
+
+    Each item is ``[program]`` or ``[interpreter, script]``: for
+    ``python3 /x/zimage_gen.py "p"`` the script is what identifies the call.
+    """
+    programs: list[list[str]] = []
     for segment in _COMMAND_SEGMENT_RE.split(command or ""):
-        for token in segment.split():
-            token = token.strip("'\"")
-            if not token or _ENV_ASSIGN_RE.match(token):
-                continue
-            base = os.path.basename(token.replace("\\", "/"))
-            if base.lower() in _COMMAND_WRAPPERS or base.startswith("-"):
-                continue
-            programs.append(base)
-            break
+        tokens = [t.strip("'\"") for t in segment.split()]
+        tokens = [t for t in tokens if t]
+        i = 0
+        while i < len(tokens) and (_ENV_ASSIGN_RE.match(tokens[i]) or tokens[i].startswith("-")
+                                   or os.path.basename(tokens[i].replace("\\", "/")).lower() in _COMMAND_WRAPPERS):
+            i += 1
+        if i >= len(tokens):
+            continue
+        base = os.path.basename(tokens[i].replace("\\", "/"))
+        if not base:
+            continue
+        entry = [base]
+        if _SCRIPT_INTERPRETER_RE.match(base) and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
+            script = os.path.basename(tokens[i + 1].replace("\\", "/"))
+            if script:
+                entry.append(script)
+        programs.append(entry)
     return programs
 
 
-def _terminal_program_spec(name: str | None, detail: str | None) -> tuple[str, tuple[str, str, str]] | None:
-    """``(program, spec)`` when a ``terminal`` command runs a listed program."""
-    if not name or not detail or _normalize_tool_name(name) != "terminal":
-        return None
-    for program in _command_programs(detail):
-        spec = _TERMINAL_PROGRAM_SPECS.get(program.lower())
-        if spec is not None:
-            return program, spec
+def _lookup_terminal_program(basename: str) -> tuple[str, str, str] | None:
+    spec = _TERMINAL_PROGRAM_SPECS.get(basename.lower())
+    if spec is not None:
+        return spec
+    for pattern, pat_spec in _TERMINAL_PROGRAM_PATTERNS:
+        if pattern.search(basename):
+            return pat_spec
     return None
 
 
-def _strip_leading_program(detail: str, program: str) -> str:
-    """Drop ``program`` from the front of a (sanitised) command line."""
-    stripped = (detail or "").lstrip()
-    if stripped.lower().startswith(program.lower()):
-        rest = stripped[len(program):]
-        if not rest or rest[0].isspace():
-            return rest.strip()
-    return detail
+def _terminal_program_spec(name: str | None, detail: str | None) -> tuple[list[str], tuple[str, str, str]] | None:
+    """``(leading_tokens, spec)`` when a ``terminal`` command runs a listed program.
+
+    ``leading_tokens`` are the command tokens the match covers (``["gh"]`` or
+    ``["python3", "zimage_gen.py"]``) so the detail line can drop them.
+    """
+    if not name or not detail or _normalize_tool_name(name) != "terminal":
+        return None
+    for entry in _command_programs(detail):
+        # The script (if any) is the more specific name; try it first.
+        for candidate in reversed(entry):
+            spec = _lookup_terminal_program(candidate)
+            if spec is not None:
+                return entry, spec
+    return None
+
+
+def _strip_leading_program(detail: str, leading: list[str]) -> str:
+    """Drop the matched program/script tokens from the front of a (sanitised) command line."""
+    rest = (detail or "").lstrip()
+    for token in leading:
+        head, _sep, tail = rest.partition(" ")
+        if os.path.basename(head.strip("'\"").replace("\\", "/")).lower() != token.lower():
+            return detail
+        rest = tail.lstrip()
+    return rest
 
 # ── Emoji shown beside the spinner while a tool runs ──────────────────────
 # Resolved in two layers. The icon token already encodes the design's own
