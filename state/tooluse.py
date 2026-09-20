@@ -338,6 +338,8 @@ def _normalize_tool_name(name: str) -> str:
 # program → (zh title, en title, emoji)
 _TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
     "smart-search": ("smart-search", "smart-search", "🔍"),
+    # Unicode has no GitHub glyph; the octopus is the usual Octocat stand-in.
+    "gh": ("GitHub", "GitHub", "🐙"),
 }
 
 # Words that can precede the real program on a command line.

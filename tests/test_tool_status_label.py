@@ -798,3 +798,24 @@ class TestTerminalProgramAliases:
         content = _build_tool_step_title(step)["text"]["content"]
         assert content.startswith("🔍 ")
         assert "**smart-search" in content
+
+    @pytest.mark.parametrize("command", [
+        "gh api repos/konbakuyomu/smartsearch/contents/README.md",
+        "gh pr list --state open",
+        "cd repo && gh release view v1.0",
+    ])
+    def test_gh_renders_as_github(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("GitHub", "GitHub")
+        assert _tool_emoji("terminal", command) == "🐙"
+
+    def test_gh_detail_keeps_subcommand(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "gh api repos/konbakuyomu/smartsearch/contents/README.md")
+        step = tracker.build_display_steps()[0]
+        assert step["title"].startswith("GitHub")
+        assert step["emoji"] == "🐙"
+        assert step["detail"].startswith("api repos/konbakuyomu/smartsearch")
+
+    def test_ghq_or_ghost_are_not_gh(self) -> None:
+        assert _tool_display_names("terminal", "ghq get foo/bar") == ("Terminal", "终端命令")
+        assert _tool_display_names("terminal", "ghost run") == ("Terminal", "终端命令")

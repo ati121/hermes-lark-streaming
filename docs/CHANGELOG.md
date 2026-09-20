@@ -4,6 +4,14 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.33 (2026-09-21, personal fork)
+
+### Added
+
+- `gh` (GitHub CLI) joins `_TERMINAL_PROGRAM_SPECS` and renders as
+  🐙 GitHub instead of 🖥️ 终端命令; the detail line keeps only the
+  subcommand and arguments (`api repos/...`).
+
 ## v1.6.32 (2026-09-21, personal fork)
 
 ### Added — terminal programs can render as their own tool row

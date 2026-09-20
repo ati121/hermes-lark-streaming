@@ -306,7 +306,7 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
 🖥️ 终端命令。想让它以自己的名字出现，在 `state/tooluse.py` 的 `_TERMINAL_PROGRAM_SPECS`
 里加一行 `程序名: (中文名, 英文名, emoji)`。匹配的是每个 shell 段开头的程序名（跳过
 `sudo`/`env`/变量赋值，去掉路径），只出现在参数里不算；命中后工具行、状态行和面板
-标题都按该程序显示，detail 里去掉程序名只留参数。目前已有 `smart-search` → 🔍。
+标题都按该程序显示，detail 里去掉程序名只留参数。目前已有 `smart-search` → 🔍、`gh` → 🐙 GitHub（Unicode 没有 GitHub 图形，用章鱼代指 Octocat）。
 
 ## 多 Profile 网关（multiplex）
 
