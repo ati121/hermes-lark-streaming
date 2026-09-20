@@ -184,13 +184,17 @@ class UnifiedControllerMixin:
                     self._remember_reasoning_snapshot(session, _rsn_full, session.text_sizes)
             except Exception:
                 _logger.debug("pinned reasoning elements failed", exc_info=True)
-        if state is not None and state.panel_visible:
+        # 老大 2026-09-21：推理已经在顶部思考块里了，折叠面板只列工具步骤，
+        # 标题也不再带「N 轮」；没有工具调用的回合面板整个不出现（否则只剩空壳）。
+        # CardKit 实体卡路径没有顶部思考块，仍由面板承载推理，不受影响。
+        _tool_steps = session.tool_use.build_display_steps() if state is not None else []
+        if state is not None and state.panel_visible and _tool_steps:
             elements.append(build_unified_panel(
                 reasoning_rounds=state.reasoning_rounds,
                 current_reasoning_text="" if final else state.current_reasoning_text,
-                tool_steps=session.tool_use.build_display_steps(),
+                tool_steps=_tool_steps,
                 tool_elapsed_ms=session.tool_use.elapsed_ms,
-                show_reasoning=self._cfg.show_reasoning,
+                show_reasoning=False,
                 expanded=self._cfg.panel_expanded if final else self._cfg.streaming_panel_expanded,
                 panel_events=state.panel_events,
                 max_tool_steps=self._cfg.max_tool_steps,

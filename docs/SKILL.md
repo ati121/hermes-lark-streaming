@@ -136,7 +136,7 @@ Background: _run_background_task ── [Hook 1/2]
 
 **4.20 页脚速度字段 (v1.6.23–v1.6.28)**: `speed` 取最后一次模型调用的可见输出 token 除以时间窗口。窗口优先用可见正文首末块间隔，整段下发时回退到该次调用「首个上游活动 → 末个可见块」；两个窗口都在模型调用边界清零。原始用量由 `patching/usage.py` 在归一化前保存。窗口选择规则见 [AGENT_GUIDE.md「配置项」](AGENT_GUIDE.md#配置项)。
 
-**4.21 思考过程块 (v1.6.30)**: 在统一面板之外常显一个 `🫧 思考过程` 按钮。流式期间按钮下方自动跟随最新约两行思考，封口后只留按钮；点按钮展开全部（`REASONING_EXPANDED_LIMIT` 截断），再点收起。会话释放后按钮仍可用：控制器保留最近 `_REASONING_SNAPSHOT_CARDS` 张封口卡的整卡快照，用同一条整卡 PATCH 重渲染；快照被挤掉时回一条提示。仅在 interactive 路径渲染，且需要 `display.show_reasoning: true`。
+**4.21 思考过程块 (v1.6.30)**: 在统一面板之外常显一个 `🫧 思考过程` 按钮。流式期间按钮下方自动跟随最新约两行思考，封口后只留按钮；点按钮展开全部（`REASONING_EXPANDED_LIMIT` 截断），再点收起。会话释放后按钮仍可用：控制器保留最近 `_REASONING_SNAPSHOT_CARDS` 张封口卡的整卡快照，用同一条整卡 PATCH 重渲染；快照被挤掉时回一条提示。仅在 interactive 路径渲染，且需要 `display.show_reasoning: true`。该路径上折叠面板只列工具步骤（`show_reasoning=False`），没有工具调用的回合不渲染面板；CardKit 路径仍由面板承载推理。
 
 ---
 

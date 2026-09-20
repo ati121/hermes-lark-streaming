@@ -3338,3 +3338,63 @@ class TestReasoningToggle:
         # 最新的那张一定还在，最老的已经被挤掉
         assert f"msg_bound_{ctrl._REASONING_SNAPSHOT_CARDS + 19}" in m
         assert "msg_bound_0" not in m
+
+
+class TestInteractivePanelToolsOnly:
+    """交互卡片路径：推理在顶部思考块里，折叠面板只列工具步骤."""
+
+    @staticmethod
+    def _session(ctrl, msg: str):
+        ctrl._cfg._reload_cached = lambda: {"display": {"platforms": {"feishu": {"show_reasoning": True}}}}  # type: ignore[assignment]
+        session = _make_session(msg, linear=True)
+        session.card_msg_id = msg
+        session.interactive_mode = True
+        session.state = STREAMING
+        ctrl._sessions[msg] = session
+        return session
+
+    def test_panel_shows_tool_steps_without_reasoning(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = self._session(ctrl, "msg_panel_tools")
+        session.unified_state.on_reasoning_delta("先想一下")
+        ctrl.on_tool_update(message_id=session.message_id, tool_name="web_search", status="started", detail="q")
+        ctrl.on_tool_update(message_id=session.message_id, tool_name="web_search", status="completed", detail="ok")
+        session.unified_state.on_reasoning_delta("再想一下")
+
+        card = ctrl._build_interactive_linear_card(session)
+        ids = [e.get("element_id") for e in card["body"]["elements"]]
+        assert "rsn_toggle" in ids
+        panel = next(e for e in card["body"]["elements"] if e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID)
+        dumped = str(panel)
+        assert "先想一下" not in dumped
+        assert "再想一下" not in dumped
+        assert "rounds" not in panel["header"]["title"]["content"]
+        assert "轮" not in panel["header"]["title"]["i18n_content"]["zh_cn"]
+        assert "1 tools" in panel["header"]["title"]["content"]
+
+    def test_no_panel_when_turn_has_no_tools(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = self._session(ctrl, "msg_panel_notools")
+        session.unified_state.on_reasoning_delta("只想不做")
+        session.unified_state.on_answer_delta("答案")
+
+        card = ctrl._build_interactive_linear_card(session)
+        ids = [e.get("element_id") for e in card["body"]["elements"]]
+        assert "rsn_toggle" in ids
+        assert UNIFIED_PANEL_ELEMENT_ID not in ids
+        assert "answer_content" in ids
+
+    @pytest.mark.asyncio
+    async def test_sealed_card_keeps_tools_only_panel(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = self._session(ctrl, "msg_panel_seal")
+        session.unified_state.on_reasoning_delta("想")
+        ctrl.on_tool_update(message_id=session.message_id, tool_name="terminal", status="started", detail="ls")
+        ctrl.on_tool_update(message_id=session.message_id, tool_name="terminal", status="completed", detail="ok")
+        session.unified_state.on_answer_delta("答案")
+
+        assert await ctrl._do_interactive_linear_complete(session) is True
+        card = ctrl._client.update_card.await_args.args[1]
+        panel = next(e for e in card["body"]["elements"] if e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID)
+        assert "想" not in str(panel["elements"])
+        assert "轮" not in panel["header"]["title"]["i18n_content"]["zh_cn"]

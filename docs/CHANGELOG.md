@@ -4,6 +4,17 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.31 (2026-09-21, personal fork)
+
+### Changed — the process panel lists tools only on interactive cards
+
+- With the reasoning block pinned above it, the collapsible `执行过程` panel
+  was rendering the same reasoning a second time. On the interactive card
+  path the panel now shows tool steps only and its title drops the
+  `N 轮` count; a turn with no tool calls renders no panel at all instead
+  of an empty shell. The CardKit path has no pinned block and keeps
+  reasoning inside the panel.
+
 ## v1.6.30 (2026-09-20, personal fork)
 
 ### Added — a pinned reasoning block with an expand/collapse button
