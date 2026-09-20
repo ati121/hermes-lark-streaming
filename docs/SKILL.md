@@ -73,7 +73,7 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ session.py` | CardSession 数据类 | __slots__ + `_creation_stages` set (v1.1.0) + `card_trace_id` + `transition()`/`should_proceed()` |
 | `├ linear.py` | 统一面板状态 | `ReasoningRound` 数据类 + `UnifiedLinearState` 扁平管理 |
 | `├ text.py` | 文本增量追踪 | `<think|thinking|thought|antthinking>` 标签拆分；`ReasoningStreamSplitter` 跨 chunk 保持开合状态 |
-| `└ tooluse.py` | 工具调用追踪 | `ToolStep`/`ToolSession`，敏感信息脱敏 |
+| `└ tooluse.py` | 工具调用追踪 | `ToolStep`/`ToolSession`，敏感信息脱敏；`_TERMINAL_PROGRAM_SPECS` 让 terminal 跑的指定程序按自己的名字和 emoji 显示 |
 | **feishu/** | **飞书 API 客户端子包** | |
 | `├ __init__.py` | 重导出门面 | `FeishuClient`, `UnavailableGuard`, 错误码常量 + 判断函数 |
 | `├ client.py` | 飞书 API 客户端 | CardKit v2 + IM API，错误码分类 + 瞬态重试 + 300313 专用重试 (v1.1.0) |

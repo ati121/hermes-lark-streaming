@@ -744,3 +744,57 @@ class TestToolStepTitleRendersEmoji:
         success = self._title(status="success")
         assert running["text"]["content"] != success["text"]["content"]
         assert "orange-300" in running["text"]["content"]
+
+
+class TestTerminalProgramAliases:
+    """老大 2026-09-21：自装的 CLI 经 terminal 跑，按程序本身显示（🔍 smart-search）而不是 🖥️ 终端命令."""
+
+    @pytest.mark.parametrize("command", [
+        "smart-search search 'deepseek v4.1'",
+        "cd /tmp && /usr/local/bin/smart-search search x",
+        "FOO=1 sudo smart-search search q",
+        "Smart-Search search q",
+    ])
+    def test_listed_program_gets_own_name_and_emoji(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("smart-search", "smart-search")
+        assert _tool_emoji("terminal", command) == "🔍"
+
+    @pytest.mark.parametrize("command", [
+        "ls -la",
+        "grep smart-search notes.txt",       # 只是参数，不是程序
+        "echo hi | smart-search-helper x",   # 名字不完全匹配
+        "",
+    ])
+    def test_other_commands_stay_terminal(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("Terminal", "终端命令")
+        assert _tool_emoji("terminal", command) == "🖥️"
+
+    def test_alias_only_applies_to_terminal(self) -> None:
+        assert _tool_display_names("read_file", "smart-search search x") == ("Read", "读取文件")
+
+    def test_display_step_drops_program_from_detail(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "smart-search search 'deepseek v4.1'")
+        tracker.record_end("terminal", output="ok")
+        step = tracker.build_display_steps()[0]
+        assert step["title"].startswith("smart-search")
+        assert step["title_zh"].startswith("smart-search")
+        assert step["emoji"] == "🔍"
+        assert step["detail"] == "search 'deepseek v4.1'"
+
+    def test_spinner_label_follows_alias(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "smart-search search q")
+        assert tracker.last_tool_names == ("smart-search", "smart-search")
+        assert tracker.last_tool_emoji == "🔍"
+        tracker.record_start("terminal", "ls -la")
+        assert tracker.last_tool_names == ("Terminal", "终端命令")
+        assert tracker.last_tool_emoji == "🖥️"
+
+    def test_row_renders_search_emoji_outside_bold(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "smart-search search q")
+        step = tracker.build_display_steps()[0]
+        content = _build_tool_step_title(step)["text"]["content"]
+        assert content.startswith("🔍 ")
+        assert "**smart-search" in content

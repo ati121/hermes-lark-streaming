@@ -4,6 +4,20 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.32 (2026-09-21, personal fork)
+
+### Added — terminal programs can render as their own tool row
+
+- A CLI the owner installs is reported by Hermes as a `terminal` call with
+  the command line as the preview, so the card showed 🖥️ 终端命令 for it.
+  `_TERMINAL_PROGRAM_SPECS` in `state/tooluse.py` maps a program name to its
+  own title and emoji; a listed program renders as itself in the tool row,
+  the spinner label and the panel-header fallback, and its name is dropped
+  from the detail line. The program is matched at the head of each shell
+  segment (after `sudo`/`env`/variable assignments, with any path stripped),
+  so it does not fire when the name only appears as an argument. First
+  entry: `smart-search` → 🔍 smart-search.
+
 ## v1.6.31 (2026-09-21, personal fork)
 
 ### Changed — the process panel lists tools only on interactive cards

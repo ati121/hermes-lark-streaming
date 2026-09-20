@@ -330,6 +330,58 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
 def _normalize_tool_name(name: str) -> str:
     return name.strip().lower().replace("-", "_")
 
+# ── Terminal programs that deserve a row of their own ─────────────────────
+# Hermes reports a CLI the owner installed as a tool through ``terminal``,
+# with the command line as the preview. Listed programs render as themselves
+# (own title and emoji) instead of a generic 🖥️ 终端命令 row, and the
+# program name is dropped from the detail line so it is not printed twice.
+# program → (zh title, en title, emoji)
+_TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
+    "smart-search": ("smart-search", "smart-search", "🔍"),
+}
+
+# Words that can precede the real program on a command line.
+_COMMAND_WRAPPERS = frozenset({"sudo", "env", "nohup", "time", "exec", "command", "nice"})
+_COMMAND_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||;|\|)\s*")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _command_programs(command: str) -> list[str]:
+    """Program names (basenames) at the head of each segment of a shell command."""
+    programs: list[str] = []
+    for segment in _COMMAND_SEGMENT_RE.split(command or ""):
+        for token in segment.split():
+            token = token.strip("'\"")
+            if not token or _ENV_ASSIGN_RE.match(token):
+                continue
+            base = os.path.basename(token.replace("\\", "/"))
+            if base.lower() in _COMMAND_WRAPPERS or base.startswith("-"):
+                continue
+            programs.append(base)
+            break
+    return programs
+
+
+def _terminal_program_spec(name: str | None, detail: str | None) -> tuple[str, tuple[str, str, str]] | None:
+    """``(program, spec)`` when a ``terminal`` command runs a listed program."""
+    if not name or not detail or _normalize_tool_name(name) != "terminal":
+        return None
+    for program in _command_programs(detail):
+        spec = _TERMINAL_PROGRAM_SPECS.get(program.lower())
+        if spec is not None:
+            return program, spec
+    return None
+
+
+def _strip_leading_program(detail: str, program: str) -> str:
+    """Drop ``program`` from the front of a (sanitised) command line."""
+    stripped = (detail or "").lstrip()
+    if stripped.lower().startswith(program.lower()):
+        rest = stripped[len(program):]
+        if not rest or rest[0].isspace():
+            return rest.strip()
+    return detail
+
 # ── Emoji shown beside the spinner while a tool runs ──────────────────────
 # Resolved in two layers. The icon token already encodes the design's own
 # grouping, so keying off it covers both _TOOL_SPECS and the legacy
@@ -459,10 +511,17 @@ _TOOL_EMOJI_BY_ICON: dict[str, str] = {
 
 _DEFAULT_TOOL_EMOJI = "🔧"
 
-def _tool_emoji(name: str | None) -> str:
-    """Emoji for a raw tool name — never empty, so the row can't jump around."""
+def _tool_emoji(name: str | None, detail: str | None = None) -> str:
+    """Emoji for a raw tool name — never empty, so the row can't jump around.
+
+    ``detail`` is the tool's preview; for ``terminal`` it is the command line,
+    which can promote a listed program to its own emoji.
+    """
     if not name:
         return _DEFAULT_TOOL_EMOJI
+    aliased = _terminal_program_spec(name, detail)
+    if aliased is not None:
+        return aliased[1][2]
     direct = _TOOL_EMOJI_BY_NAME.get(_normalize_tool_name(name))
     if direct:
         return direct
@@ -508,10 +567,18 @@ def _humanize_tool_name(name: str) -> str:
         return "Tool"
     return cleaned[0].upper() + cleaned[1:]
 
-def _tool_display_names(name: str | None) -> tuple[str, str]:
-    """Return ``(en, zh)`` display names for a raw tool name."""
+def _tool_display_names(name: str | None, detail: str | None = None) -> tuple[str, str]:
+    """Return ``(en, zh)`` display names for a raw tool name.
+
+    ``detail`` is the tool's preview; for ``terminal`` it is the command line,
+    which can promote a listed program to its own title.
+    """
     if not name:
         return "Tool", "工具"
+    aliased = _terminal_program_spec(name, detail)
+    if aliased is not None:
+        _zh, _en, _emoji = aliased[1]
+        return _en, _zh
     desc = _resolve_tool_descriptor(name)
     if desc is not None:
         en = desc["title"]
@@ -579,14 +646,16 @@ class ToolUseTracker:
         """
         if self._session is None or not self._session.steps:
             return None
-        return _tool_display_names(self._session.steps[-1].name)
+        last = self._session.steps[-1]
+        return _tool_display_names(last.name, last.detail)
 
     @property
     def last_tool_emoji(self) -> str | None:
         """Emoji for whichever tool ``last_tool_names`` is reporting."""
         if self._session is None or not self._session.steps:
             return None
-        return _tool_emoji(self._session.steps[-1].name)
+        last = self._session.steps[-1]
+        return _tool_emoji(last.name, last.detail)
 
     def record_start(self, name: str, detail: str = "") -> None:
         if self._session is None:
@@ -639,13 +708,16 @@ class ToolUseTracker:
         steps = []
         for s in self._session.steps:
             desc = _resolve_tool_descriptor(s.name)
-            base_title, base_title_zh = _tool_display_names(s.name)
+            base_title, base_title_zh = _tool_display_names(s.name, s.detail)
             if s.elapsed_ms > 0:
                 suffix = f" ({_format_duration_label(s.elapsed_ms)})"
                 base_title += suffix
                 base_title_zh += suffix
             sanitizer = desc.get("sanitizer") if desc else None
             detail = _sanitize_detail(s.detail, sanitizer)
+            aliased = _terminal_program_spec(s.name, s.detail)
+            if aliased is not None:
+                detail = _strip_leading_program(detail, aliased[0])
             steps.append(
                 {
                     "name": s.name,
@@ -658,7 +730,7 @@ class ToolUseTracker:
                     # Kept as the emoji-grouping key (_TOOL_EMOJI_BY_ICON);
                     # the card renders ``emoji``, not this token.
                     "icon": desc["icon"] if desc else "setting-inter_outlined",
-                    "emoji": _tool_emoji(s.name),
+                    "emoji": _tool_emoji(s.name, s.detail),
                     "elapsed_ms": s.elapsed_ms,
                     "result_block": None if (desc and desc.get("no_result")) else s.result_block,
                     "error_block": s.error_block,
