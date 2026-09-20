@@ -28,7 +28,7 @@ from ..feishu import (
     FeishuClient,
     FeishuClientConfig,
 )
-from ..state.text import TextState, strip_reasoning_tags
+from ..state.text import ReasoningStreamSplitter, TextState, strip_reasoning_tags
 from ..state.tooluse import ToolUseTracker
 # v1.4.0 fix (问题3 根因1): _reactivate_session_for_continuation 预创建 unified_state
 from ..state.linear import UnifiedLinearState
@@ -797,6 +797,194 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     session.unified_state.on_reasoning_delta(text)
             self._schedule_linear_flush(session, force=phase_changed)
 
+    # ── 老大 2026-09-20: 思考块快照（会话封口被回收后，按钮仍要能用）──
+    # 快照按 card_msg_id 和 card_id 各存一个键（同一个 dict 对象），所以
+    # 一张卡最多占两个槽位；上限按「张」算，只在这一处定义，别处不要各写各的。
+    _REASONING_SNAPSHOT_CARDS = 60
+
+    def _rsn_map(self) -> dict:
+        m = getattr(self, "_reasoning_snapshots", None)
+        if m is None:
+            m = {}
+            try:
+                self._reasoning_snapshots = m
+            except Exception:
+                pass
+        return m
+
+    def _trim_rsn_map(self, m: dict) -> None:
+        limit = self._REASONING_SNAPSHOT_CARDS * 2
+        while len(m) > limit:
+            m.pop(next(iter(m)), None)
+
+    def _remember_reasoning_snapshot(self, session, full: str, text_sizes) -> None:
+        if not full:
+            return
+        m = self._rsn_map()
+        key0 = getattr(session, "card_msg_id", None) or getattr(session, "card_id", None)
+        prev = m.get(key0) if key0 else None
+        snap = dict(prev) if isinstance(prev, dict) else {}
+        snap.update({"seq": max(int(snap.get("seq") or 0), int(getattr(session, "sequence", 0) or 0))})
+        snap.update({"card_id": getattr(session, "card_id", None), "card_msg_id": getattr(session, "card_msg_id", None),
+                     "full": full, "text_sizes": text_sizes})
+        for key in (getattr(session, "card_id", None), getattr(session, "card_msg_id", None)):
+            if key:
+                m[key] = snap
+        self._trim_rsn_map(m)
+
+    def _remember_card_snapshot(self, session, card) -> None:
+        """整卡快照：会话回收后靠它重渲染（消息卡片不能走 CardKit 元素级接口）。"""
+        if not isinstance(card, dict):
+            return
+        key = getattr(session, "card_msg_id", None)
+        if not key:
+            return
+        m = self._rsn_map()
+        snap = m.get(key)
+        if not isinstance(snap, dict):
+            snap = {}
+        snap["card"] = card
+        snap["card_msg_id"] = key
+        snap["card_id"] = getattr(session, "card_id", None)
+        if getattr(session, "text_sizes", None) is not None:
+            snap["text_sizes"] = session.text_sizes
+        m[key] = snap
+        self._trim_rsn_map(m)
+
+    async def _apply_reasoning_snapshot(self, snap: dict, expanded: bool) -> bool:
+        if self._client is None:
+            return False
+        from ..cardkit.elements import (
+            build_pinned_reasoning_elements_from_text,
+            strip_reasoning_region,
+        )
+        full = snap.get("full") or ""
+        msg_id = snap.get("card_msg_id")
+        card = snap.get("card")
+        # 交互式卡片是「消息卡片」（session.card_id = im:om_xxx），CardKit 元素级接口用不了
+        # （会报 99992402 field validation failed）→ 整卡替换，和插件封口用的是同一个接口
+        if msg_id and isinstance(card, dict):
+            import copy
+            new_card = copy.deepcopy(card)
+            body = new_card.get("body") or {}
+            els = body.get("elements")
+            if not isinstance(els, list):
+                return False
+            new_els = build_pinned_reasoning_elements_from_text(
+                full,
+                text_sizes=snap.get("text_sizes"),
+                expanded=bool(expanded),
+                preview=False,
+            )
+            body["elements"] = new_els + strip_reasoning_region(els)
+            await self._client.update_card(msg_id, new_card)
+            snap["card"] = new_card
+            _logger.info(
+                "HLS: reasoning toggle refreshed card msg=%s expanded=%s els=%s",
+                msg_id[:12], bool(expanded), len(new_els),
+            )
+            return True
+        # 兜底：真 CardKit 卡片实体才走元素级更新
+        card_id = snap.get("card_id") or ""
+        if not card_id or card_id.startswith("im:"):
+            return False
+        from ..cardkit.elements import build_pinned_reasoning_refresh
+        els = build_pinned_reasoning_refresh(full, expanded=bool(expanded), text_sizes=snap.get("text_sizes"))
+        actions = [
+            {"action": "partial_update_element",
+             "params": {"element_id": e["element_id"],
+                        "partial_element": {k: v for k, v in e.items() if k not in ("element_id", "tag")}}}
+            for e in els
+        ]
+        for _attempt in (1, 2, 3):
+            seq = int(snap.get("seq") or 0) + 1
+            snap["seq"] = seq
+            try:
+                await self._client.cardkit_batch_update(card_id, actions, sequence=seq)
+                _logger.info("HLS: reasoning toggle applied via cardkit card=%s expanded=%s seq=%s", card_id[:12], bool(expanded), seq)
+                return True
+            except Exception as exc:
+                if "300317" in str(exc) or "sequence" in str(exc).lower():
+                    snap["seq"] = seq + 500
+                    continue
+                raise
+        return False
+
+    async def on_reasoning_toggle(self, *, card_msg_id: str = "", expanded: bool = True) -> None:
+        """卡片上「展开全部思考 / 收起思考」按钮回调（已封卡的会话也能重渲染）。
+
+        只按 card_msg_id 精确匹配 — 多路会话并发时，点一张旧卡的按钮
+        不能波及别的活跃会话（v1.4.x 前的兜底广播会误伤）。
+        """
+        if not self.enabled:
+            return
+        session = None
+        if card_msg_id:
+            # 工作线程会并发增删 _sessions，迭代必须拿加锁快照
+            for x in self._sess_values_snapshot():
+                if (x.card_msg_id or "") == card_msg_id:
+                    session = x
+                    break
+        if session is not None and session.unified_state is not None:
+            await self._toggle_reasoning_live_session(session, expanded)
+            return
+
+        snap = self._rsn_map().get(card_msg_id) if card_msg_id else None
+        if snap is None:
+            # 快照被挤掉了（或这张卡根本不是本进程发的）：按钮点了没反应会让
+            # 人以为坏了，发一条回复说明一下。失败也无所谓，日志已经留了。
+            _logger.info(
+                "HLS: reasoning toggle — no live session and no snapshot for card=%s",
+                (card_msg_id or "?")[:12],
+            )
+            if self._client is not None:
+                try:
+                    await self._client.reply_text(
+                        card_msg_id, "这张卡片的思考过程已经不在缓存里了，只有最近的卡片能展开。",
+                    )
+                except Exception:
+                    _logger.debug("HLS: reasoning toggle expired-notice reply failed", exc_info=True)
+            return
+        try:
+            if await self._apply_reasoning_snapshot(snap, expanded):
+                snap["expanded"] = bool(expanded)
+        except Exception:
+            _logger.warning("HLS: reasoning toggle snapshot update failed", exc_info=True)
+
+    async def _toggle_reasoning_live_session(self, session, expanded: bool) -> None:
+        """活跃会话上的思考块切换：interactive 卡整卡重渲染即所见即所得。"""
+        state = session.unified_state
+        if state is None:
+            return
+        state.reasoning_expanded = bool(expanded)
+        _logger.info(
+            "HLS: reasoning toggle msg=%s expanded=%s state=%s",
+            (session.message_id or "?")[:12], bool(expanded), session.state,
+        )
+        if session.state == COMPLETING or session.is_terminal_phase:
+            # 封口正在进行（或已完成）：这时再 PATCH 一张非 final 的流式卡，
+            # 会和封口卡的 PATCH 抢先后，后落地的把带页脚的封口卡盖成
+            # "Processing..."。封口卡自己会按 reasoning_expanded 渲染，这里只改标志。
+            return
+        if getattr(session, "interactive_mode", False) and session.card_msg_id and self._client is not None:
+            try:
+                card = self._build_interactive_linear_card(
+                    session,
+                    final=bool(session.is_terminal_phase),
+                    footer_data=session.footer,
+                    is_aborted=getattr(session, "_was_aborted", False),
+                    error_message=getattr(session, "error_message", "") or "",
+                    footer_fields=self._cfg.footer_fields,
+                    footer_show_label=self._cfg.footer_show_label,
+                )
+                await self._client.update_card(session.card_msg_id, card)
+            except Exception:
+                _logger.warning("HLS: reasoning toggle card update failed", exc_info=True)
+            return
+        # CardKit 实体卡路径目前不渲染思考块按钮；保守起见仍调度一次
+        # 元素级刷新，让状态变化在下一轮 flush 里生效。
+        self._schedule_linear_flush(session, force=True)
+
     def on_tool_update(
         self,
         *,
@@ -879,7 +1067,15 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 _logger.debug("on_answer: stale epoch, skipping msg=%s", (message_id or "?")[:12])
                 return
 
-            answer_text = strip_reasoning_tags(text)
+            # 2026-09-20 (老大要求): 流式文本里带的思考段（<think>/<thinking>/"Reasoning:"）
+            # 不再丢弃，抽出来喂给推理面板顶部固定块；正文照旧只留可见答案。
+            # 标签对可能劈在两个 chunk 之间 — 按会话保住开合状态，跨块正确分流。
+            splitter = session._reasoning_splitter
+            if splitter is None:
+                splitter = session._reasoning_splitter = ReasoningStreamSplitter()
+            _thinking_text, answer_text = splitter.split(text)
+            if _thinking_text and self._cfg.show_reasoning and session.unified_state is not None:
+                session.unified_state.on_reasoning_delta(_thinking_text)
             if text:
                 # A stream callback can carry a reasoning marker (for example
                 # ``<think>``) before it carries any visible answer text. It is
@@ -1135,6 +1331,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             if not session.accepts_stream_updates:
                 return False
 
+            # 流结束时 splitter 可能还压着半个标签/半截前缀 — 先按当前
+            # 开合状态吐出来，下面的全量对账才有干净的 streamed 前缀可比。
+            _splitter = session._reasoning_splitter
+            if _splitter is not None:
+                _pend_rsn, _pend_answer = _splitter.flush()
+                if (_pend_rsn or _pend_answer) and session.unified_state is not None:
+                    if _pend_rsn and self._cfg.show_reasoning:
+                        session.unified_state.on_reasoning_delta(_pend_rsn)
+                    if _pend_answer:
+                        session.unified_state.on_answer_delta(_pend_answer)
+
             # v1.3.0 P1-06: normal-path completion log downgraded to DEBUG (fires
             # The yield-to-gateway log above stays INFO (edge case, useful for debugging).
             if answer:
@@ -1143,7 +1350,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     session.linear
                     and session.unified_state is not None
                 ):
-                    from ..state.text import strip_reasoning_tags
                     clean_answer = strip_reasoning_tags(answer)
                     if clean_answer:
                         _existing = session.unified_state.answer_text

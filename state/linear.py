@@ -21,6 +21,7 @@ class UnifiedLinearState:
 
     __slots__ = (
         "reasoning_rounds",
+        "reasoning_expanded",
         "_current_reasoning",
         "_reasoning_start",
         "tool_steps_dirty",
@@ -36,6 +37,9 @@ class UnifiedLinearState:
     def __init__(self) -> None:
         # Reasoning tracking
         self.reasoning_rounds: list[ReasoningRound] = []
+        # 老大 2026-09-20: 思考块是否展开全部（点卡片按钮切换）
+        # 是否被用户点开（默认否：生成中自动显示 2 行，正文输出后自动隐藏）
+        self.reasoning_expanded: bool = False
         self._current_reasoning: str = ""
         self._reasoning_start: float = 0.0
 

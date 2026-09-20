@@ -357,8 +357,10 @@ class TestGetHermesConfigPath:
 
     def test_default_path_when_no_env(self) -> None:
         """无 HERMES_HOME 环境变量时，回退到用户主目录下的默认配置文件."""
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("HERMES_HOME", None)
+        # 不能 clear=True：Windows 上 Path.home() 依赖 USERPROFILE，清空后直接抛
+        # RuntimeError；只摘掉 HERMES_HOME 就够表达"未设置"了。
+        env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+        with patch.dict(os.environ, env, clear=True):
             path = _get_hermes_config_path()
             assert path == Path.home() / ".hermes" / "config.yaml"
 
@@ -381,8 +383,9 @@ class TestGetHermesConfigPath:
         with patch.dict(os.environ, {"HERMES_HOME": "/path/b"}):
             path_b = _get_hermes_config_path()
         assert path_a != path_b
-        assert str(path_a).startswith("/path/a")
-        assert str(path_b).startswith("/path/b")
+        # 用 Path 比较，别比字符串 —— Windows 上分隔符是反斜杠
+        assert path_a == Path("/path/a") / "config.yaml"
+        assert path_b == Path("/path/b") / "config.yaml"
 
 
     def test_flush_interval_ms_default(self) -> None:

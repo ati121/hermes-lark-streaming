@@ -554,6 +554,27 @@ def _safe_action_value_repr(action_value: Any) -> str:
     except Exception:
         return repr(action_value)[:200]
 
+def _coerce_action_bool(value: Any, *, default: bool) -> bool:
+    """卡片回调里的布尔值。
+
+    飞书回传 ``action.value`` 时不保证保留 JSON 类型，可能把 ``false`` 变成
+    字符串 ``"false"``；直接 ``bool("false")`` 会得到 True，按钮就只能展开不能收起。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+        if lowered in ("false", "0", "no", "off", ""):
+            return False
+    return default
+
+
 def _wrap_handle_card_action_event(original_method: Callable) -> Callable:
     """Wrap ``FeishuAdapter._handle_card_action_event`` — the REAL interception point."""
 
@@ -562,6 +583,25 @@ def _wrap_handle_card_action_event(original_method: Callable) -> Callable:
         action = getattr(event, "action", None)
         action_value = getattr(action, "value", {}) or {}
 
+        # 老大 2026-09-20: 思考块「展开全部 / 收起」按钮
+        _hls_action = action_value.get("hls_action") if isinstance(action_value, dict) else None
+        if _hls_action == "reasoning_toggle":
+            try:
+                from ..controller import get_controller
+                _ctrl = get_controller()
+                _ctx = getattr(event, "context", None)
+                _mid = ""
+                for _attr in ("open_message_id", "message_id"):
+                    _v = getattr(_ctx, _attr, None) if _ctx is not None else None
+                    if isinstance(_v, str) and _v:
+                        _mid = _v
+                        break
+                _expand = _coerce_action_bool(action_value.get("expanded"), default=True)
+                await _ctrl.on_reasoning_toggle(card_msg_id=_mid, expanded=_expand)
+                _logger.info("HLS: reasoning toggle action card_msg=%s expanded=%s", (_mid or "?")[:12], _expand)
+            except Exception:
+                _logger.warning("HLS: reasoning toggle action failed", exc_info=True)
+            return  # suppress /card synthetic command generation
         clarify_action = (
             action_value.get("hermes_clarify_action")
             if isinstance(action_value, dict) else None

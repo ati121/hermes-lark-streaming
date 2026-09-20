@@ -3167,3 +3167,174 @@ class TestCredentialScope:
         with ctrl._credential_scope():
             assert state["scope"] is not None
         assert state["scope"] is None
+
+
+class TestReasoningToggle:
+    """思考块展开/收起按钮 — 只精确匹配目标卡片，不波及其他会话."""
+
+    def _two_sessions(self, ctrl: StreamCardController) -> tuple:
+        a = _make_session("msg_toggle_a", linear=True)
+        a.card_msg_id = "msg_toggle_a"
+        b = _make_session("msg_toggle_b", linear=True)
+        b.card_msg_id = "msg_toggle_b"
+        ctrl._sessions["msg_toggle_a"] = a
+        ctrl._sessions["msg_toggle_b"] = b
+        return a, b
+
+    @pytest.mark.asyncio
+    async def test_toggle_matches_only_target_session(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        a, b = self._two_sessions(ctrl)
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_toggle_b", expanded=True)
+
+        assert a.unified_state.reasoning_expanded is False
+        assert b.unified_state.reasoning_expanded is True
+
+    @pytest.mark.asyncio
+    async def test_toggle_unknown_card_touches_no_session(self) -> None:
+        """旧卡的按钮点一下，不能把活跃会话的思考块一起收起/展开。"""
+        ctrl = _setup_ctrl(linear=True)
+        a, b = self._two_sessions(ctrl)
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_gone", expanded=False)
+
+        assert a.unified_state.reasoning_expanded is False
+        assert b.unified_state.reasoning_expanded is False
+
+    @pytest.mark.asyncio
+    async def test_toggle_sealed_card_uses_its_snapshot(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        snap = {"full": "思考内容", "card_msg_id": "msg_sealed", "seq": 3}
+        ctrl._rsn_map()["msg_sealed"] = snap
+        ctrl._apply_reasoning_snapshot = AsyncMock(return_value=True)
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_sealed", expanded=True)
+
+        ctrl._apply_reasoning_snapshot.assert_awaited_once_with(snap, True)
+        assert snap["expanded"] is True
+
+    @pytest.mark.asyncio
+    async def test_toggle_unknown_card_with_snapshots_does_not_guess(self) -> None:
+        """多张快照时无法定位目标 — 宁可不动，也不能猜一张替换。"""
+        ctrl = _setup_ctrl(linear=True)
+        ctrl._rsn_map()["msg_s1"] = {"full": "a", "card_msg_id": "msg_s1"}
+        ctrl._rsn_map()["msg_s2"] = {"full": "b", "card_msg_id": "msg_s2"}
+        ctrl._apply_reasoning_snapshot = AsyncMock(return_value=True)
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_gone", expanded=True)
+
+        ctrl._apply_reasoning_snapshot.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_toggle_evicted_snapshot_replies_expired_notice(self) -> None:
+        """快照被挤掉后按钮不能"点了没反应"：回一条说明。"""
+        ctrl = _setup_ctrl(linear=True)
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_evicted", expanded=True)
+
+        ctrl._client.reply_text.assert_awaited_once()
+        assert ctrl._client.reply_text.await_args.args[0] == "msg_evicted"
+
+    @pytest.mark.asyncio
+    async def test_toggle_during_completing_only_flips_flag(self) -> None:
+        """封口 PATCH 进行中再点按钮，不能再发一张非 final 卡把封口卡盖掉。"""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_toggle_completing", linear=True)
+        session.card_msg_id = "msg_toggle_completing"
+        session.interactive_mode = True
+        session.state = COMPLETING
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_toggle_completing", expanded=True)
+
+        assert session.unified_state.reasoning_expanded is True
+        ctrl._client.update_card.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_toggle_live_streaming_session_patches_card(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        ctrl._cfg._reload_cached = lambda: {"display": {"platforms": {"feishu": {"show_reasoning": True}}}}  # type: ignore[assignment]
+        session = _make_session("msg_toggle_live", linear=True)
+        session.card_msg_id = "msg_toggle_live"
+        session.interactive_mode = True
+        session.state = STREAMING
+        session.unified_state.on_reasoning_delta("想一想")
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl.on_reasoning_toggle(card_msg_id="msg_toggle_live", expanded=True)
+
+        ctrl._client.update_card.assert_awaited_once()
+        card = ctrl._client.update_card.await_args.args[1]
+        body = card["body"]["elements"][1]
+        assert body["element_id"] == "rsn_body"
+        assert "想一想" in body["text"]["content"]
+
+    @pytest.mark.asyncio
+    async def test_seal_collapses_reasoning_before_building_card(self) -> None:
+        """正文出完自动收回：封口卡只留按钮，不带展开的思考正文。"""
+        ctrl = _setup_ctrl(linear=True)
+        ctrl._cfg._reload_cached = lambda: {"display": {"platforms": {"feishu": {"show_reasoning": True}}}}  # type: ignore[assignment]
+        session = _make_session("msg_seal_collapse", linear=True)
+        session.card_msg_id = "msg_seal_collapse"
+        session.interactive_mode = True
+        session.state = STREAMING
+        session.unified_state.on_reasoning_delta("先想一下")
+        session.unified_state.on_answer_delta("答案")
+        session.unified_state.reasoning_expanded = True
+        ctrl._sessions[session.message_id] = session
+
+        assert await ctrl._do_interactive_linear_complete(session) is True
+
+        card = ctrl._client.update_card.await_args.args[1]
+        ids = [e.get("element_id") for e in card["body"]["elements"]]
+        assert "rsn_toggle" in ids
+        assert "rsn_body" not in ids
+
+    @pytest.mark.asyncio
+    async def test_apply_snapshot_replaces_whole_card_for_message_card(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        old_card = {"body": {"elements": [
+            {"tag": "button", "element_id": "rsn_toggle"},
+            {"tag": "div", "element_id": "rsn_body"},
+            {"tag": "markdown", "element_id": "answer", "content": "正文"},
+        ]}}
+        snap = {"full": "完整思考", "card_msg_id": "msg_snap", "card_id": "im:msg_snap", "card": old_card}
+
+        assert await ctrl._apply_reasoning_snapshot(snap, True) is True
+
+        msg_id, new_card = ctrl._client.update_card.await_args.args
+        assert msg_id == "msg_snap"
+        els = new_card["body"]["elements"]
+        assert [e.get("element_id") for e in els] == ["rsn_toggle", "rsn_body", "answer"]
+        assert els[1]["text"]["content"] == "完整思考"
+        # 原卡不能被原地改掉，收起时还要再用
+        assert old_card["body"]["elements"][1]["element_id"] == "rsn_body"
+        assert "text" not in old_card["body"]["elements"][1]
+        assert snap["card"] is new_card
+
+        assert await ctrl._apply_reasoning_snapshot(snap, False) is True
+        collapsed = ctrl._client.update_card.await_args.args[1]
+        assert [e.get("element_id") for e in collapsed["body"]["elements"]] == ["rsn_toggle", "answer"]
+
+    @pytest.mark.asyncio
+    async def test_apply_snapshot_without_card_and_message_card_id_returns_false(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        snap = {"full": "思考", "card_msg_id": "msg_x", "card_id": "im:msg_x"}
+        assert await ctrl._apply_reasoning_snapshot(snap, True) is False
+        ctrl._client.update_card.assert_not_awaited()
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+
+    def test_snapshot_map_is_bounded_by_one_limit(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        for i in range(ctrl._REASONING_SNAPSHOT_CARDS + 20):
+            session = _make_session(f"msg_bound_{i}", linear=True)
+            session.card_msg_id = f"msg_bound_{i}"
+            session.card_id = f"im:msg_bound_{i}"
+            ctrl._remember_reasoning_snapshot(session, "思考", {})
+            ctrl._remember_card_snapshot(session, {"body": {"elements": []}})
+        m = ctrl._rsn_map()
+        assert len(m) <= ctrl._REASONING_SNAPSHOT_CARDS * 2
+        # 最新的那张一定还在，最老的已经被挤掉
+        assert f"msg_bound_{ctrl._REASONING_SNAPSHOT_CARDS + 19}" in m
+        assert "msg_bound_0" not in m

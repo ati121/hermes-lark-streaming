@@ -357,11 +357,18 @@ def _maybe_wrap_callbacks(agent) -> None:
                 # as an upstream-activity signal rather than letting Gateway
                 # render a separate progress message.
                 if event_type == "_thinking" or tool_name == "_thinking":
-                    reasoning_text = (
+                    _raw = (
                         (tool_name or preview or "")
                         if event_type == "_thinking"
                         else (preview or "")
                     )
+                    # 2026-09-20: Hermes 的 reasoning.available 里塞的是「响应正文前 500 字」
+                    # （本模型没有原生 CoT），直接当思考会让面板显示答案正文。只认真正的思考标签段。
+                    try:
+                        from ..state.text import split_reasoning_text as _split_rsn
+                        reasoning_text = (_split_rsn(_raw or "").get("reasoning_text") or "")
+                    except Exception:
+                        reasoning_text = ""
                     if reasoning_text:
                         if on_reasoning_delta(message_id=_eid, text=reasoning_text):
                             return

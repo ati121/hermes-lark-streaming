@@ -1382,3 +1382,88 @@ class TestEnforceCardElementLimit:
         }
         result = _enforce_card_element_limit(card)
         assert result is card  # Unchanged
+
+
+class TestPinnedReasoning:
+    """思考块（按钮 + 预览/展开正文）的纯函数部分."""
+
+    def test_preview_short_text_returned_as_is(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import pinned_reasoning_preview_text
+        assert pinned_reasoning_preview_text("短思考") == "短思考"
+
+    def test_preview_keeps_tail_within_cells(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import (
+            REASONING_PREVIEW_CELLS,
+            _display_cells,
+            pinned_reasoning_preview_text,
+        )
+        text = "".join(f"第{i}行思考内容\n" for i in range(60)).strip()
+        preview = pinned_reasoning_preview_text(text)
+        assert preview.startswith("…")
+        assert text.endswith(preview[1:])
+        assert _display_cells(preview[1:]) <= REASONING_PREVIEW_CELLS
+        # 从整行开始，不从半行切入
+        assert preview[1:].startswith("第")
+
+    def test_preview_counts_cjk_as_two_cells(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import pinned_reasoning_preview_text
+        ascii_text = "a" * 200
+        cjk_text = "思" * 200
+        assert pinned_reasoning_preview_text(ascii_text) == ascii_text
+        assert len(pinned_reasoning_preview_text(cjk_text)) < 200
+
+    def test_expanded_text_truncates_at_limit(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import (
+            REASONING_EXPANDED_LIMIT,
+            pinned_reasoning_expanded_text,
+        )
+        assert REASONING_EXPANDED_LIMIT == 5000
+        text = "思" * (REASONING_EXPANDED_LIMIT + 10)
+        out = pinned_reasoning_expanded_text(text)
+        assert out.startswith("思" * REASONING_EXPANDED_LIMIT)
+        assert out.endswith(f"(已截断，共 {REASONING_EXPANDED_LIMIT + 10} 字)")
+        assert pinned_reasoning_expanded_text("短") == "短"
+
+    def test_strip_reasoning_region_removes_only_leading_block(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import strip_reasoning_region
+        els = [
+            {"tag": "button", "element_id": "rsn_toggle"},
+            {"tag": "div", "element_id": "rsn_body"},
+            {"tag": "markdown", "element_id": "answer"},
+            {"tag": "div", "element_id": "rsn_body"},  # 不在头部，不动
+        ]
+        out = strip_reasoning_region(els)
+        assert [e["element_id"] for e in out] == ["answer", "rsn_body"]
+        assert out is not els
+
+    def test_strip_reasoning_region_sees_nested_ids(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import strip_reasoning_region
+        els = [
+            {"tag": "column_set", "element_id": "rsn_row", "columns": [
+                {"tag": "column", "elements": [{"tag": "button", "element_id": "rsn_toggle"}]},
+            ]},
+            {"tag": "column_set", "columns": [
+                {"tag": "column", "elements": [{"tag": "div", "element_id": "rsn_body"}]},
+            ]},
+            {"tag": "markdown", "element_id": "answer"},
+        ]
+        assert [e.get("element_id") for e in strip_reasoning_region(els)] == ["answer"]
+
+    def test_strip_reasoning_region_no_block_is_identity_copy(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import strip_reasoning_region
+        els = [{"tag": "markdown", "element_id": "answer"}]
+        assert strip_reasoning_region(els) == els
+
+    def test_build_elements_states(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import (
+            build_pinned_reasoning_elements_from_text,
+        )
+        assert build_pinned_reasoning_elements_from_text("") == []
+        streaming = build_pinned_reasoning_elements_from_text("想", preview=True)
+        assert [e["element_id"] for e in streaming] == ["rsn_toggle", "rsn_body"]
+        assert streaming[0]["behaviors"][0]["value"] == {"hls_action": "reasoning_toggle", "expanded": True}
+        sealed = build_pinned_reasoning_elements_from_text("想", preview=False)
+        assert [e["element_id"] for e in sealed] == ["rsn_toggle"]
+        expanded = build_pinned_reasoning_elements_from_text("想", expanded=True, preview=False)
+        assert [e["element_id"] for e in expanded] == ["rsn_toggle", "rsn_body"]
+        assert expanded[0]["behaviors"][0]["value"]["expanded"] is False

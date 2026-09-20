@@ -481,12 +481,31 @@ class TestUpstreamActivityCallbacks:
 
             _maybe_wrap_callbacks(agent)
             agent.tool_progress_callback(
-                "reasoning.available", "_thinking", "checking the request", None,
+                "reasoning.available", "_thinking", "<think>checking the request</think>", None,
             )
 
             mock_ctrl.on_reasoning.assert_called_once_with(
                 message_id="test_eid_123456789",
                 text="checking the request",
+            )
+            assert agent.tool_progress_calls == []
+
+    def test_reasoning_available_body_text_is_not_thinking(self):
+        """Hermes 塞进 reasoning.available 的「响应正文前 500 字」不能当思考显示。"""
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+
+            _maybe_wrap_callbacks(agent)
+            agent.tool_progress_callback(
+                "reasoning.available", "_thinking", "checking the request", None,
+            )
+
+            mock_ctrl.on_reasoning.assert_not_called()
+            mock_ctrl.on_model_activity.assert_called_once_with(
+                message_id="test_eid_123456789",
+                source="reasoning.available",
             )
             assert agent.tool_progress_calls == []
 

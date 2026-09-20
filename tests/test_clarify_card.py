@@ -1369,3 +1369,47 @@ class TestClarifyQuestionEscaping:
         assert "\\{" in content
         unescaped = content.replace('\\{', '').replace('\\}', '')
         assert '{' not in unescaped
+
+
+class TestReasoningToggleAction:
+    """思考块按钮回调：路由到 controller，抑制原生 /card；expanded 宽松解析。"""
+
+    @staticmethod
+    def _data(value: dict, msg_id: str = "om_toggle") -> MagicMock:
+        action = MagicMock()
+        action.value = value
+        action.tag = "button"
+        event = MagicMock()
+        event.action = action
+        event.context.open_message_id = msg_id
+        data = MagicMock()
+        data.event = event
+        return data
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (True, True), (False, False),
+            ("true", True), ("false", False), ("False", False),
+            ("1", True), ("0", False), (1, True), (0, False),
+            (None, True), ("garbage", True),
+        ],
+    )
+    def test_coerce_action_bool(self, raw, expected) -> None:
+        from hermes_lark_streaming.patching.adapter import _coerce_action_bool
+        assert _coerce_action_bool(raw, default=True) is expected
+
+    @pytest.mark.asyncio
+    async def test_toggle_routes_to_controller_and_suppresses_original(self) -> None:
+        from hermes_lark_streaming.patching import _wrap_handle_card_action_event
+
+        original = MagicMock(return_value=None)
+        wrapped = _wrap_handle_card_action_event(original)
+        ctrl = MagicMock()
+        ctrl.on_reasoning_toggle = AsyncMock()
+
+        with patch("hermes_lark_streaming.controller.get_controller", return_value=ctrl):
+            await wrapped(MagicMock(), self._data({"hls_action": "reasoning_toggle", "expanded": "false"}))
+
+        ctrl.on_reasoning_toggle.assert_awaited_once_with(card_msg_id="om_toggle", expanded=False)
+        original.assert_not_called()

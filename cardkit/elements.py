@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -354,6 +355,188 @@ def _truncate_reasoning(text: str) -> str:
         return text
     suffix = "\n\n... (已截断，共 {} 字)".format(len(text))
     return text[:_REASONING_DISPLAY_LIMIT - len(suffix)] + suffix
+
+# ── 思考过程固定面板顶部（老大 2026-09-20 定制）─────────────────────────
+# 只有一个按钮：🫧 思考过程（标题做进按钮里）
+_PINNED_REASONING_TITLE = "🫧 思考过程"
+# 生成中自动展示的最新思考：按显示宽度算 2 行（中文/全角算 2，英文/数字算 1）
+# 桌面飞书一行约 105 格、手机窄一些 → 200 格 ≈ 桌面 2 行
+REASONING_PREVIEW_CELLS = 200
+# 点按钮展开后的上限：超过就截断并标注总字数。
+# 飞书消息卡片整卡有约 30KB 的体积上限，1 万个中文字 JSON 序列化后就已经
+# 顶到这个数，再叠上正文和工具面板必然被拒（表现为按钮点了没反应）。
+# 5000 先用着，再撞限再往下调或改成按字节预算截。
+REASONING_EXPANDED_LIMIT = 5000
+# 卡片头部那块思考区域的 element_id（整卡替换时要先摘掉）
+_REASONING_REGION_IDS = ("rsn_row", "rsn_title", "rsn_toggle", "rsn_more", "rsn_body")
+
+
+def _collapse_blank_lines(text: str) -> str:
+    """压掉空行（老大 2026-09-20：思考不要空行，太占位置）。"""
+    if "\n" not in text:
+        return text.strip()
+    text = re.sub(r"[ \t]*\r?\n[ \t]*(?:\r?\n[ \t]*)+", "\n", text)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def pinned_reasoning_full_text(reasoning_rounds: list, current_reasoning_text: str = "") -> str:
+    parts = [getattr(r, "text", "").strip() for r in reasoning_rounds if getattr(r, "text", "").strip()]
+    if current_reasoning_text and current_reasoning_text.strip():
+        parts.append(current_reasoning_text.strip())
+    return _collapse_blank_lines("\n".join(parts))
+
+
+def _char_cells(ch: str) -> int:
+    """显示宽度：全角/宽字符算 2，其他算 1。"""
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _display_cells(text: str, cap: int | None = None) -> int:
+    """显示宽度和。给了 cap 就在超过 cap 时提前停（只用于"是否超宽"判断）。"""
+    if text.isascii():
+        return len(text)
+    total = 0
+    for ch in text:
+        total += _char_cells(ch)
+        if cap is not None and total > cap:
+            return total
+    return total
+
+
+def _align_preview_start(text: str, start: int) -> int:
+    """别从半行/半个单词开始。"""
+    limit = min(len(text), start + 24)
+    nl_pos = text.find("\n", start, limit)
+    if nl_pos != -1:
+        return nl_pos + 1
+    if start > 0 and text[start - 1:start + 1].isascii():
+        sp = text.find(" ", start, limit)
+        if sp != -1:
+            return sp + 1
+    return start
+
+
+def pinned_reasoning_preview_text(full: str, cells: int = REASONING_PREVIEW_CELLS) -> str:
+    """生成中自动显示：最新思考的末尾约 2 行（按显示宽度算，尽量填满）。"""
+    text = (full or "").strip()
+    if not text:
+        return ""
+    if _display_cells(text, cap=cells) <= cells:
+        return text
+    total = 0
+    start = 0
+    for i in range(len(text) - 1, -1, -1):
+        total += _char_cells(text[i])
+        if total > cells:
+            start = i + 1
+            break
+    start = _align_preview_start(text, start)
+    return "…" + text[start:].strip()
+
+def pinned_reasoning_expanded_text(full: str) -> str:
+    """点按钮后显示：全部思考过程，超过 REASONING_EXPANDED_LIMIT 字截断并标注。"""
+    text = (full or "").strip()
+    if len(text) <= REASONING_EXPANDED_LIMIT:
+        return text
+    head = text[:REASONING_EXPANDED_LIMIT]
+    return head + f"\n\n... (已截断，共 {len(text)} 字)"
+
+
+def pinned_reasoning_title_element(expanded: bool) -> dict:
+    """唯一的那个按钮：点它展开/收起。"""
+    return {
+        "tag": "button",
+        "element_id": "rsn_toggle",
+        "text": {"tag": "plain_text", "content": _PINNED_REASONING_TITLE},
+        "type": "default",
+        "size": "small",
+        "behaviors": [{"type": "callback", "value": {
+            "hls_action": "reasoning_toggle",
+            "expanded": (not expanded),
+        }}],
+    }
+
+
+def _pinned_reasoning_body_element(content: str, size: str) -> dict:
+    return {
+        "tag": "div",
+        "element_id": "rsn_body",
+        "margin": "0px",
+        "text": {"tag": "lark_md", "content": content, "text_size": size},
+    }
+
+
+def _element_ids(el) -> set:
+    ids: set = set()
+    if not isinstance(el, dict):
+        return ids
+    eid = el.get("element_id")
+    if isinstance(eid, str):
+        ids.add(eid)
+    for col in el.get("columns") or []:
+        ids |= _element_ids(col)
+    for sub in el.get("elements") or []:
+        ids |= _element_ids(sub)
+    return ids
+
+
+def strip_reasoning_region(elements: list) -> list:
+    """摘掉卡片头部那块思考区域（整卡替换时用，结构变了也能换）。"""
+    i = 0
+    while i < len(elements) and (_element_ids(elements[i]) & set(_REASONING_REGION_IDS)):
+        i += 1
+    return list(elements[i:])
+
+
+def build_pinned_reasoning_elements_from_text(
+    full: str,
+    *,
+    text_sizes: Mapping[str, Any] | None = None,
+    expanded: bool = False,
+    preview: bool = True,
+) -> list[dict]:
+    """思考块（老大 2026-09-20 定的行为）：
+    - 生成中：按钮 + 最新 2 行思考（自动刷新）
+    - 正文输出完：只留按钮（自动隐藏）
+    - 点按钮：显示全部思考过程（1 万字截断），再点收回
+    """
+    full = (full or "").strip()
+    if not full:
+        return []
+    size = _role_text_size(text_sizes, "reasoning", default="notation")
+    out = [pinned_reasoning_title_element(bool(expanded))]
+    if expanded:
+        out.append(_pinned_reasoning_body_element(pinned_reasoning_expanded_text(full), size))
+    elif preview:
+        out.append(_pinned_reasoning_body_element(pinned_reasoning_preview_text(full), size))
+    return out
+
+
+def build_pinned_reasoning_elements(
+    reasoning_rounds: list,
+    current_reasoning_text: str = "",
+    *,
+    text_sizes: Mapping[str, Any] | None = None,
+    expanded: bool = False,
+    preview: bool = True,
+) -> list[dict]:
+    return build_pinned_reasoning_elements_from_text(
+        pinned_reasoning_full_text(reasoning_rounds, current_reasoning_text),
+        text_sizes=text_sizes,
+        expanded=expanded,
+        preview=preview,
+    )
+
+
+def build_pinned_reasoning_refresh(full: str, *, expanded: bool, text_sizes=None) -> list[dict]:
+    """CardKit 实体卡兜底：只做元素级字段刷新。"""
+    size = _role_text_size(text_sizes, "reasoning", default="notation")
+    out = [pinned_reasoning_title_element(bool(expanded))]
+    if expanded:
+        out.append(_pinned_reasoning_body_element(pinned_reasoning_expanded_text(full), size))
+    return out
+
 
 def build_panel_children(
     *,

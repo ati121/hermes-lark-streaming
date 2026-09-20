@@ -22,7 +22,7 @@ IDLE = CardPhase.IDLE
 
 from ..flush import FlushController
 from .linear import UnifiedLinearState
-from .text import TextState
+from .text import ReasoningStreamSplitter, TextState
 from .tooluse import ToolUseTracker
 from ..feishu import UnavailableGuard
 
@@ -52,6 +52,7 @@ class CardSession:
         "_memory_prefetch_requests",
         "_pending_flush",
         "_response_phase",
+        "_reasoning_splitter",
         "_speed_call_start",
         "_streaming_closed",
         "_streaming_closed_logged",
@@ -103,6 +104,8 @@ class CardSession:
         self.card_trace_id: str = (message_id or "??????")[-6:]
         self.text = TextState()
         self.tool_use = ToolUseTracker()
+        # 2026-09-20: on_answer 的跨 chunk 思考标签拆分状态（惰性创建）
+        self._reasoning_splitter: ReasoningStreamSplitter | None = None
         self._loop = loop
         self.flush = FlushController(loop=loop)
         self.footer: dict[str, Any] = {}

@@ -164,6 +164,26 @@ class UnifiedControllerMixin:
         state = session.unified_state
         elements: list[dict[str, Any]] = []
 
+        # 老大 2026-09-20: 思考过程常显在折叠面板外面，几行预览 + 展开按钮
+        if state is not None and self._cfg.show_reasoning:
+            try:
+                from ..cardkit.elements import (
+                    build_pinned_reasoning_elements_from_text,
+                    pinned_reasoning_full_text,
+                )
+                _cur = "" if final else state.current_reasoning_text
+                _rsn_full = pinned_reasoning_full_text(state.reasoning_rounds, _cur)
+                _rsn_els = build_pinned_reasoning_elements_from_text(
+                    _rsn_full,
+                    text_sizes=session.text_sizes,
+                    expanded=bool(getattr(state, "reasoning_expanded", False)),
+                    preview=not (final or bool(getattr(session, "is_terminal_phase", False))),
+                )
+                if _rsn_els:
+                    elements.extend(_rsn_els)
+                    self._remember_reasoning_snapshot(session, _rsn_full, session.text_sizes)
+            except Exception:
+                _logger.debug("pinned reasoning elements failed", exc_info=True)
         if state is not None and state.panel_visible:
             elements.append(build_unified_panel(
                 reasoning_rounds=state.reasoning_rounds,
@@ -221,11 +241,17 @@ class UnifiedControllerMixin:
             ))
 
         summary = _build_seal_summary(state) if final else "Processing..."
-        return build_interactive_card_v2(
+        _card = build_interactive_card_v2(
             elements=elements,
             summary=summary,
             text_sizes=session.text_sizes,
         )
+        # 老大 2026-09-20: 留整卡快照 —— 会话回收后按钮还要能重渲染这张卡
+        try:
+            self._remember_card_snapshot(session, _card)
+        except Exception:
+            _logger.debug("remember card snapshot failed", exc_info=True)
+        return _card
 
     async def _do_create_linear_card(self, session: CardSession) -> None:
         """Create the initial placeholder card — loading hint only, no panel."""
@@ -1702,6 +1728,10 @@ class UnifiedControllerMixin:
             return False
 
         state.finalize()
+        # 老大 2026-09-20：正文出完后思考过程自动收回，只留按钮。必须在构建
+        # 封口卡之前置回，封口卡就是按这个标志渲染的；放在 enter_terminal 里
+        # 不管用 —— 正常完成路径不走 enter_terminal，而且那时卡已经发出去了。
+        state.reasoning_expanded = False
         footer_data = session.footer
         if state.bg_review_messages:
             footer_data = {**(footer_data or {}), "bg_review_messages": list(state.bg_review_messages)}

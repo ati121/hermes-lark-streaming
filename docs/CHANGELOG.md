@@ -4,6 +4,71 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.30 (2026-09-20, personal fork)
+
+### Added — a pinned reasoning block with an expand/collapse button
+
+- The interactive card now shows the model's reasoning outside the collapsed
+  panel: while streaming, a `🫧 思考过程` button plus the latest two lines of
+  thought; once the answer is sealed, only the button. Tapping it renders the
+  full reasoning (capped at `REASONING_EXPANDED_LIMIT`, 5000 characters, to
+  stay under the ~30KB message-card ceiling); tapping again collapses it.
+- The button keeps working after the session is released: the controller
+  keeps a bounded snapshot of the sealed card (`_REASONING_SNAPSHOT_CARDS`,
+  60 cards) and re-renders it through the same whole-card PATCH the seal
+  uses. When a snapshot has been evicted, the tap replies with a short note
+  instead of doing nothing.
+- Card-action callbacks carry `hls_action: reasoning_toggle`; the adapter
+  wrapper routes those to the controller and suppresses the `/card` synthetic
+  command. The `expanded` flag is parsed leniently because Feishu may return
+  it as the string `"false"`.
+
+### Changed — reasoning found inside the answer stream is no longer dropped
+
+- `<think>` / `<thinking>` / `Reasoning:` segments in `stream_delta` are
+  split out per session by `ReasoningStreamSplitter` and fed to the reasoning
+  panel; tag pairs split across two chunks are handled by holding the
+  open/close state and the partial tag tail until the next chunk.
+- `reasoning.available` events from Hermes carry the first 500 characters of
+  the answer body for models without native chain-of-thought; only real
+  reasoning tag segments are shown as thinking now.
+
+### Fixed
+
+- `strip_reasoning_tags` never removed an unclosed `<think>` tail: the stray
+  open tag was deleted first, so the "drop everything after an unclosed tag"
+  step could never match, and the reasoning text leaked into the answer at
+  completion reconciliation.
+- Tapping the reasoning button while the seal PATCH was in flight could
+  overwrite the sealed card with a non-final "Processing..." card. The toggle
+  now only flips the flag once the session is `COMPLETING` or terminal.
+- The auto-collapse at completion was wired into `enter_terminal`, which the
+  normal completion path never calls; the reset now happens right before the
+  seal card is built.
+- `on_reasoning_toggle` iterated `_sessions` without the lock while worker
+  threads mutate it; it now uses the locked snapshot helper.
+- Two `tests/test_config.py` cases failed on Windows (cleared `USERPROFILE`
+  broke `Path.home()`, and a forward-slash string assertion).
+- `.pi/` planning scratch is now ignored like the other local agent dirs.
+
+### Docs
+
+- `SKILL.md` was three months stale: the Hook index now follows the injection
+  numbering in `patching/hooks.py` (it had disagreed with the architecture
+  diagram in the same file), the test list covers every file under `tests/`,
+  the "3–4 elements" claim is corrected, and multiplex isolation, memory
+  prefetch, the speed field and the reasoning block are summarised as design
+  decisions 4.18–4.21.
+- `AGENT_GUIDE.md` documents the reasoning block, splits the speed-field
+  paragraph into a list, finishes a sentence that had been cut off, drops
+  the hand-maintained "last updated" line, and strips deployment-specific
+  paths and boot timestamps from the `.install-*` section (the CHANGELOG
+  entry for v1.6.29 is trimmed the same way).
+- `plugin.yaml` now declares `on_memory_prefetch_updated`, matching the code
+  and the guide. `$HERMES_HOME` replaces the hard-coded `~/.hermes` in
+  `SKILL.md` and `ISSUES_TEMPLATE.md`. `README.zh-CN.md` was a byte-for-byte
+  copy of the Chinese-only `README.md` and is removed.
+
 ## v1.6.29 (2026-09-19, personal fork)
 
 ### Fixed — Chinese cards showing English tool rows, and five padlocks that all looked alike
@@ -45,48 +110,21 @@ filesystem paths.
   `TestToolStepTitleRendersEmoji` (emoji leads the text, sits outside the bold
   run, and no `standard_icon` slot survives).
 
-### Fixed — the boot script's `hermes plugins install` could leave a second copy that outranked the real one
+### Fixed — an interrupted `hermes plugins install` could leave a second copy that outranked the real one
 
-- `hermes plugins install` clones into
-  `tempfile.TemporaryDirectory(prefix=".install-", dir=plugins_dir)`, which
-  `__exit__` removes — but a `SIGTERM` kills the process before `__exit__` runs.
-  This deployment calls the command from
-  `hermes-plugin-autoupdate.sh`, whose guard was
-  `run_with_timeout 120 … hermes plugins install --enable "$PLUGIN_URL"`: no
-  `--force`, and stdin still attached. The installer's security scan flags a
-  HIGH `exfiltration` finding in this repo's own `docs/AGENT_GUIDE.md` (the
-  multiplex credential-scope paragraph), a community source with a CAUTION
-  verdict is `BLOCKED`, and the installer then waits on
-  `Install anyway? [y/N]`. With no TTY the boot script hung the full 120s until
-  `timeout` sent SIGTERM, leaving a complete clone behind. The network was
-  fine — the blocker was the confirmation prompt, not a dead proxy.
-- Two such directories survived the 04:07 and 04:09 boots (default home and the
-  image profile). Plugin discovery walks `sorted(path.iterdir())`
-  (`hermes_cli/plugins_discovery.py`) and `.` sorts before any letter, so each
-  leftover loaded as a *second* plugin ahead of the real directory — visible in
-  the log as `capability_check plugin=.install-<id>/plugin`.
-- The failure would be silent: the process-wide dedup markers (class attributes
-  plus `_hls_wrapped` on each wrapped function) mean whichever copy installs the
-  wrapper first wins, and a later copy hitting the class marker takes a silent
-  early-return (`patching/__init__.py`) that logs no `adopted` line. Both copies
-  therefore print `GatewayRunner=✓`, so the log cannot tell you which one is
-  live — and that wrapper's `from ..controller import get_controller` would
-  resolve to its own older `cardkit` / `state`.
-- Ownership is *unproven* here, and it is worth being precise: in the 05:15 boot
-  the v1.6.28 copy's `apply_patches()` started at 31.542 and v1.6.29's at 32.931,
-  with `GatewayRunner patched methods` appearing once at 33.352 (both copies had
-  fallen back to the deferred poll because `gateway.run` was not resolvable yet).
-  Nothing records which poll won. No real message was sent before the fix, so
-  there is no way to retroactively prove which copy rendered a card. What is
-  certain: both leftovers sat at the previous version, and they are gone now.
-- The guard now runs `hermes plugins install --force --enable "$PLUGIN_URL"
-  </dev/null` with a 120→300s timeout: `--force` accepts the caution verdict
-  instead of prompting, and the closed stdin makes any future prompt fail fast
-  rather than hang. Neither the 05:15 nor the 05:20 boot produced a new
-  `.install-*`, so the fix holds.
-- Documents the check and the quarantine step in `AGENT_GUIDE.md`, and adds a
-  troubleshooting row: after a restart, `capability_check plugin=` must never
-  list a `.install-` entry, and the version-count should equal the profile count.
+- `hermes plugins install` clones into a `.install-*` temp directory under
+  `plugins/` and relies on `__exit__` to remove it; a SIGTERM (for example an
+  automation script's `timeout`) skips that cleanup. The installer's security
+  scan flags a HIGH `exfiltration` finding in this repo's own `AGENT_GUIDE.md`
+  and then blocks on `Install anyway? [y/N]`, so a script without a TTY and
+  without `--force` hangs until it is killed.
+- Plugin discovery walks `sorted(path.iterdir())` and `.` sorts before any
+  letter, so the leftover loads as a *second* plugin ahead of the real
+  directory. The process-wide dedup markers make whichever copy installs first
+  win, silently; both copies still print `GatewayRunner=✓`.
+- Fix on the caller side: `hermes plugins install --force --enable "$URL"
+  </dev/null` with a longer timeout. Detection and quarantine steps are in
+  `AGENT_GUIDE.md` under the multiplex section, plus a troubleshooting row.
 
 ## v1.6.28 (2026-09-19, personal fork)
 
