@@ -322,9 +322,23 @@ class TestOnToolUpdated:
             )
 
         ctrl.on_tool_update.assert_called_once_with(
-            message_id="m1", tool_name="read", status="started", detail="file.py"
+            message_id="m1", tool_name="read", status="started", detail="file.py",
+            tool_args=None,
         )
         assert result is True
+
+    def test_forwards_tool_args(self) -> None:
+        """Hermes 的完整参数字典要原样传到控制器（预览会被截断，脚本名/URI 只能从这里拿）."""
+        ctrl = _make_ctrl(enabled=True)
+
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            on_tool_updated(
+                message_id="m1", tool_name="terminal", status="started",
+                detail="python3 /opt/data/.hermes/profiles/im...",
+                tool_args={"command": "python3 /opt/data/x/zimage_gen.py 'p'"},
+            )
+
+        assert ctrl.on_tool_update.call_args.kwargs["tool_args"] == {"command": "python3 /opt/data/x/zimage_gen.py 'p'"}
 
     def test_returns_false_when_disabled(self) -> None:
         ctrl = _make_ctrl(enabled=False)

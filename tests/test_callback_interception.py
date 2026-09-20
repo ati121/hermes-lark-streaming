@@ -763,3 +763,32 @@ class TestFullPipelineSimulation:
             # 原始回调应被调(Hermes 需要 on_segment_break)
             assert len(agent.interim_calls) == 1
             assert agent.interim_calls[0]["kwargs"].get("already_streamed") is True
+
+
+class TestToolArgsForwarding:
+    """tool.started 的第四个位置参数是 Hermes 的 display_args，要传给 on_tool_updated."""
+
+    def test_tool_started_forwards_args_dict(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+            _maybe_wrap_callbacks(agent)
+            args = {"command": "python3 /opt/data/x/zimage_gen.py 'p'"}
+
+            agent.tool_progress_callback("tool.started", "terminal", "python3 /opt/data/x/zim...", args)
+
+            kwargs = mock_ctrl.on_tool_update.call_args.kwargs
+            assert kwargs["tool_args"] == args
+            assert kwargs["detail"] == "python3 /opt/data/x/zim..."
+
+    def test_tool_completed_without_args_passes_none(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+            _maybe_wrap_callbacks(agent)
+
+            agent.tool_progress_callback("tool.completed", "terminal", None, None, duration=1.0, is_error=False)
+
+            assert mock_ctrl.on_tool_update.call_args.kwargs["tool_args"] is None

@@ -378,11 +378,17 @@ def _maybe_wrap_callbacks(agent) -> None:
                         return
 
                 if event_type in ("tool.started", "tool.completed"):
+                    # Hermes passes the display-redacted argument dict as the
+                    # fourth positional on tool.started (tool_executor.py). The
+                    # preview is capped by display.tool_preview_length and
+                    # skips keys like ``uri``, so the card keeps the dict too.
+                    _tool_args = args[0] if args and isinstance(args[0], dict) else None
                     if on_tool_updated(
                         message_id=_eid,
                         tool_name=tool_name or "",
                         status="started" if event_type == "tool.started" else "completed",
                         detail=preview or "",
+                        tool_args=_tool_args,
                     ):
                         return
             except Exception:

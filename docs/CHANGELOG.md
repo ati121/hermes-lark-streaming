@@ -4,6 +4,25 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.35 (2026-09-21, personal fork)
+
+### Fixed — image scripts still showed 终端命令 on Feishu; OpenViking knowledge base reads labelled as memory
+
+- On Feishu Hermes caps the tool preview at 40 characters
+  (`display.tool_preview_length`, tier default), so the preview for
+  `python3 /opt/data/.hermes/profiles/image/workspace/scripts/zimage_gen.py …`
+  ends at `profiles/im...` and never contains the script name; the v1.6.34
+  matcher had nothing to match. `tool.started` also carries Hermes's
+  display-redacted argument dict as its fourth positional, which the plugin
+  now keeps on the tool step and prefers over the preview: the row is
+  identified from the full command, and its detail line is rebuilt from the
+  full arguments (clipped to one line of 80 characters) so `gh api …` no
+  longer stops at 40 characters either.
+- `viking_read` / `viking_browse` on a `viking://resources/…` URI now render
+  as 📖 OpenViking · 知识库 / 浏览知识库; `viking://user/…` keeps the memory
+  labels. The URI is not a preview key, so this too comes from the argument
+  dict.
+
 ## v1.6.34 (2026-09-21, personal fork)
 
 ### Added — image-generation scripts run through terminal render as 🎨 生成图片

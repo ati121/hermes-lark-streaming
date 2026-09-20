@@ -256,8 +256,8 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片显示
 | `hindsight_reflect` | 👁️ Hindsight · 记忆推演 | 综合已有记忆进行推演 |
 | `hindsight_operation` | 👁️ Hindsight · 记忆操作 | 其他记忆操作的显示映射 |
 | `viking_search` | 📖 OpenViking · 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
-| `viking_read` | 📖 OpenViking · 读取记忆 | 按摘要、概览或全文读取指定内容 |
-| `viking_browse` | 📖 OpenViking · 浏览记忆库 | 查看目录、层级或条目元信息 |
+| `viking_read` | 📖 OpenViking · 读取记忆 | 按摘要、概览或全文读取指定内容；URI 在 `viking://resources/` 下时显示为 OpenViking · 知识库 |
+| `viking_browse` | 📖 OpenViking · 浏览记忆库 | 查看目录、层级或条目元信息；路径在 `viking://resources/` 下时显示为 OpenViking · 浏览知识库 |
 | `viking_remember` | 📖 OpenViking · 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
 | `viking_forget` | 📖 OpenViking · 删除记忆 | 按精确 URI 删除一条指定记忆 |
 | `viking_add_resource` | 📖 OpenViking · 导入资料 | 导入网址、本地文件或目录并建立索引 |
@@ -315,6 +315,10 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
 `python3`/`bash`/`node` 这类解释器时，看它后面的脚本名。只出现在参数里不算
 （`pip install imageio`、`ls …/images/` 仍是终端命令）。命中后工具行、状态行和面板
 标题都按该程序显示，detail 里去掉程序名和脚本名只留参数。
+
+匹配用的是 Hermes 在 `tool.started` 事件里一并传来的完整参数字典，不是预览文本：
+飞书平台的预览默认截到 40 字（`display.tool_preview_length`），带长路径的命令预览里
+根本没有脚本名。命中别名的行 detail 也从完整参数重建，超过 80 字截断成一行。
 
 ## 多 Profile 网关（multiplex）
 

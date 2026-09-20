@@ -289,7 +289,7 @@ display:
 | 0 | `on_feishu_normalize` | sync | 修正飞书引用消息虚假 thread_id |
 | 1 | `on_message_started` | sync | 创建 CardSession |
 | 2 | `on_message_completed` | sync→bool | 完成态卡片，返回是否已发卡片。后台任务复用此 hook，用 task_id 作为 message_id |
-| 3 | `on_tool_updated` | sync | 工具调用状态更新 |
+| 3 | `on_tool_updated` | sync | 工具调用状态更新；`tool.started` 的第四个位置参数（Hermes 的参数字典）随 `tool_args` 一起传下去，预览被截断时靠它识别脚本名和 Viking URI |
 | 4 | `on_answer_delta` | sync | AI 回复增量文本；内含 `<think>` 段由 `ReasoningStreamSplitter` 分流到推理面板 |
 | 5 | `on_thinking_delta` | sync | interim 思考内容（长度去重后透传） |
 | 6 | `on_reasoning_delta` | sync | 原生推理增量 |

@@ -41,6 +41,11 @@ class ToolStep:
     error_block: dict[str, Any] | None = None
     started_at: float | None = None
     elapsed_ms: float = 0.0
+    # Display-redacted tool arguments from Hermes's tool.started event. The
+    # preview Hermes builds is capped by display.tool_preview_length (40 on
+    # Feishu) and skips keys like ``uri``; the full arguments let the row
+    # identify a script by name or a Viking URI by prefix.
+    args: dict[str, Any] | None = None
 
 @dataclass
 class ToolSession:
@@ -397,21 +402,84 @@ def _lookup_terminal_program(basename: str) -> tuple[str, str, str] | None:
     return None
 
 
-def _terminal_program_spec(name: str | None, detail: str | None) -> tuple[list[str], tuple[str, str, str]] | None:
+def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
     """``(leading_tokens, spec)`` when a ``terminal`` command runs a listed program.
 
     ``leading_tokens`` are the command tokens the match covers (``["gh"]`` or
     ``["python3", "zimage_gen.py"]``) so the detail line can drop them.
+    ``args`` (Hermes's tool arguments) beats ``detail``: the preview is
+    truncated to ``display.tool_preview_length`` and a long path can push the
+    script name out of it.
     """
-    if not name or not detail or _normalize_tool_name(name) != "terminal":
+    if not name or _normalize_tool_name(name) != "terminal":
         return None
-    for entry in _command_programs(detail):
+    command = _terminal_command_text(name, detail, args)
+    if not command:
+        return None
+    for entry in _command_programs(command):
         # The script (if any) is the more specific name; try it first.
         for candidate in reversed(entry):
             spec = _lookup_terminal_program(candidate)
             if spec is not None:
                 return entry, spec
     return None
+
+
+def _terminal_command_text(name: str | None, detail: str | None, args: dict[str, Any] | None) -> str:
+    """The full command line when Hermes handed over the arguments, else the preview."""
+    if isinstance(args, dict) and name and _normalize_tool_name(name) == "terminal":
+        command = args.get("command")
+        if isinstance(command, str) and command.strip():
+            return command
+    return detail or ""
+
+
+_DETAIL_MAX_CHARS = 80
+
+
+def _oneline_clip(text: str, limit: int = _DETAIL_MAX_CHARS) -> str:
+    """Collapse whitespace and tail-truncate with ``...`` (mirrors Hermes's preview shape)."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: max(limit - 3, 0)] + "..."
+
+
+# ── OpenViking: knowledge base vs. memories ───────────────────────────────
+# ``viking://resources/…`` is the imported knowledge base; everything under
+# ``viking://user/…`` is memory. Hermes's preview never carries ``uri`` (it
+# is not a preview key), so this needs the arguments too.
+_VIKING_RESOURCE_PREFIX = "viking://resources/"
+_VIKING_KNOWLEDGE_SPECS: dict[str, tuple[str, str, str]] = {
+    "viking_read": ("OpenViking · 知识库", "OpenViking · Knowledge base", "📖"),
+    "viking_browse": ("OpenViking · 浏览知识库", "OpenViking · Browse knowledge base", "📖"),
+}
+
+
+def _viking_uri(detail: str | None, args: dict[str, Any] | None) -> str:
+    if isinstance(args, dict):
+        for key in ("uri", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        uris = args.get("uris")
+        if isinstance(uris, list):
+            for value in uris:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return (detail or "").strip()
+
+
+def _viking_knowledge_spec(name: str | None, detail: str | None, args: dict[str, Any] | None) -> tuple[str, str, str] | None:
+    """Spec when a Viking read/browse targets the knowledge base rather than memories."""
+    if not name:
+        return None
+    spec = _VIKING_KNOWLEDGE_SPECS.get(_normalize_tool_name(name))
+    if spec is None:
+        return None
+    if not _viking_uri(detail, args).lower().startswith(_VIKING_RESOURCE_PREFIX):
+        return None
+    return spec
 
 
 def _strip_leading_program(detail: str, leading: list[str]) -> str:
@@ -553,17 +621,20 @@ _TOOL_EMOJI_BY_ICON: dict[str, str] = {
 
 _DEFAULT_TOOL_EMOJI = "🔧"
 
-def _tool_emoji(name: str | None, detail: str | None = None) -> str:
+def _tool_emoji(name: str | None, detail: str | None = None, args: dict[str, Any] | None = None) -> str:
     """Emoji for a raw tool name — never empty, so the row can't jump around.
 
-    ``detail`` is the tool's preview; for ``terminal`` it is the command line,
-    which can promote a listed program to its own emoji.
+    ``detail`` is the tool's preview and ``args`` its arguments; for
+    ``terminal`` they can promote a listed program to its own emoji.
     """
     if not name:
         return _DEFAULT_TOOL_EMOJI
-    aliased = _terminal_program_spec(name, detail)
+    aliased = _terminal_program_spec(name, detail, args)
     if aliased is not None:
         return aliased[1][2]
+    knowledge = _viking_knowledge_spec(name, detail, args)
+    if knowledge is not None:
+        return knowledge[2]
     direct = _TOOL_EMOJI_BY_NAME.get(_normalize_tool_name(name))
     if direct:
         return direct
@@ -609,18 +680,22 @@ def _humanize_tool_name(name: str) -> str:
         return "Tool"
     return cleaned[0].upper() + cleaned[1:]
 
-def _tool_display_names(name: str | None, detail: str | None = None) -> tuple[str, str]:
+def _tool_display_names(name: str | None, detail: str | None = None, args: dict[str, Any] | None = None) -> tuple[str, str]:
     """Return ``(en, zh)`` display names for a raw tool name.
 
-    ``detail`` is the tool's preview; for ``terminal`` it is the command line,
-    which can promote a listed program to its own title.
+    ``detail`` is the tool's preview and ``args`` its arguments; for
+    ``terminal`` they can promote a listed program to its own title, and for
+    Viking reads a knowledge-base URI switches the label.
     """
     if not name:
         return "Tool", "工具"
-    aliased = _terminal_program_spec(name, detail)
+    aliased = _terminal_program_spec(name, detail, args)
     if aliased is not None:
         _zh, _en, _emoji = aliased[1]
         return _en, _zh
+    knowledge = _viking_knowledge_spec(name, detail, args)
+    if knowledge is not None:
+        return knowledge[1], knowledge[0]
     desc = _resolve_tool_descriptor(name)
     if desc is not None:
         en = desc["title"]
@@ -689,7 +764,7 @@ class ToolUseTracker:
         if self._session is None or not self._session.steps:
             return None
         last = self._session.steps[-1]
-        return _tool_display_names(last.name, last.detail)
+        return _tool_display_names(last.name, last.detail, last.args)
 
     @property
     def last_tool_emoji(self) -> str | None:
@@ -697,9 +772,9 @@ class ToolUseTracker:
         if self._session is None or not self._session.steps:
             return None
         last = self._session.steps[-1]
-        return _tool_emoji(last.name, last.detail)
+        return _tool_emoji(last.name, last.detail, last.args)
 
-    def record_start(self, name: str, detail: str = "") -> None:
+    def record_start(self, name: str, detail: str = "", args: dict[str, Any] | None = None) -> None:
         if self._session is None:
             self._session = ToolSession(started_at=time.time())
         if len(self._session.steps) >= self._max_steps:
@@ -710,6 +785,7 @@ class ToolUseTracker:
                 status="running",
                 detail=detail,
                 started_at=time.time(),
+                args=args if isinstance(args, dict) else None,
             )
         )
 
@@ -750,16 +826,22 @@ class ToolUseTracker:
         steps = []
         for s in self._session.steps:
             desc = _resolve_tool_descriptor(s.name)
-            base_title, base_title_zh = _tool_display_names(s.name, s.detail)
+            base_title, base_title_zh = _tool_display_names(s.name, s.detail, s.args)
             if s.elapsed_ms > 0:
                 suffix = f" ({_format_duration_label(s.elapsed_ms)})"
                 base_title += suffix
                 base_title_zh += suffix
             sanitizer = desc.get("sanitizer") if desc else None
             detail = _sanitize_detail(s.detail, sanitizer)
-            aliased = _terminal_program_spec(s.name, s.detail)
+            aliased = _terminal_program_spec(s.name, s.detail, s.args)
             if aliased is not None:
-                detail = _strip_leading_program(detail, aliased[0])
+                command = _terminal_command_text(s.name, s.detail, s.args)
+                if command != (s.detail or ""):
+                    # Rebuilt from the full command so the arguments survive
+                    # Hermes's preview cap; clipped to keep the row one line.
+                    detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0]))
+                else:
+                    detail = _strip_leading_program(detail, aliased[0])
             steps.append(
                 {
                     "name": s.name,
@@ -772,7 +854,7 @@ class ToolUseTracker:
                     # Kept as the emoji-grouping key (_TOOL_EMOJI_BY_ICON);
                     # the card renders ``emoji``, not this token.
                     "icon": desc["icon"] if desc else "setting-inter_outlined",
-                    "emoji": _tool_emoji(s.name, s.detail),
+                    "emoji": _tool_emoji(s.name, s.detail, s.args),
                     "elapsed_ms": s.elapsed_ms,
                     "result_block": None if (desc and desc.get("no_result")) else s.result_block,
                     "error_block": s.error_block,

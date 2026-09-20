@@ -849,3 +849,95 @@ class TestTerminalProgramAliases:
         assert step["title_zh"].startswith("生成图片")
         assert step["emoji"] == "🎨"
         assert step["detail"] == '--size 1024 "a cat"'
+
+
+class TestToolArgsBeatTruncatedPreview:
+    """飞书上 Hermes 把预览截到 40 字（tool_preview_length），脚本名根本不在预览里；
+    tool.started 一并传来的参数字典才是完整命令（老大 2026-09-21 DXP4800 复现）."""
+
+    _CMD = 'python3 /opt/data/.hermes/profiles/image/workspace/scripts/zimage_gen.py "Eye-level full-body wide shot"'
+    _PREVIEW = "python3 /opt/data/.hermes/profiles/im..."   # Hermes 40 字预览
+
+    def test_preview_alone_cannot_identify_the_script(self) -> None:
+        assert _tool_display_names("terminal", self._PREVIEW) == ("Terminal", "终端命令")
+
+    def test_args_identify_the_script(self) -> None:
+        args = {"command": self._CMD}
+        assert _tool_display_names("terminal", self._PREVIEW, args) == ("Generate image", "生成图片")
+        assert _tool_emoji("terminal", self._PREVIEW, args) == "🎨"
+
+    def test_display_step_rebuilds_detail_from_full_command(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", self._PREVIEW, args={"command": self._CMD})
+        step = tracker.build_display_steps()[0]
+        assert step["title_zh"].startswith("生成图片")
+        assert step["emoji"] == "🎨"
+        assert step["detail"] == '"Eye-level full-body wide shot"'
+        assert tracker.last_tool_names == ("Generate image", "生成图片")
+        assert tracker.last_tool_emoji == "🎨"
+
+    def test_gh_detail_is_no_longer_cut_at_forty_chars(self) -> None:
+        cmd = "gh api repos/konbakuyomu/smartsearch/contents/README.md"
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", cmd[:37] + "...", args={"command": cmd})
+        assert tracker.build_display_steps()[0]["detail"] == "api repos/konbakuyomu/smartsearch/contents/README.md"
+
+    def test_long_rebuilt_detail_is_clipped_to_one_line(self) -> None:
+        cmd = "gh api " + "x" * 300 + "\n--paginate"
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "gh api xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...", args={"command": cmd})
+        detail = tracker.build_display_steps()[0]["detail"]
+        assert len(detail) <= 80 and detail.endswith("...") and "\n" not in detail
+
+    def test_plain_command_keeps_the_preview_as_detail(self) -> None:
+        """没命中别名的普通命令仍显示 Hermes 给的预览（保持原有行为）."""
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "ls -l imag...", args={"command": "ls -l /opt/data/.hermes/profiles/image/cache/images/x.png"})
+        step = tracker.build_display_steps()[0]
+        assert step["title_zh"].startswith("终端命令")
+        assert step["detail"] == "ls -l imag..."
+
+    def test_non_dict_args_are_ignored(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "gh api x", args="not a dict")  # type: ignore[arg-type]
+        assert tracker.build_display_steps()[0]["emoji"] == "🐙"
+
+
+class TestOpenVikingKnowledgeBase:
+    """viking://resources/ 是知识库，viking://user/ 是记忆；预览里没有 uri，只能看参数."""
+
+    @pytest.mark.parametrize("args", [
+        {"level": "full", "uri": "viking://resources/gpt-image-2-skill/02_时尚商业与海报/x.md"},
+        {"uris": ["viking://resources/a.md", "viking://user/serveom/memories/b.md"]},
+        {"uri": "VIKING://Resources/Case.md"},
+    ])
+    def test_read_from_resources_is_knowledge_base(self, args: dict) -> None:
+        assert _tool_display_names("viking_read", "", args) == ("OpenViking · Knowledge base", "OpenViking · 知识库")
+        assert _tool_emoji("viking_read", "", args) == "📖"
+
+    @pytest.mark.parametrize("args", [
+        {"level": "full", "uri": "viking://user/serveom/memories/entities/服务配置/x.md"},
+        {"uri": "viking://user/serveom/sessions/2026/history/memory_diff.json"},
+        {},
+        None,
+    ])
+    def test_read_from_user_space_stays_memory(self, args) -> None:
+        assert _tool_display_names("viking_read", "", args) == ("OpenViking · Read memory", "OpenViking · 读取记忆")
+
+    def test_browse_switches_too(self) -> None:
+        assert _tool_display_names("viking_browse", "", {"action": "list", "path": "viking://resources/skill/"}) == (
+            "OpenViking · Browse knowledge base", "OpenViking · 浏览知识库",
+        )
+        assert _tool_display_names("viking_browse", "", {"action": "list", "path": "viking://user/x/memories/"}) == (
+            "OpenViking · Browse memory store", "OpenViking · 浏览记忆库",
+        )
+
+    def test_search_and_remember_are_untouched(self) -> None:
+        assert _tool_display_names("viking_search", "", {"query": "海报"}) == ("OpenViking · Search memory", "OpenViking · 检索记忆")
+        assert _tool_display_names("viking_remember", "", {"content": "x"}) == ("OpenViking · Remember information", "OpenViking · 记住信息")
+
+    def test_tracker_row_and_spinner(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("viking_read", "", args={"uri": "viking://resources/a.md"})
+        assert tracker.last_tool_names == ("OpenViking · Knowledge base", "OpenViking · 知识库")
+        assert tracker.build_display_steps()[0]["title_zh"].startswith("OpenViking · 知识库")

@@ -992,6 +992,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         tool_name: str,
         status: str,
         detail: str = "",
+        tool_args: dict[str, Any] | None = None,
     ) -> None:
         """工具调用事件."""
         if not self.enabled:
@@ -1017,7 +1018,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 self._reset_speed_window(session)
                 session._compression_previous_phase = None
                 session._response_phase = "tool"
-                session.tool_use.record_start(tool_name, detail)
+                session.tool_use.record_start(tool_name, detail, args=tool_args)
             else:
                 is_error = status in ("error", "failed")
                 session.tool_use.record_end(

@@ -138,6 +138,7 @@ def on_tool_updated(
     tool_name: str,
     status: str,
     detail: str = "",
+    tool_args: dict[str, Any] | None = None,
 ) -> bool:
     """[注入点 3] progress_callback — tool.updated."""
     ctrl.on_tool_update(
@@ -145,6 +146,7 @@ def on_tool_updated(
         tool_name=tool_name,
         status=status,
         detail=detail,
+        tool_args=tool_args,
     )
     return True
 
