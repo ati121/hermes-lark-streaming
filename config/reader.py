@@ -361,6 +361,18 @@ class Config:
             return True
         return _to_bool(sec.get("gateway_cards", True), default=True)
 
+    @property
+    def busy_supersede_new_card(self) -> bool:
+        """agent 忙时收到新消息 → 封口旧卡、后续输出开新卡。默认 True.
+
+        Hermes 的 busy 路径绕过 inbound 入口，插件拿不到新的 message_id；
+        关掉的话，打断后的输出会继续写在被打断的那张卡上。
+        """
+        sec = self._reload_cached().get("hermes_lark_streaming")
+        if not isinstance(sec, dict):
+            return True
+        return _to_bool(sec.get("busy_supersede_new_card", True), default=True)
+
     @staticmethod
     def _default_footer_fields() -> list[list[str]]:
         return [["status", "elapsed", "speed", "model", "cost", "compression_exhausted"]]

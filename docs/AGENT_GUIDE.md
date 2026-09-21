@@ -120,6 +120,7 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 | `max_reasoning_rounds` | `20` | 1–100 | 面板显示的推理轮次上限 |
 | `footer.show_label` | `false` | bool | 是否显示页脚字段标签 |
 | `footer.fields` | status/elapsed/speed/model/cost/compression_exhausted | array | 页脚字段排列 |
+| `busy_supersede_new_card` | `true` | bool | agent 忙时收到新消息 → 封口当前卡片，后续输出开新卡（见下） |
 | `text_sizes` | `{}` | mapping | PC/手机端设备差异字号（本地新增） |
 
 可选的页脚字段名：`status`、`elapsed`、`speed`、`model`、`tokens`、`context`、
@@ -160,6 +161,7 @@ hermes_lark_streaming:
   card_ttl_sec: 600
   max_tool_steps: 20
   max_reasoning_rounds: 20
+  busy_supersede_new_card: true
   footer:
     show_label: false
     fields:
@@ -168,6 +170,22 @@ hermes_lark_streaming:
 display:
   show_reasoning: true
 ```
+
+### agent 忙时收到新消息（busy follow-up）
+
+agent 还在跑、用户又发了一条消息时，Hermes 把它交给自己内部的 busy 入口：把新消息
+排队成下一回合，并打断正在跑的回合。这条路径**不经过** gateway 的 inbound 入口
+（Hermes 源码注释：busy callbacks bypass the message handler），插件拿不到新的
+message_id —— 没有 start 钩子，也就不会建新卡。
+
+默认行为（`busy_supersede_new_card: true`）：把当前这张卡片封口，标记成**被新消息
+接续**（不是正常完成，避免看起来像答完了），再开一张新卡继续输出；新卡锚在触发它的
+那条消息上。打断那一轮的后续回调仍带着旧 message_id，控制器在会话查找时统一转发到
+新卡，答案、思考和工具行都落过去。
+
+关掉就是旧行为：后续输出继续写在被打断的那张卡片里，用户得往上翻才看得到。
+
+后台委派完成、心跳这类内部事件走同一个 busy 入口，会被过滤掉，不会拿来封用户的卡片。
 
 ### `text_sizes`（PC/手机端独立字号）
 
@@ -230,9 +248,9 @@ chunk 之间时按会话保持开合状态，正确分流。
 
 `pre_gateway_dispatch`、`on_feishu_normalize`、`on_message_started`、
 `on_message_completed`、`on_message_aborted`、`on_message_interrupted`、
-`on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、`on_tool_updated`、
-`on_memory_prefetch_updated`、`on_background_review_message`、`on_cron_deliver`。
-编号与职责见 [SKILL.md「Hook 索引」](SKILL.md#9-hook-索引)。
+`on_busy_superseded`、`on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、
+`on_tool_updated`、`on_memory_prefetch_updated`、`on_background_review_message`、
+`on_cron_deliver`。编号与职责见 [SKILL.md「Hook 索引」](SKILL.md#9-hook-索引)。
 
 ## 记忆工具显示
 

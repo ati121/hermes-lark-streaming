@@ -4,6 +4,32 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.37 (2026-09-21, personal fork)
+
+### Fixed — a message sent while the bot was busy kept answering in the old card
+
+- A message that arrives while an agent is already running is handed to
+  `_handle_active_session_busy_message`, which queues it as the next turn and
+  interrupts the running one. That entry bypasses `_handle_message_with_agent`
+  — Hermes's own note reads "busy callbacks bypass the message handler" — so the
+  plugin never got a new message id: the start hook never fired, no new card was
+  created, and everything the follow-up produced kept streaming into the card of
+  the turn it had just interrupted. The output landed above the fold and the user
+  had to scroll back to find it.
+- The plugin now wraps that busy entry and, once it has consumed a real user
+  message, seals the card in progress and continues on a fresh one. Internal
+  events (background-delegation completions, heartbeats) share the same entry and
+  are ignored — they are frequent and are not a user interruption. The sealed
+  card is marked as superseded rather than completed, so it does not read as a
+  finished answer, and the new card is anchored to the message that triggered it.
+- Later callbacks still carry the interrupted turn's message id, so a
+  continuation id is now resolved in `_get_active_session`: answers, reasoning
+  and tool updates all land on the new card without each hook having to know
+  about it. An aborted turn's completion no longer consumes the continuation —
+  that card belongs to the next turn and is sealed by its own completion.
+- Set `hermes_lark_streaming.busy_supersede_new_card: false` to keep the previous
+  behaviour (everything stays on the card that was interrupted).
+
 ## v1.6.36 (2026-09-21, personal fork)
 
 ### Fixed — a CLI called through a shell variable still showed 终端命令

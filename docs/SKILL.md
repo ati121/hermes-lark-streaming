@@ -36,6 +36,18 @@ Cron: _deliver_result ── [Hook 10: on_cron_deliver] (async)
 Background: _run_background_task ── [Hook 1/2]
 ```
 
+**例外：agent 忙时到达的消息**（v1.6.37）。这条支路**不经过**
+`_handle_message_with_agent`（Hermes 源码注释：busy callbacks bypass the message
+handler），插件的 Hook 0/1/8/9 全都不会触发，因此没有新 message_id、也就没有新卡片：
+
+```
+用户消息(agent 忙) → _handle_active_session_busy_message ── [Hook 11: on_busy_superseded]
+                        （排队成下一回合 + 打断当前回合；返回 True 才算被消化）
+```
+
+Hook 11 里封口当前卡片、开一张新卡续写；后续回调带的仍是旧 message_id，由
+`_get_active_session` 里的 continuation 转发统一落到新卡。
+
 调用链: `patching → hooks → controller → linear_mixin → cardkit → feishu → flush`
 
 > v1.1.0 变更：非线性 `controller/mixin.py` 路径已删除，线性 `linear_mixin.py` 是唯一主路径。`mixin.py` 仅保留 cron/gateway deliver 和共享工具方法。
@@ -50,7 +62,7 @@ Background: _run_background_task ── [Hook 1/2]
 | `├ __init__.py` | 入口 + 共享状态 + 编排 | `apply_patches()` + 延迟补丁 + `_patch_status` 报告 |
 | `├ hermes_adapter.py` | Hermes 适配层 (v1.1.0) | `HermesCompat` 类隔离所有 Hermes 内部模块访问 + 版本探测 |
 | `├ hooks.py` | Hook 函数层 | `_safe_hook` 统一 enabled 检查 + 异常捕获 |
-| `├ gateway.py` | GatewayRunner 包装 | 6 个 wrapper + 时间前缀注入 + cron/background |
+| `├ gateway.py` | GatewayRunner 包装 | 7 个 wrapper + 时间前缀注入 + cron/background（含 v1.6.37 的 busy 入口 `_handle_active_session_busy_message`） |
 | `├ callbacks.py` | 回调包装 | 5 个内部 wrapper + `already_streamed` 透传 + 长度去重 |
 | `├ adapter.py` | FeishuAdapter 包装 | send/edit/reaction/clarify 包装 + gateway card 注册 + 卡片按钮回调（`hls_action`）路由 |
 | `├ memory.py` | 记忆预取状态 | 包装 `MemoryManager._prefetch_provider` 边界，把自动检索显示为状态行 |
@@ -297,6 +309,7 @@ display:
 | 8 | `on_message_aborted` | sync | 消息异常终止 |
 | 9 | `on_message_interrupted` | sync | 新消息打断旧消息 |
 | 10 | `on_cron_deliver` | **async** | Cron 推送卡片 |
+| 11 | `on_busy_superseded` | sync | agent 忙时收到新消息（Hermes busy 入口，绕过 inbound 路径）：封口当前卡片，后续输出开新卡继续。内部事件会被过滤 |
 | — | `pre_gateway_dispatch` | sync→dict | Hermes 原生插件 hook（v1.1.0），实现在 `aowen/`。返回 `{"action":"skip"}` 阻止消息进入 agent，用于 /aowen 命令 |
 | — | `on_memory_prefetch_updated` | sync→bool | 记忆自动预取开始/结束（v1.6.22），由 `patching/memory.py` 触发 |
 
@@ -330,6 +343,7 @@ tests/
   test_memory_prefetch.py      — 记忆自动预取状态行
   test_speed_usage.py          — 接口原始用量保留与页脚速度
   test_multiplex_isolation.py  — 多 Profile 同进程两份副本不重复包装
+  test_busy_supersede.py       — agent 忙时新消息 → 封口旧卡、续写新卡
   conftest.py                  — 把仓库根注册为 hermes_lark_streaming 包
   e2e/                         — 端到端测试 (v1.1.0)
     framework.py               — E2ETestRunner (mock/真飞书自动切换)

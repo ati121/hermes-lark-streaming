@@ -254,7 +254,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return None
 
     def _get_active_session(self, message_id: str) -> CardSession | None:
-        """获取非终态的活跃 session，不存在或已终态返回 None."""
+        """获取非终态的活跃 session，不存在或已终态返回 None.
+
+        v1.6.37: 若该 message_id 已被重激活到续写 session（busy 打断后开的新卡），
+        这里统一回落到续写 session。Hermes 在 agent 忙时收到新消息不会给插件新的
+        message_id —— 后续每个回调（answer/reasoning/tool）仍带着被打断那一轮的
+        旧 id，只有在这一层转发，输出才会落在新卡上。
+        """
+        if self._continuation_map:
+            continuation_id = self._resolve_continuation_id(message_id)
+            if continuation_id:
+                message_id = continuation_id
         session = self._sess_get(message_id)
         if session is None or session.is_terminal_phase:
             return None
@@ -278,12 +288,16 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return self._continuation_map.pop(message_id, None)
 
     def _reactivate_session_for_continuation(
-        self, stale_session: CardSession
+        self, stale_session: CardSession, *, anchor_id: str | None = None,
     ) -> CardSession | None:
-        """为已 _streaming_closed 的 stale session 创建一张新的流式卡片以续写。"""
+        """为已 _streaming_closed 的 stale session 创建一张新的流式卡片以续写。
+
+        ``anchor_id`` 可覆盖续写卡的回复锚点：busy 打断场景要锚到**新**用户消息上，
+        让新卡片挂在用户刚发的那条消息下面（默认沿用 stale session 的锚点）。
+        """
         chat_id = stale_session.chat_id
-        # anchor_id 优先（用户原始消息 id），其次回退到 message_id
-        anchor_id = stale_session.anchor_id or stale_session.message_id
+        # anchor_id 优先（调用方指定 → 用户原始消息 id → message_id）
+        anchor_id = anchor_id or stale_session.anchor_id or stale_session.message_id
         if not chat_id or not anchor_id:
             _logger.warning(
                 "HLS: reactivation aborted — missing chat_id/anchor_id "
@@ -393,6 +407,83 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return None
         self._register_continuation(message_id, new_session.message_id)
         return new_session.message_id
+
+    # ── v1.6.37: busy 打断后续写新卡片 ──────────────────────────────
+
+    def _pick_supersede_target(self, chat_id: str) -> CardSession | None:
+        """挑出该 chat 里最新、还能被打断封口的活跃 session。"""
+        target: CardSession | None = None
+        newest = -1.0
+        for _mid, candidate in self._sess_items_snapshot():
+            if candidate.chat_id != chat_id:
+                continue
+            if candidate.is_terminal_phase or candidate.state == COMPLETING:
+                continue
+            # 已经是续写卡，不再叠加（避免一次打断套出一串卡片）
+            if candidate._is_continuation:
+                continue
+            if candidate._continuation_reactivation_count >= 1:
+                continue
+            # 卡片还没落地就没得封口 —— 让它走自己的创建流程
+            if not candidate.card_msg_id:
+                continue
+            created = float(getattr(candidate, "created_at", 0.0) or 0.0)
+            if target is None or created > newest:
+                target, newest = candidate, created
+        return target
+
+    def on_busy_superseded(
+        self, *, message_id: str, chat_id: str, anchor_id: str | None = None,
+    ) -> None:
+        """用户在 agent 忙时发来新消息 — 封口当前卡片，后续输出开新卡继续.
+
+        Hermes 的 busy 路径（``_handle_active_session_busy_message``）把新消息排队
+        成下一回合、同时打断正在跑的 run，而且**不经过** ``_handle_message_with_agent``：
+        插件看不到任何新的 message_id。不开新卡的话，打断后的输出会继续写在被打断
+        的那张卡上，用户得往上翻才找得到 —— 实际等于看不见。
+
+        这里复用续写机制：封掉旧卡（标记为被新消息打断），建一张新卡，并把旧
+        message_id 的后续回调统一转发到新卡。回合真正结束时 on_completed 会
+        消费这张映射，封的是新卡。
+        """
+        if not self.enabled:
+            return
+        try:
+            if not self._cfg.busy_supersede_new_card:
+                return
+        except Exception:
+            _logger.debug("HLS: busy supersede config read failed", exc_info=True)
+            return
+
+        target = self._pick_supersede_target(chat_id)
+        if target is None:
+            _logger.debug(
+                "HLS: busy supersede — no sealable active session chat=%s inbound=%s",
+                (chat_id or "?")[:12], (message_id or "?")[:12],
+            )
+            return
+        # 幂等：同一条被打断的会话只续写一次
+        if self._resolve_continuation_id(target.message_id) is not None:
+            return
+
+        target._was_aborted = True
+        if not target.error_message:
+            target.error_message = "Superseded by a newer message"
+        # 新卡锚到用户刚发的那条消息（stale 的锚点作为回退）
+        continuation = self._reactivate_session_for_continuation(
+            target, anchor_id=anchor_id or message_id or target.anchor_id,
+        )
+        if continuation is None:
+            return
+        self._register_continuation(target.message_id, continuation.message_id)
+        _logger.info(
+            "HLS: busy supersede — sealed old card msg=%s, continuing on new card msg=%s "
+            "chat=%s triggered_by=%s",
+            (target.message_id or "?")[:12],
+            continuation.message_id[:12],
+            (chat_id or "?")[:12],
+            (message_id or "?")[:12],
+        )
 
     def _fire_and_forget(self, coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
         """Schedule a coroutine for background execution without awaiting."""
@@ -1271,6 +1362,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not message_id:
             _logger.warning("on_completed: missing message_id, skipping")
             return False
+
+        # v1.6.37: busy 打断后的续写映射不能被「旧回合的收尾」消费掉 ——
+        # 那张新卡属于紧随其后的新回合，旧回合的 aborted 收尾不该把它封了。
+        # （正常收尾仍走下面的 pop：那张新卡就是这一轮该封的卡。）
+        if aborted and self._resolve_continuation_id(message_id) is not None:
+            _logger.info(
+                "on_completed: keep continuation for msg=%s "
+                "(aborted turn; the new card belongs to the next turn)",
+                (message_id or "?")[:12],
+            )
+            return True
 
         # v1.4.0 fix (问题3 根因1): 如果已为该 message_id 重激活过 continuation
         cont_id = self._pop_continuation_id(message_id)

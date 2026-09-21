@@ -236,6 +236,27 @@ def on_message_interrupted(
         anchor_id=anchor_id,
     )
 
+@_safe_hook()
+def on_busy_superseded(
+    *,
+    ctrl: Any,
+    message_id: str,
+    chat_id: str,
+    anchor_id: str | None = None,
+) -> None:
+    """[注入点 11] Hermes busy 路径 — 新消息在 agent 忙时到达.
+
+    与注入点 9 的区别：那里是 Hermes 递归重入 ``_handle_message_with_agent``
+    （插件能拿到新 message_id），这里走的是 ``_handle_active_session_busy_message``
+    （Hermes 自己的注释：busy callbacks bypass the message handler），插件拿不到
+    任何新的 id，只能自己把当前卡片封口、开一张新卡续写。
+    """
+    ctrl.on_busy_superseded(
+        message_id=message_id,
+        chat_id=chat_id,
+        anchor_id=anchor_id,
+    )
+
 async def on_cron_deliver(
     *,
     chat_id: str,

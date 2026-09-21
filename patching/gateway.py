@@ -270,6 +270,59 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
 
     return wrapper
 
+def _notify_busy_supersede(event: Any) -> None:
+    """转达「用户新消息挤进了忙碌会话」，仅限飞书上的真人消息.
+
+    Hermes 自己的注释写着 busy callbacks bypass the message handler —— 这条路径
+    不会触发插件平时依赖的 START/ABORT 注入点，只能在这里补一次通知。
+    """
+    if event is None:
+        return
+    # 内部合成事件（后台委派完成、心跳、网关唤醒）走同一个 busy 入口，而且非常
+    # 频繁；它们不是用户打断，绝不能拿来封用户的卡片。
+    if getattr(event, "internal", False):
+        return
+    source = getattr(event, "source", None)
+    if source is None:
+        return
+    platform = getattr(getattr(source, "platform", None), "value", "")
+    if platform != "feishu":
+        return
+    mid = getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
+    chat_id = getattr(source, "chat_id", "") or ""
+    if not mid or not chat_id:
+        return
+    from .hooks import on_busy_superseded
+
+    on_busy_superseded(message_id=mid, chat_id=chat_id)
+
+def _wrap_handle_active_session_busy_message(orig: Callable) -> Callable:
+    """Busy-path twin of ``_wrap_handle_message_with_agent``.
+
+    ``_handle_active_session_busy_message`` is the single entry for "a message
+    arrived while an agent was already running" (steer / redirect / interrupt +
+    queue).  It hands the follow-up to the running run and never reaches the
+    inbound handler the plugin hooks elsewhere, so a busy follow-up used to keep
+    streaming into the card of the turn it just interrupted — the new output
+    landed above the fold and the user had to scroll back to find it.
+
+    A truthy return means the busy path consumed the event (queued / steered /
+    interrupted), which is exactly the moment the current card is done and the
+    rest of the output belongs on a fresh one.
+    """
+
+    @functools.wraps(orig)
+    async def wrapper(self, event, session_key, *args, **kwargs):
+        result = await orig(self, event, session_key, *args, **kwargs)
+        try:
+            if result:
+                _notify_busy_supersede(event)
+        except Exception:
+            _logger.debug("HLS: busy supersede notify failed", exc_info=True)
+        return result
+
+    return wrapper
+
 def _wrap_run_agent(orig: Callable) -> Callable:
     """Inject COMPLETE hook after agent runs; propagate event_message_id."""
 

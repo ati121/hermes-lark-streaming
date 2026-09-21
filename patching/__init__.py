@@ -54,6 +54,8 @@ __all__ = [
     # From gateway
     '_wrap_handle_message',
     '_wrap_handle_message_with_agent',
+    # v1.6.37: busy 路径（agent 忙时新消息）— 绕过 inbound 入口的那条
+    '_wrap_handle_active_session_busy_message',
     '_wrap_run_agent',
     '_wrap_run_background_task',
     '_wrap_cron_deliver',
@@ -93,6 +95,7 @@ __all__ = [
     'on_background_review_message',
     'on_message_aborted',
     'on_message_interrupted',
+    'on_busy_superseded',
     'on_cron_deliver',
     '_safe_hook',
 ]
@@ -236,6 +239,7 @@ def _get_thread_local_ctx() -> dict | None:
 from .gateway import (  # noqa: E402
     _wrap_handle_message,
     _wrap_handle_message_with_agent,
+    _wrap_handle_active_session_busy_message,
     _wrap_run_agent,
     _wrap_run_background_task,
     _wrap_cron_deliver,
@@ -278,6 +282,7 @@ from .hooks import (  # noqa: E402
     on_background_review_message,
     on_message_aborted,
     on_message_interrupted,
+    on_busy_superseded,
     on_cron_deliver,
     _safe_hook,
 )
@@ -340,6 +345,7 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
         for _name, _factory in (
             ('_handle_message', _wrap_handle_message),
             ('_handle_message_with_agent', _wrap_handle_message_with_agent),
+            ('_handle_active_session_busy_message', _wrap_handle_active_session_busy_message),
             ('_run_agent', _wrap_run_agent),
             ('_run_background_task', _wrap_run_background_task),
         ):
