@@ -316,6 +316,15 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
 （`pip install imageio`、`ls …/images/` 仍是终端命令）。命中后工具行、状态行和面板
 标题都按该程序显示，detail 里去掉程序名和脚本名只留参数。
 
+变量引用同样算数：同一行里的 `NAME=value`、`export NAME=value` 先收集成一张表，
+随后出现的 `$NAME` / `${NAME}` 按这张表解析。所以 `GH=/opt/data/.local/bin/gh; …
+$GH api repos/…`（serveom 的常见写法）和 `export GH=…` 都能命中 🐙 GitHub，
+`$PY zimage_gen.py` 也走解释器规则。表里查不到或与程序无关的引用不动
+（`$DC exec …`、`SSH_OPTS="-F …"`、未赋值的 `$NOT_SET` 仍是 🖥️ 终端命令）。
+
+程序在后面的段里才出现时，detail 从**那一段**重新开始，而不是停在行首的赋值上：
+`GH=gh; echo …; $GH api repos/x` 的 detail 是 `api repos/x`。
+
 匹配用的是 Hermes 在 `tool.started` 事件里一并传来的完整参数字典，不是预览文本：
 飞书平台的预览默认截到 40 字（`display.tool_preview_length`），带长路径的命令预览里
 根本没有脚本名。命中别名的行 detail 也从完整参数重建，超过 80 字截断成一行。

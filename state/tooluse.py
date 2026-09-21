@@ -362,6 +362,38 @@ _COMMAND_WRAPPERS = frozenset({"sudo", "env", "nohup", "time", "exec", "command"
 _SCRIPT_INTERPRETER_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|py|bash|sh|zsh|node|perl|ruby)(?:\.exe)?$", re.IGNORECASE)
 _COMMAND_SEGMENT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\r?\n)\s*")
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# A CLI is often pinned to a variable on the same line — ``GH=/usr/local/bin/gh``
+# or ``export GH=…`` — and then called as ``$GH api …``. Read literally the
+# program name never appears, so those rows fell back to 🖥️ 终端命令
+# (老大 2026-09-21).
+_VAR_ASSIGN_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_VAR_REF_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+
+
+def _shell_variables(command: str) -> dict[str, str]:
+    """``NAME → value`` for every ``NAME=value`` / ``export NAME=value`` on the line."""
+    variables: dict[str, str] = {}
+    for token in (command or "").split():
+        match = _VAR_ASSIGN_RE.match(token.rstrip(";"))
+        if match is None:
+            continue
+        value = match.group(2).strip("'\"")
+        # ``$(…)`` is a command substitution, not a program path.
+        if value and not value.startswith("$("):
+            variables[match.group(1)] = value
+    return variables
+
+
+def _resolve_var_token(token: str, variables: dict[str, str]) -> str:
+    """``$GH`` / ``${GH}`` → its assigned value; anything else is returned unchanged."""
+    ref = _VAR_REF_RE.match(token or "")
+    if ref is None:
+        return token
+    value = variables.get(ref.group(1))
+    if not value:
+        return token
+    # ``SSH_OPTS="-F /path"`` carries several words; only the first names a program.
+    return value.split()[0]
 
 
 def _command_programs(command: str) -> list[list[str]]:
@@ -369,8 +401,10 @@ def _command_programs(command: str) -> list[list[str]]:
 
     Each item is ``[program]`` or ``[interpreter, script]``: for
     ``python3 /x/zimage_gen.py "p"`` the script is what identifies the call.
+    Variable references are resolved against the assignments on the same line.
     """
     programs: list[list[str]] = []
+    variables = _shell_variables(command)
     for segment in _COMMAND_SEGMENT_RE.split(command or ""):
         tokens = [t.strip("'\"") for t in segment.split()]
         tokens = [t for t in tokens if t]
@@ -380,12 +414,12 @@ def _command_programs(command: str) -> list[list[str]]:
             i += 1
         if i >= len(tokens):
             continue
-        base = os.path.basename(tokens[i].replace("\\", "/"))
+        base = os.path.basename(_resolve_var_token(tokens[i], variables).replace("\\", "/"))
         if not base:
             continue
         entry = [base]
         if _SCRIPT_INTERPRETER_RE.match(base) and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-            script = os.path.basename(tokens[i + 1].replace("\\", "/"))
+            script = os.path.basename(_resolve_var_token(tokens[i + 1], variables).replace("\\", "/"))
             if script:
                 entry.append(script)
         programs.append(entry)
@@ -482,14 +516,42 @@ def _viking_knowledge_spec(name: str | None, detail: str | None, args: dict[str,
     return spec
 
 
-def _strip_leading_program(detail: str, leading: list[str]) -> str:
-    """Drop the matched program/script tokens from the front of a (sanitised) command line."""
+def _matches_program(text: str, program: str, variables: dict[str, str]) -> bool:
+    """Does this command token name ``program`` (after resolving ``$VAR``)?"""
+    candidate = _resolve_var_token(text.strip("'\"").rstrip(";"), variables)
+    return os.path.basename(candidate.replace("\\", "/")).lower() == program.lower()
+
+
+def _restart_at_program(detail: str, program: str, variables: dict[str, str]) -> str | None:
+    """Text after the segment head of the first segment that runs ``program``.
+
+    A command can pin the CLI to a variable and only call it in a later
+    segment (``GH=/usr/local/bin/gh; echo …; $GH api …``), so a plain
+    left-to-right strip never reaches it.
+    """
+    for segment in _COMMAND_SEGMENT_RE.split(detail):
+        tokens = [t for t in segment.split() if t]
+        i = 0
+        while i < len(tokens) and (_ENV_ASSIGN_RE.match(tokens[i]) or tokens[i].startswith("-")):
+            i += 1
+        if i < len(tokens) and _matches_program(tokens[i], program, variables):
+            return " ".join(tokens[i + 1:])
+    return None
+
+
+def _strip_leading_program(detail: str, leading: list[str], variables: dict[str, str] | None = None) -> str:
+    """Drop the matched program/script tokens from a (sanitised) command line."""
+    variables = variables or {}
     rest = (detail or "").lstrip()
     for token in leading:
         head, _sep, tail = rest.partition(" ")
-        if os.path.basename(head.strip("'\"").replace("\\", "/")).lower() != token.lower():
+        if _matches_program(head, token, variables):
+            rest = tail.lstrip()
+            continue
+        jumped = _restart_at_program(rest, token, variables)
+        if jumped is None:
             return detail
-        rest = tail.lstrip()
+        rest = jumped
     return rest
 
 # ── Emoji shown beside the spinner while a tool runs ──────────────────────
@@ -836,12 +898,13 @@ class ToolUseTracker:
             aliased = _terminal_program_spec(s.name, s.detail, s.args)
             if aliased is not None:
                 command = _terminal_command_text(s.name, s.detail, s.args)
+                variables = _shell_variables(command)
                 if command != (s.detail or ""):
                     # Rebuilt from the full command so the arguments survive
                     # Hermes's preview cap; clipped to keep the row one line.
-                    detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0]))
+                    detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0], variables))
                 else:
-                    detail = _strip_leading_program(detail, aliased[0])
+                    detail = _strip_leading_program(detail, aliased[0], variables)
             steps.append(
                 {
                     "name": s.name,

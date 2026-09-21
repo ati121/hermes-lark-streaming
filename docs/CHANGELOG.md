@@ -4,6 +4,24 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.36 (2026-09-21, personal fork)
+
+### Fixed — a CLI called through a shell variable still showed 终端命令
+
+- The bots often pin a program to a variable on the same line and call it
+  later — `GH=/opt/data/.local/bin/gh; … $GH api repos/…` or
+  `export GH=…` followed by `$GH pr list`. The matcher only read literal
+  program names, so every one of those rows fell back to 🖥️ 终端命令 even
+  though `gh` alone has rendered as 🐙 GitHub since v1.6.33. `NAME=value`
+  and `export NAME=value` assignments are now collected first and `$NAME` /
+  `${NAME}` references resolved through them; the interpreter rule applies
+  to the resolved name too, so `$PY zimage_gen.py` still reads as 🎨 生成图片.
+- The detail line no longer stops at a leading assignment: when the program
+  is only reached in a later shell segment, the row restarts from that
+  segment, so the line reads `api repos/…` instead of `GH=gh; echo …`.
+- Unresolved or unrelated variables are untouched — `$DC exec …` (docker),
+  `SSH_OPTS="-F …"` and a bare `$NOT_SET` all stay 🖥️ 终端命令.
+
 ## v1.6.35 (2026-09-21, personal fork)
 
 ### Fixed — image scripts still showed 终端命令 on Feishu; OpenViking knowledge base reads labelled as memory

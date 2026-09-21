@@ -821,6 +821,36 @@ class TestTerminalProgramAliases:
         assert _tool_display_names("terminal", "ghost run") == ("Terminal", "终端命令")
 
     @pytest.mark.parametrize("command", [
+        "GH=/opt/data/.local/bin/gh; $GH api repos/x/y",
+        "export GH=/opt/data/.local/bin/gh\ncd /tmp && $GH api repos/x/y",
+        'GH="/opt/data/.local/bin/gh"; $GH pr list',
+        "GH=/usr/local/bin/gh; echo \"$GH\"; $GH release view v1",
+    ])
+    def test_gh_pinned_to_a_variable_is_still_github(self, command: str) -> None:
+        """老大 2026-09-21：serveom 先把 gh 赋给 $GH 再调用，之前落回 🖥️ 终端命令."""
+        assert _tool_display_names("terminal", command) == ("GitHub", "GitHub")
+        assert _tool_emoji("terminal", command) == "🐙"
+
+    def test_variable_pinned_gh_detail_starts_at_the_subcommand(self) -> None:
+        tracker = ToolUseTracker()
+        command = 'GH=/opt/data/.local/bin/gh; echo "=== x ==="; $GH api repos/x/y --jq .total'
+        tracker.record_start("terminal", command[:40], args={"command": command})
+        tracker.record_end("terminal", output="ok")
+        step = tracker.build_display_steps()[0]
+        assert step["title_zh"].startswith("GitHub")
+        assert step["emoji"] == "🐙"
+        assert step["detail"].startswith("api repos/x/y")
+
+    @pytest.mark.parametrize("command", [
+        "$DC exec moviepilot cat x",                     # never assigned on this line
+        "DC=/usr/local/bin/docker; $DC ps",              # docker is not a listed program
+        "SSH_OPTS='-F /docker/ubuntu/ssh/config'; ssh $SSH_OPTS host ls",
+    ])
+    def test_unlisted_variable_programs_stay_terminal(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("Terminal", "终端命令")
+        assert _tool_emoji("terminal", command) == "🖥️"
+
+    @pytest.mark.parametrize("command", [
         'python3 /opt/data/.hermes/profiles/image/workspace/scripts/zimage_gen.py "Eye-level shot"',
         'python3 /opt/data/.hermes/profiles/image/workspace/scripts/gpt_image_gen.py --size 1024 "a cat"',
         './gpt_image_gen.py "x"',
