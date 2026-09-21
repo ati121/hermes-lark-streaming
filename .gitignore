@@ -17,3 +17,5 @@ tests/samples/
 .cortexkit/
 .zcode/
 .pi/
+.local/
+.workbuddy/

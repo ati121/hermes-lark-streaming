@@ -4,6 +4,23 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.7 (2026-09-22, personal fork)
+
+### Changed — the version number is now two segments
+
+From this release the version reads `MAJOR.MINOR` (`1.7`, `1.8`, …) instead of
+three segments. `plugin.yaml` stays the single source of truth, and nothing in
+the plugin parses or compares the version string — `__init__.py` and `setup.py`
+both read the field verbatim — so the shorter form is inert.
+
+### Chore — ignore local agent tooling state
+
+`.local/` (the `gh` CLI's own on-disk state) and `.workbuddy/` (local agent
+memory notes) are now ignored, alongside the existing `.cortexkit/`, `.zcode/`
+and `.pi/` entries. Both live in the working tree but must never be committed:
+the notes quote machine paths and service identifiers that the plugin security
+scanner flags, and they are meaningless on any other machine.
+
 ## v1.6.39 (2026-09-22, personal fork)
 
 ### Fixed — only the first busy interruption opened a fresh card
