@@ -330,12 +330,19 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
     if GatewayRunner is None:
         return False  # Not available yet
 
-    if _class_marked(GatewayRunner, _GW_CLASS_MARK_ATTR):
-        _gw_runner_patched = True
-        return True  # Another copy patched this class (whether or not it is ours)
-
     if _gw_runner_patched:
-        return True  # Already patched (e.g. immediate path succeeded)
+        return True  # Already patched by this copy (e.g. immediate path succeeded)
+
+    # Deliberately NOT short-circuiting on the class marker alone.  Under
+    # multiplex every profile copy shares ONE GatewayRunner class object, so the
+    # copy that loads first wins.  When that copy is an older build it only
+    # wraps the methods it knows about and then drops the marker; a newer copy
+    # loaded afterwards used to see the marker and skip wholesale, so its own
+    # new wrappers (v1.6.37's busy-path entry) never installed — while the
+    # summary line still claimed ``GatewayRunner=✓``.  Per-method idempotency is
+    # already guaranteed by _wrap_method_once ("adopted"), so re-running the
+    # per-method pass against a marked class is safe and only adds what the
+    # earlier copy could not know about.
 
     try:
         # Patch each method individually so one missing method
@@ -371,7 +378,10 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
             )
             return False
 
-        _mark_class(GatewayRunner, _GW_CLASS_MARK_ATTR, _installing_home())
+        # Keep the FIRST installer's home on the marker: it is what the next
+        # copy's diagnostics read, and later copies only add missing wrappers.
+        if not _class_marked(GatewayRunner, _GW_CLASS_MARK_ATTR):
+            _mark_class(GatewayRunner, _GW_CLASS_MARK_ATTR, _installing_home())
         _gw_runner_patched = True
         _logger.info(
             "hermes-lark-streaming: GatewayRunner patched methods: %s%s",

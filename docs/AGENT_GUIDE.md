@@ -358,7 +358,10 @@ Profile，并且会**按 profile 各加载一次目录插件**（模块名
    `os.environ`（那是启动 Profile 的凭据）。`hermes ... status` 会打印 home。
 2. **跨副本去重**——补丁标记写在**共享的宿主对象**上（`GatewayRunner` /
    `FeishuAdapter` 类属性 + 被包装函数的 `_hls_wrapped`），副本之间互相可见，
-   所以只装一层 wrapper、只建一张卡片、只回复一次。
+   所以只装一层 wrapper、只建一张卡片、只回复一次。类标记只用于诊断（记录首个
+   安装者的 home）——逐方法 pass 每个副本都会跑：别的副本装过的显示 `adopted`，
+   只有自己独有的新方法才补装。**副本之间版本不一致时这一点才生效**（v1.6.38
+   起；此前命中类标记就整体 early-return，新版本的副本会连自己的新补丁一起跳过）。
 3. **进程级状态共享**——每个 home 一个控制器，登记表挂在宿主模块上
    （`runtime_globals.shared_store`），避免两份副本各建一个控制器。
 
@@ -385,10 +388,11 @@ Hermes 的 `hermes plugins install` 用
 后果：Hermes 的目录插件发现是 `for child in sorted(path.iterdir())`
 （`hermes_cli/plugins_discovery.py`），`.` 的 ASCII 小于任何字母，于是同一 home 内
 残留目录**先于正式目录注册**，日志里表现为 `capability_check plugin=.install-<id>/plugin`。
-两份副本共用进程级去重标记，**先装 wrapper 的一方生效**；后到者命中类标记后走
-**静默 early-return**（`patching/__init__.py`，不打印 `adopted`），于是两份
-`patch summary` 都显示 `GatewayRunner=✓`，日志上分不出到底是哪份在渲染卡片。
-残留的是安装当时的版本，之后 `git pull` 更新正式目录也不会影响它。
+两份副本共用进程级去重标记，**先装 wrapper 的一方生效**；后到者只补装自己独有的
+新方法（v1.6.38 起；此前是命中类标记就**静默 early-return**，`patching/__init__.py`
+连 `adopted` 都不打），于是两份 `patch summary` 都显示 `GatewayRunner=✓`，日志上
+分不出到底是哪份在渲染卡片。残留的是安装当时的版本，之后 `git pull` 更新正式目录
+也不会影响它。
 
 **修法**：调用改为 `hermes plugins install --force --enable "$PLUGIN_URL" </dev/null`，
 并把超时放宽（例如 120→300 秒）。`--force` 直接接受 CAUTION 判定、不再弹确认，

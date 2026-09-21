@@ -4,6 +4,26 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.38 (2026-09-22, personal fork)
+
+### Fixed — a plugin copy loaded later could not install its own new patches
+
+- Under multiplex every profile is served by one gateway process, so each
+  profile's copy of this plugin patches the *same* host objects — in particular
+  the single, process-wide `GatewayRunner` class. The class-level marker that
+  guards against double-wrapping was also used as a short-circuit: whichever
+  copy loaded first dropped the marker, and any copy loaded afterwards saw it
+  and skipped the whole pass.
+- That made a partial upgrade silently self-defeating. With one profile still on
+  v1.6.36 and another on v1.6.37, the v1.6.37 copy skipped everything, so its new
+  busy-path wrapper never installed — while the startup summary still reported
+  `GatewayRunner=✓`, which is why the logs looked clean.
+- The marker now records the first installer for diagnostics only. The
+  per-method pass always runs, and `_wrap_method_once` keeps it idempotent
+  ("adopted" for wrappers another copy already installed), so a later copy adds
+  exactly the wrappers the earlier one could not know about and never stacks a
+  duplicate. `test_multiplex_isolation.py` covers the case.
+
 ## v1.6.37 (2026-09-21, personal fork)
 
 ### Fixed — a message sent while the bot was busy kept answering in the old card

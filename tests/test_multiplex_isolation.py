@@ -140,6 +140,37 @@ def test_gateway_runner_is_wrapped_only_once_across_plugin_copies(two_copies) ->
     assert getattr(runner, patching_a._GW_CLASS_MARK_ATTR, False)
 
 
+def test_later_copy_installs_wrappers_the_first_copy_never_knew(two_copies) -> None:
+    """A newer copy must still install its own new wrappers (multiplex reality).
+
+    All profile copies share ONE ``GatewayRunner`` class object, so the first
+    copy to load wins.  When that copy is an older build it wraps only the
+    methods it knows and then drops the class marker.  The newer copy used to
+    see that marker and skip wholesale — so v1.6.37's busy-path wrapper never
+    installed on a host whose default profile still ran v1.6.36, while the
+    summary line happily reported ``GatewayRunner=✓``.
+    """
+    first, second = two_copies
+    patching_a = _sub(first, "patching")
+    patching_b = _sub(second, "patching")
+    runner = _make_runner_class()
+
+    # Copy A is the older build: the busy entry does not exist yet.
+    assert patching_a._apply_gateway_runner_patches(_FakeCompat(runner)) is True
+    assert getattr(runner, patching_a._GW_CLASS_MARK_ATTR, False)
+
+    # The host gains the method between the two copies' builds.
+    async def _busy(self, event, session_key, *args, **kwargs):
+        return True
+
+    runner._handle_active_session_busy_message = _busy
+
+    # Copy B is the newer build: it must add its own wrapper on top of A's work.
+    assert patching_b._apply_gateway_runner_patches(_FakeCompat(runner)) is True
+    assert _wrap_depth(runner._handle_active_session_busy_message) == 1
+    assert _wrap_depth(runner._handle_message) == 1, "copy B stacked a duplicate wrapper"
+
+
 def test_gateway_runner_patch_is_idempotent_within_one_copy(two_copies) -> None:
     first, _second = two_copies
     patching_a = _sub(first, "patching")
