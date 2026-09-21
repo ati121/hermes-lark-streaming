@@ -71,6 +71,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
         self._continuation_map: dict[str, str] = {}
         self._continuation_map_lock = threading.Lock()
+        # v1.6.39: 已处理过的 busy 触发消息（chat_id:message_id）。同一事件若被通知两次，
+        # 第二次不该再封一次卡；有界，满了丢最旧的。
+        self._busy_trigger_seen: dict[str, float] = {}
+        self._busy_trigger_lock = threading.Lock()
         self._initialized = False
         self._init_lock = asyncio.Lock()
         self._session_ttl = self._cfg.card_duration_sec
@@ -273,9 +277,24 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     # ── v1.4.0 fix (问题3 根因1): 会话续写重激活 ──────────────────
 
     def _resolve_continuation_id(self, message_id: str) -> str | None:
-        """查询 message_id 是否已被重激活到 continuation session."""
+        """查询 message_id 最终续写到了哪个 session（可能连着续写多次）。
+
+        v1.6.39: 同一个 chat 里可以被打断多次，映射会成链
+        （``M1 → M2-cont-1 → M3-cont-1``）。只走一跳会把回调送回**已经封口**的那张
+        卡上 —— 输出写进一张封了的卡，用户照样看不见。这里一路走到链尾，带环保护。
+        """
         with self._continuation_map_lock:
-            return self._continuation_map.get(message_id)
+            current = self._continuation_map.get(message_id)
+            if current is None:
+                return None
+            seen = {message_id}
+            while current not in seen:
+                seen.add(current)
+                nxt = self._continuation_map.get(current)
+                if nxt is None:
+                    return current
+                current = nxt
+            return current  # 环（理论上不会出现），停在这里
 
     def _register_continuation(self, old_message_id: str, new_message_id: str) -> None:
         """记录 old_message_id -> new_message_id 的续写映射。线程安全。"""
@@ -283,9 +302,22 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._continuation_map[old_message_id] = new_message_id
 
     def _pop_continuation_id(self, message_id: str) -> str | None:
-        """取出并删除 message_id 对应的 continuation id（用于 on_completed 一次性消费）。"""
+        """取出并删除 message_id 对应的续写 id（用于 on_completed 一次性消费）。
+
+        v1.6.39: 链式续写时返回**链尾**并清掉整条链 —— 收尾该封的是最后那张卡。
+        """
         with self._continuation_map_lock:
-            return self._continuation_map.pop(message_id, None)
+            current = self._continuation_map.pop(message_id, None)
+            if current is None:
+                return None
+            seen = {message_id}
+            while current not in seen:
+                seen.add(current)
+                nxt = self._continuation_map.pop(current, None)
+                if nxt is None:
+                    return current
+                current = nxt
+            return current  # 环
 
     def _reactivate_session_for_continuation(
         self, stale_session: CardSession, *, anchor_id: str | None = None,
@@ -410,8 +442,31 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
     # ── v1.6.37: busy 打断后续写新卡片 ──────────────────────────────
 
+    def _claim_busy_trigger(self, chat_id: str, message_id: str) -> bool:
+        """认领一条 busy 触发消息；同一条只认领一次（v1.6.39）。
+
+        防的是同一个事件被通知两遍时连开两张卡。真正的"同一张卡不封两次"由
+        ``_resolve_continuation_id`` 兜底 —— 封过的卡已有续写映射。
+        """
+        key = f"{chat_id}:{message_id}"
+        with self._busy_trigger_lock:
+            if key in self._busy_trigger_seen:
+                return False
+            self._busy_trigger_seen[key] = time.time()
+            while len(self._busy_trigger_seen) > 128:
+                self._busy_trigger_seen.pop(next(iter(self._busy_trigger_seen)))
+        return True
+
     def _pick_supersede_target(self, chat_id: str) -> CardSession | None:
-        """挑出该 chat 里最新、还能被打断封口的活跃 session。"""
+        """挑出该 chat 里最新、还能被打断封口的活跃 session。
+
+        v1.6.39: **续写卡同样可以是目标。** 早先按 ``_is_continuation`` 把续写卡排除，
+        本意是防同一事件重复触发套出一串卡；但用户在同一个 chat 里隔一会儿再打断一次
+        是常态 —— 那一刻唯一活跃的卡正是上一轮开出来的续写卡，排除它等于第二次打断
+        永远静默失效（线上现象：第一次生效，第二次毫无反应）。防重应该按触发消息
+        （``_claim_busy_trigger``）和"已封过就不再封"（``_resolve_continuation_id``）来做，
+        与卡片的身份无关。
+        """
         target: CardSession | None = None
         newest = -1.0
         for _mid, candidate in self._sess_items_snapshot():
@@ -419,12 +474,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 continue
             if candidate.is_terminal_phase or candidate.state == COMPLETING:
                 continue
-            # 已经是续写卡，不再叠加（避免一次打断套出一串卡片）
-            if candidate._is_continuation:
-                continue
-            if candidate._continuation_reactivation_count >= 1:
-                continue
-            # 卡片还没落地就没得封口 —— 让它走自己的创建流程
+            # 卡片还没落地就没得封口 —— 让它走自己的创建流程。这条也顺带挡住
+            # "空卡套空卡"：上一张续写卡刚开出来还没建卡就又被打断一次。
             if not candidate.card_msg_id:
                 continue
             created = float(getattr(candidate, "created_at", 0.0) or 0.0)
@@ -455,9 +506,18 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _logger.debug("HLS: busy supersede config read failed", exc_info=True)
             return
 
+        if not self._claim_busy_trigger(chat_id, message_id):
+            _logger.info(
+                "HLS: busy supersede — duplicate trigger ignored chat=%s inbound=%s",
+                (chat_id or "?")[:12], (message_id or "?")[:12],
+            )
+            return
+
         target = self._pick_supersede_target(chat_id)
         if target is None:
-            _logger.debug(
+            # INFO 而非 debug：这条"什么都没做"的路径必须能从日志看出来，
+            # 否则线上表现为功能静默失效（v1.6.39 之前就是这样查了半天）。
+            _logger.info(
                 "HLS: busy supersede — no sealable active session chat=%s inbound=%s",
                 (chat_id or "?")[:12], (message_id or "?")[:12],
             )

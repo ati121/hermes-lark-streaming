@@ -183,6 +183,71 @@ class TestBusySupersede:
         assert older._was_aborted is False
         assert ctrl._continuation_map == {"om_newer": "om_inbound-cont-1"}
 
+    @pytest.mark.asyncio
+    async def test_seals_a_continuation_card_too(self) -> None:
+        """第二次打断：上一轮开出来的续写卡同样是合法目标（v1.6.39）。
+
+        线上第一次打断建出来的续写卡带着真实 card_msg_id，第二次打断必须能封它、
+        再开一张；早先按 ``_is_continuation`` 把它排除，第二次就静默失效了
+        （现象：第一次生效，第二次毫无反应）。
+        """
+        ctrl = StreamCardController()
+        _enable(ctrl)
+        _add_session(ctrl, "om_m1", card_msg_id="om_card_m1", created_at=1.0)
+
+        fire, create = _patch_side_effects(ctrl)
+        with fire, create:
+            ctrl.on_busy_superseded(message_id="om_m2", chat_id="chat1")
+            first = ctrl._sess_get("om_m2-cont-1")
+            assert first is not None
+            # 线上到这一步卡片已经真的建出来了
+            first.card_msg_id = "om_card_c1"
+
+            ctrl.on_busy_superseded(message_id="om_m3", chat_id="chat1")
+
+        assert first._was_aborted is True
+        assert first.state == COMPLETING
+        second = ctrl._sess_get("om_m3-cont-1")
+        assert second is not None
+        assert second._is_continuation is True
+        assert ctrl._continuation_map["om_m2-cont-1"] == "om_m3-cont-1"
+
+        # 链式解析：带着最初 message_id 的回调要一路走到最后那张卡
+        assert ctrl._get_active_session("om_m1") is second
+
+    @pytest.mark.asyncio
+    async def test_same_trigger_message_is_claimed_once(self) -> None:
+        """同一个事件被通知两遍时不能连开两张卡。"""
+        ctrl = StreamCardController()
+        _enable(ctrl)
+        _add_session(ctrl, "om_old", card_msg_id="om_card_old")
+
+        fire, create = _patch_side_effects(ctrl)
+        with fire, create:
+            ctrl.on_busy_superseded(message_id="om_a", chat_id="chat1")
+            ctrl.on_busy_superseded(message_id="om_a", chat_id="chat1")
+
+        continuations = [
+            mid for mid, s in ctrl._sess_items_snapshot() if s._is_continuation
+        ]
+        assert continuations == ["om_a-cont-1"]
+
+    @pytest.mark.asyncio
+    async def test_chain_is_consumed_at_the_tail_when_the_turn_finishes(self) -> None:
+        """收尾消费整条链 —— 封的是最后那张卡，映射不留残渣。"""
+        ctrl = StreamCardController()
+        _enable(ctrl)
+        _add_session(ctrl, "om_m1", card_msg_id="om_card_m1", created_at=1.0)
+
+        fire, create = _patch_side_effects(ctrl)
+        with fire, create:
+            ctrl.on_busy_superseded(message_id="om_m2", chat_id="chat1")
+            ctrl._sess_get("om_m2-cont-1").card_msg_id = "om_card_c1"
+            ctrl.on_busy_superseded(message_id="om_m3", chat_id="chat1")
+
+        assert ctrl._pop_continuation_id("om_m1") == "om_m3-cont-1"
+        assert ctrl._continuation_map == {}
+
 
 class TestBusySupersedeNotify:
     """gateway 侧的通知过滤 —— 内部事件绝不能封用户的卡。"""

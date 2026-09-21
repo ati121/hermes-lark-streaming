@@ -4,6 +4,30 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.6.39 (2026-09-22, personal fork)
+
+### Fixed — only the first busy interruption opened a fresh card
+
+- The busy-path fix in v1.6.37 sealed the card in progress and continued on a new
+  one, but it worked exactly **once per chat**. The target picker refused to
+  consider a card that was itself a continuation, on the theory that re-sealing
+  one would chain cards out of control. In practice the only live card at the
+  *second* interruption is precisely the continuation opened by the first, and
+  the card it replaced is already completing — so every candidate was rejected and
+  the second interruption did nothing at all. The user saw the feature work once
+  and then go silent.
+- The exclusion is gone: a continuation is a valid target. Duplicate protection
+  now comes from the two places that actually describe it — one event is claimed
+  once per inbound message id (`_claim_busy_trigger`), and a card that was already
+  sealed cannot be sealed again (its continuation mapping exists). Repeated
+  interruptions in the same chat now each get their own card.
+- Continuation mappings are chains (`M1 → M2-cont-1 → M3-cont-1`), so lookups and
+  completion now walk to the tail instead of one hop. A one-hop lookup handed the
+  callbacks back to the card that had just been sealed, which would put the output
+  on a finished card. Completion consumes the whole chain and seals the last card.
+- The "nothing to seal" branch logs at INFO rather than debug: a silent no-op is
+  indistinguishable from a broken feature, and that is what let this hide.
+
 ## v1.6.38 (2026-09-22, personal fork)
 
 ### Fixed — a plugin copy loaded later could not install its own new patches

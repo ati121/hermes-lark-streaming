@@ -309,7 +309,7 @@ display:
 | 8 | `on_message_aborted` | sync | 消息异常终止 |
 | 9 | `on_message_interrupted` | sync | 新消息打断旧消息 |
 | 10 | `on_cron_deliver` | **async** | Cron 推送卡片 |
-| 11 | `on_busy_superseded` | sync | agent 忙时收到新消息（Hermes busy 入口，绕过 inbound 路径）：封口当前卡片，后续输出开新卡继续。内部事件会被过滤 |
+| 11 | `on_busy_superseded` | sync | agent 忙时收到新消息（Hermes busy 入口，绕过 inbound 路径）：封口当前卡片，后续输出开新卡继续。同一条触发消息只处理一次；可以连续打断（每次开一张新卡，续写映射成链，v1.6.39）。内部事件会被过滤 |
 | — | `pre_gateway_dispatch` | sync→dict | Hermes 原生插件 hook（v1.1.0），实现在 `aowen/`。返回 `{"action":"skip"}` 阻止消息进入 agent，用于 /aowen 命令 |
 | — | `on_memory_prefetch_updated` | sync→bool | 记忆自动预取开始/结束（v1.6.22），由 `patching/memory.py` 触发 |
 
