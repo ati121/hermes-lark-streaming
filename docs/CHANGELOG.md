@@ -4,6 +4,24 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.9 (2026-09-22, personal fork)
+
+### Fixed — the streaming reasoning preview no longer unfolds into a column of fragments
+
+The preview shows the newest reasoning trimmed to about two lines, capped by
+display width (`REASONING_PREVIEW_CELLS`, 200 cells). Two lines was the right
+estimate for a model that thinks in prose. A model that thinks one short clause
+per line — including lines carrying nothing but `(output tool call)` — spends the
+same 200 cells on a dozen-plus separate lines, and the block becomes a tall
+ragged column with the shape of the whole card distorted.
+
+Reasoning is now flattened before it is measured: hard line breaks collapse into
+a single space, so the same 200-cell budget fills two lines whatever the model's
+line habits are. The cap itself is unchanged, and so is the amount of reasoning
+on screen. The expanded view flattens too — a 5000-character cap used to mean
+over a thousand lines for such a model. The tail cut still snaps to a former line
+boundary, or to the end of a sentence, so the preview never opens mid-word.
+
 ## v1.8 (2026-09-22, personal fork)
 
 ### Fixed — a rate-limited seal no longer strands the card

@@ -1390,19 +1390,37 @@ class TestPinnedReasoning:
     def test_preview_short_text_returned_as_is(self) -> None:
         from hermes_lark_streaming.cardkit.elements import pinned_reasoning_preview_text
         assert pinned_reasoning_preview_text("短思考") == "短思考"
+        assert pinned_reasoning_preview_text("") == ""
+
+    def test_preview_flattens_short_model_lines(self) -> None:
+        """v1.9: 一行一个短句的思考折成一整段，不再十几行碎句。"""
+        from hermes_lark_streaming.cardkit.elements import pinned_reasoning_preview_text
+        raw = "\n".join([
+            "跑：看是啥 ✅", "跑。", "嗯，先看文件大小、内容 ✅", "跑！",
+            "好。", "（跑）", "好，输出。", "（输出 tool call）",
+        ])
+        preview = pinned_reasoning_preview_text(raw)
+        assert "\n" not in preview
+        assert preview == (
+            "跑：看是啥 ✅ 跑。 嗯，先看文件大小、内容 ✅ 跑！ "
+            "好。 （跑） 好，输出。 （输出 tool call）"
+        )
 
     def test_preview_keeps_tail_within_cells(self) -> None:
         from hermes_lark_streaming.cardkit.elements import (
             REASONING_PREVIEW_CELLS,
             _display_cells,
+            _flatten_reasoning_lines,
             pinned_reasoning_preview_text,
         )
-        text = "".join(f"第{i}行思考内容\n" for i in range(60)).strip()
-        preview = pinned_reasoning_preview_text(text)
+        flat = _flatten_reasoning_lines(
+            "".join(f"第{i}行思考内容\n" for i in range(60)).strip()
+        )
+        preview = pinned_reasoning_preview_text(flat)
         assert preview.startswith("…")
-        assert text.endswith(preview[1:])
+        assert flat.endswith(preview[1:])
         assert _display_cells(preview[1:]) <= REASONING_PREVIEW_CELLS
-        # 从整行开始，不从半行切入
+        # 折平后仍对齐到整行（原换行处），不从半个词切入
         assert preview[1:].startswith("第")
 
     def test_preview_counts_cjk_as_two_cells(self) -> None:
@@ -1411,6 +1429,21 @@ class TestPinnedReasoning:
         cjk_text = "思" * 200
         assert pinned_reasoning_preview_text(ascii_text) == ascii_text
         assert len(pinned_reasoning_preview_text(cjk_text)) < 200
+
+    def test_preview_ellipsis_aligns_to_former_line_start(self) -> None:
+        """折平后仍不从半个词切入：尾巴起点对齐到原换行处的空格之后。"""
+        from hermes_lark_streaming.cardkit.elements import pinned_reasoning_preview_text
+        raw = "\n".join(f"第{i}步思考" for i in range(40))
+        preview = pinned_reasoning_preview_text(raw)
+        assert preview.startswith("…")
+        assert "\n" not in preview
+        assert preview[1:].startswith("第")
+
+    def test_expanded_text_flattens_short_model_lines(self) -> None:
+        """v1.9: 展开视图同样折平碎行，5000 字上限不再等于上千行。"""
+        from hermes_lark_streaming.cardkit.elements import pinned_reasoning_expanded_text
+        raw = "跑。\n好。\n（跑）\n好，输出。"
+        assert pinned_reasoning_expanded_text(raw) == "跑。 好。 （跑） 好，输出。"
 
     def test_expanded_text_truncates_at_limit(self) -> None:
         from hermes_lark_streaming.cardkit.elements import (

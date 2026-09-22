@@ -380,6 +380,16 @@ def _collapse_blank_lines(text: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def _flatten_reasoning_lines(text: str) -> str:
+    """把模型自己拆的碎行折成一整段（老大 2026-09-22）。
+
+    有些模型的思考是一行一个短句（`（输出 tool call）` 都能单独占一行），
+    按显示宽度取预览时会变成十几行碎句。这里把硬换行折成空格，
+    同样的 200 格宽度就从「十几行碎句」变回稳定的 2 行。
+    """
+    return re.sub(r"\s*\n+\s*", " ", text).strip()
+
+
 def pinned_reasoning_full_text(reasoning_rounds: list, current_reasoning_text: str = "") -> str:
     parts = [getattr(r, "text", "").strip() for r in reasoning_rounds if getattr(r, "text", "").strip()]
     if current_reasoning_text and current_reasoning_text.strip():
@@ -404,22 +414,32 @@ def _display_cells(text: str, cap: int | None = None) -> int:
     return total
 
 
+_SENTENCE_END_CHARS = "。！？；!?;"
+
+
 def _align_preview_start(text: str, start: int) -> int:
-    """别从半行/半个单词开始。"""
+    """别从半行/半句/半个单词开始。"""
     limit = min(len(text), start + 24)
     nl_pos = text.find("\n", start, limit)
     if nl_pos != -1:
         return nl_pos + 1
-    if start > 0 and text[start - 1:start + 1].isascii():
-        sp = text.find(" ", start, limit)
-        if sp != -1:
-            return sp + 1
+    for i in range(start, limit):
+        if text[i] in _SENTENCE_END_CHARS:
+            return i + 1
+    # 折平后的空格就是模型原来的换行处，这样能对齐到整行/整词
+    sp = text.find(" ", start, limit)
+    if sp != -1:
+        return sp + 1
     return start
 
 
 def pinned_reasoning_preview_text(full: str, cells: int = REASONING_PREVIEW_CELLS) -> str:
-    """生成中自动显示：最新思考的末尾约 2 行（按显示宽度算，尽量填满）。"""
-    text = (full or "").strip()
+    """生成中自动显示：最新思考的末尾约 2 行（按显示宽度算，尽量填满）。
+
+    先折平模型自己的硬换行（老大 2026-09-22）——碎行模型按宽度取尾巴会
+    变成十几行；折平后同样 200 格，稳定占满 2 行。
+    """
+    text = _flatten_reasoning_lines(full or "")
     if not text:
         return ""
     if _display_cells(text, cap=cells) <= cells:
@@ -434,9 +454,10 @@ def pinned_reasoning_preview_text(full: str, cells: int = REASONING_PREVIEW_CELL
     start = _align_preview_start(text, start)
     return "…" + text[start:].strip()
 
+
 def pinned_reasoning_expanded_text(full: str) -> str:
-    """点按钮后显示：全部思考过程，超过 REASONING_EXPANDED_LIMIT 字截断并标注。"""
-    text = (full or "").strip()
+    """点按钮后显示：全部思考过程（同样折平碎行），超过上限截断并标注。"""
+    text = _flatten_reasoning_lines(full or "")
     if len(text) <= REASONING_EXPANDED_LIMIT:
         return text
     head = text[:REASONING_EXPANDED_LIMIT]
