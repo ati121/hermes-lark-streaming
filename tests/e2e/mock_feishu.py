@@ -171,7 +171,9 @@ class MockFeishuServer:
                     state.elements[eid] = element
         self._call_log.append({"op": "cardkit_update", "card_id": card_id, "seq": sequence})
 
-    async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
+    async def update_card(
+        self, message_id: str, card: dict[str, Any], **kwargs: Any
+    ) -> None:
         self._call_log.append({"op": "update_card", "message_id": message_id})
 
     async def send_card_to_chat(self, chat_id: str, card: dict[str, Any]) -> str:

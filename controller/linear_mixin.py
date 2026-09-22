@@ -1757,7 +1757,13 @@ class UnifiedControllerMixin:
                 footer_fields=self._cfg.footer_fields,
                 footer_show_label=self._cfg.footer_show_label,
             )
-            await self._client.update_card(session.card_msg_id, card)
+            # 终态封口只有这一次机会：拿不到它，卡片就永远停在「思考中」，
+            # 而且上层会退化成裸文本回复（见 _do_linear_complete_with_fallback）。
+            # 所以只有这里为 IM 频控（230020）开退避重试（1/2/4s）；流式刷新
+            # 那条热路径不开，撞上限流就放弃本轮、等下一轮覆盖。
+            await self._client.update_card(
+                session.card_msg_id, card, retry_frequency_limit=True,
+            )
         except Exception as e:
             _logger.warning(
                 "interactive card seal failed: %s msg=%s",

@@ -389,14 +389,14 @@ class TestGetHermesConfigPath:
 
 
     def test_flush_interval_ms_default(self) -> None:
-        """flush_interval_ms 默认 200ms (v1.3.1: 恢复 v1.2.1 P1-01 的默认值)."""
+        """flush_interval_ms 默认 500ms（v1.8: 从 200 上调，避开飞书 5 QPS 上限）."""
         cfg = Config()
-        assert cfg.flush_interval_ms == 200.0
+        assert cfg.flush_interval_ms == 500.0
 
     def test_flush_interval_sec_default(self) -> None:
-        """flush_interval_sec 默认 0.2 秒 (v1.3.1)."""
+        """flush_interval_sec 默认 0.5 秒（v1.8）."""
         cfg = Config()
-        assert cfg.flush_interval_sec == 0.2
+        assert cfg.flush_interval_sec == 0.5
 
     def test_flush_interval_ms_custom(self, tmp_path: object) -> None:
         """flush_interval_ms 可配置."""

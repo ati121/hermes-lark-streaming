@@ -3292,6 +3292,25 @@ class TestReasoningToggle:
         assert "rsn_body" not in ids
 
     @pytest.mark.asyncio
+    async def test_seal_asks_for_frequency_limit_retry(self) -> None:
+        """终态封口要显式索要频控重试.
+
+        封口只有这一次机会：被 230020 挡掉就永久停在「思考中」，上层还会
+        退化成裸文本回复。流式刷新不吃这个待遇（见 test_frequency_limit_retry）。
+        """
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_seal_fl", linear=True)
+        session.card_msg_id = "msg_seal_fl"
+        session.interactive_mode = True
+        session.state = STREAMING
+        session.unified_state.on_answer_delta("答案")
+        ctrl._sessions[session.message_id] = session
+
+        assert await ctrl._do_interactive_linear_complete(session) is True
+
+        assert ctrl._client.update_card.await_args.kwargs["retry_frequency_limit"] is True
+
+    @pytest.mark.asyncio
     async def test_apply_snapshot_replaces_whole_card_for_message_card(self) -> None:
         ctrl = _setup_ctrl(linear=True)
         old_card = {"body": {"elements": [

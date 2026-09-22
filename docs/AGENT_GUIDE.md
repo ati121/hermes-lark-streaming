@@ -114,7 +114,7 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 | `streaming_panel_expanded` | `false` | bool | 流式态统一面板是否展开 |
 | `print_strategy` | `delay` | `fast`/`delay` | 打字机效果策略 |
 | `print_step` | `4` | 1–10 | 每次渲染字符数，需飞书 7.23+ |
-| `flush_interval_ms` | `200` | 70–2000 | 插件发送间隔（毫秒） |
+| `flush_interval_ms` | `500` | 70–2000 | 流式刷新间隔（毫秒）。默认 2 次/秒，给飞书 IM 接口的 5 QPS 上限留余量 |
 | `card_ttl_sec` | `600` | >0 | 卡片存活检测超时（秒） |
 | `max_tool_steps` | `20` | 1–100 | 面板显示的工具步骤上限 |
 | `max_reasoning_rounds` | `20` | 1–100 | 面板显示的推理轮次上限 |
@@ -157,7 +157,7 @@ hermes_lark_streaming:
   streaming_panel_expanded: false
   print_strategy: delay
   print_step: 4
-  flush_interval_ms: 200
+  flush_interval_ms: 500
   card_ttl_sec: 600
   max_tool_steps: 20
   max_reasoning_rounds: 20

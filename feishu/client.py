@@ -109,6 +109,10 @@ CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
+# IM 通道频控（im.v1.message.apatch 返回）：单聊/群维度 QPS ≤ 5。
+# 与 CardKit 那组码不同源，故不放进 CARDKIT_TRANSIENT_CODES —— 详见
+# _retry_transient 的 frequency_limit_delays 参数。
+IM_FREQUENCY_LIMIT = 230020
 
 # v1.3.1 fix: 300315 错误码有两种含义：
 _RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
@@ -125,6 +129,10 @@ CARDKIT_TRANSIENT_CODES = {
 # 瞬态错误重试策略 — 指数退避
 _TRANSIENT_RETRY_DELAYS = (0.1, 0.3, 0.6)  # 3 次重试，递增延迟
 _TRANSIENT_MAX_RETRIES = len(_TRANSIENT_RETRY_DELAYS)
+
+# 频控退避要长得多：飞书的限流窗口是秒级，0.1/0.3/0.6 这条序列根本跨不出去，
+# 只会把三个请求全撞在同一个窗口里。1/2/4 秒才够一个窗口翻篇。
+_FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
 _ELEMENT_NOT_FOUND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 _ELEMENT_NOT_FOUND_MAX_RETRIES = len(_ELEMENT_NOT_FOUND_RETRY_DELAYS)
@@ -168,6 +176,15 @@ class FeishuClientConfig:
         if not isinstance(self.app_secret, str) or not self.app_secret.strip():
             raise ValueError("app_secret is required")
 
+def _is_frequency_limit(e: FeishuAPIError) -> bool:
+    """230020: 飞书 IM 接口频控（单聊/群维度 QPS ≤ 5）.
+
+    这个码默认不重试 —— 它的成因是"这一秒发太多了"，而插件最密集的调用
+    恰恰是流式刷新：那些渲染下一轮就会被更新的内容覆盖，为它们退避等待
+    只会把刷新队列越堆越长。只有终态封口那种"一次机会"的调用才值得等。
+    """
+    return e.code == IM_FREQUENCY_LIMIT
+
 def _is_transient_error(e: FeishuAPIError) -> bool:
     """判断 FeishuAPIError 是否为 CardKit 瞬态错误（可重试）."""
     if e.code in CARDKIT_TRANSIENT_CODES:
@@ -202,8 +219,15 @@ class FeishuClient:
         coro_factory: Callable[[], Any],
         *,
         max_retries: int = _TRANSIENT_MAX_RETRIES,
+        frequency_limit_delays: tuple[float, ...] | None = None,
     ) -> Any:
-        """执行协程，遇到 CardKit 瞬态错误时自动重试."""
+        """执行协程，遇到 CardKit 瞬态错误时自动重试.
+
+        frequency_limit_delays: 只有显式传入时，IM 频控（230020）才算可重试，
+        并按这条更长的序列退避；默认 None 表示频控直接抛出。这个默认值是有意
+        的 —— 流式刷新撞上限流时应该放弃本轮，让下一轮渲染覆盖掉，而不是在
+        热路径上阻塞几秒把刷新越堆越多（见 _is_frequency_limit 的注释）。
+        """
         last_error: FeishuAPIError | None = None
         for attempt in range(max_retries + 1):
             try:
@@ -217,13 +241,19 @@ class FeishuClient:
                 return result
             except FeishuAPIError as e:
                 last_error = e
-                if not _is_transient_error(e):
+                if _is_frequency_limit(e) and frequency_limit_delays is not None:
+                    delays: tuple[float, ...] = frequency_limit_delays
+                    note = " (frequency limit)"
+                elif _is_transient_error(e):
+                    delays = _TRANSIENT_RETRY_DELAYS
+                    note = ""
+                else:
                     raise
                 if attempt < max_retries:
-                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                    delay = delays[min(attempt, len(delays) - 1)]
                     _logger.info(
-                        "transient retry: %s attempt=%d/%d code=%s delay=%.2fs",
-                        operation, attempt + 1, max_retries, e.code, delay,
+                        "transient retry%s: %s attempt=%d/%d code=%s delay=%.2fs",
+                        note, operation, attempt + 1, max_retries, e.code, delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -386,8 +416,19 @@ class FeishuClient:
             return str(resp.data.message_id)
         raise FeishuAPIError("reply_card_by_id: response missing message_id")
 
-    async def update_card(self, message_id: str, card: dict[str, Any]) -> None:
-        """PATCH 更新已发送的卡片（IM PATCH 通道）."""
+    async def update_card(
+        self,
+        message_id: str,
+        card: dict[str, Any],
+        *,
+        retry_frequency_limit: bool = False,
+    ) -> None:
+        """PATCH 更新已发送的卡片（IM PATCH 通道）.
+
+        retry_frequency_limit: 撞上飞书 IM 频控（230020）时是否退避重试。
+        流式刷新保持 False；只有终态封口那种「只有一次机会、失败就永久卡住」
+        的调用才传 True。
+        """
         async def _do() -> None:
             request = (
                 PatchMessageRequest.builder()
@@ -398,7 +439,13 @@ class FeishuClient:
             resp = await self._client.im.v1.message.apatch(request)
             self._check(resp, "update_card")
 
-        await self._retry_transient("update_card", _do)
+        await self._retry_transient(
+            "update_card",
+            _do,
+            frequency_limit_delays=(
+                _FREQUENCY_LIMIT_RETRY_DELAYS if retry_frequency_limit else None
+            ),
+        )
 
     async def cardkit_create(self, card: dict[str, Any]) -> str:
         """创建 CardKit 实体，返回 card_id."""

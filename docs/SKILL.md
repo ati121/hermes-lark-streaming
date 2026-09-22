@@ -269,7 +269,7 @@ hermes_lark_streaming:
   streaming_panel_expanded: false
   print_strategy: delay            # "fast" 或 "delay"
   print_step: 4                    # 打字机每次渲染字符数（默认4，范围1~10，需飞书7.23+）
-  flush_interval_ms: 200           # 插件发送间隔（默认200ms）
+  flush_interval_ms: 500           # 流式刷新间隔（默认500ms=2次/秒，避开飞书IM接口5 QPS上限）
   card_ttl_sec: 600
   max_tool_steps: 20               # 范围 1~100
   max_reasoning_rounds: 20         # 范围 1~100

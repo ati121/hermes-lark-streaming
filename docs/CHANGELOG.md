@@ -4,6 +4,43 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.8 (2026-09-22, personal fork)
+
+### Fixed — a rate-limited seal no longer strands the card
+
+Feishu rate-limits the IM message API per chat at 5 calls per second and answers
+the excess with `230020` (`This operation triggers the frequency limit`). Two
+things lined up badly:
+
+- the default refresh interval was 200 ms — exactly 5 calls per second, so the
+  streaming refresh consumed the whole budget by itself. A card creation, a seal,
+  or a busy-interruption notice landing in the same second was rejected;
+- `230020` was not in the retryable set, and a rejected seal gets no second
+  chance. The interactive card was left on its last accepted render — still
+  showing the streaming footer — `_do_interactive_linear_complete` reported
+  `CREATION_FAILED`, and the controller fell back to `_send_text_fallback`. That
+  fallback is a `msg_type=text` reply, so the entire card, its layout and its
+  markdown, collapsed into a plain message with raw asterisks.
+
+`230020` is now recognised and retried with a **1 / 2 / 4 second** backoff, but
+only where waiting is worth it. `_retry_transient` gained an optional
+`frequency_limit_delays` argument and treats the code as retryable only when one
+is passed; `update_card` exposes it as `retry_frequency_limit`, and the terminal
+seal is the only caller that sets it. Streaming refreshes keep failing fast on
+purpose — their output is superseded by the next render, so blocking on a backoff
+there would only pile up stale frames.
+
+### Changed — default refresh interval 200 ms → 500 ms
+
+The old default sat exactly on Feishu's per-chat limit. At 2 calls per second the
+refresh loop leaves headroom for the calls that cannot simply be retried away.
+Deployments that pin an explicit `flush_interval_ms` are unaffected: only the
+default, and the value injected into a fresh `config.yaml`, moved.
+
+Worth knowing when changing it: the interval is served from the cached config, so
+an edited `config.yaml` needs `/aowen config reload` or a gateway restart to take
+effect. Editing the file alone does nothing — there is no mtime check.
+
 ## v1.7 (2026-09-22, personal fork)
 
 ### Changed — the version number is now two segments

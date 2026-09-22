@@ -288,9 +288,14 @@ class Config:
 
     @property
     def flush_interval_ms(self) -> float:
-        """stream_element API 节流间隔 (ms). 默认 200."""
+        """流式刷新节流间隔 (ms). 默认 500，即每秒 2 次.
+
+        v1.8: 默认值从 200 上调。200ms 恰好等于飞书 IM 接口单聊/群维度的
+        5 QPS 上限（错误码 230020），等于零余量 —— 刷新自己就把配额吃干，
+        再叠一次建卡或终态封口就撞限流。2 次/秒留出余量。
+        """
         sec = self._plugin_sec()
-        ms = _to_float(sec.get("flush_interval_ms", 200), default=200.0)
+        ms = _to_float(sec.get("flush_interval_ms", 500), default=500.0)
         return max(70.0, min(2000.0, ms))
 
     @property
