@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -146,8 +147,27 @@ def _cleanup_config() -> None:
     except Exception:
         _logger.exception("Failed to clean up hermes_lark_streaming config / plugins.enabled")
 
+def _is_gateway_run_process() -> bool:
+    """True when this process is a long-lived ``hermes ... gateway run``.
+
+    Matches ``gateway`` immediately followed by ``run`` anywhere in argv, so
+    ``hermes gateway run --replace`` and
+    ``python -m hermes_cli.main --profile X gateway run`` both qualify, while
+    ``hermes gateway status`` does not.
+    """
+    argv = sys.argv[1:]
+    return any(a == "gateway" and b == "run" for a, b in zip(argv, argv[1:]))
+
+
 def register(ctx: "PluginContext") -> None:
     """Register hermes-lark-streaming as a Hermes plugin (applies runtime patches)."""
+    # Short-lived CLI processes (``hermes profile list``, ``hermes gateway status``
+    # — spawned per request by web UIs) never deliver cards, yet importing the
+    # patches pulls in lark_oapi and adds ~7s to every such command.
+    if not _is_gateway_run_process():
+        _logger.debug("hermes-lark-streaming v%s: not a gateway run process, skipping", __version__)
+        return
+
     _ensure_streaming_config()
 
     try:

@@ -4,6 +4,24 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.10 (2026-09-25, personal fork)
+
+### Fixed — short-lived `hermes` CLI commands no longer pay for the plugin
+
+Hermes loads every enabled plugin in every process, including one-shot CLI
+commands such as `hermes profile list` and `hermes gateway status`. Web UIs spawn
+those per request. `register()` imported the patching package, which pulls in
+`lark_oapi` through the plugin's Feishu client — about 7 seconds of the ~12 a
+`profile list` took, all spent in a process that exits without ever sending a
+card. A caller with a 10-second timeout killed the command every time and fell
+back to a slower path.
+
+`register()` now returns immediately unless the process is a `gateway run`
+(`gateway` immediately followed by `run` anywhere in argv, so
+`--profile X gateway run` still qualifies and `gateway status` does not). The
+gateway itself is unchanged: config injection, patches, the `/aowen` hook and the
+FeishuClient pre-warm all still run there.
+
 ## v1.9 (2026-09-22, personal fork)
 
 ### Fixed — the streaming reasoning preview no longer unfolds into a column of fragments

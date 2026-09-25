@@ -21,6 +21,7 @@ class TestPatchBasics:
 
         mock_ctx = MagicMock()
         with (
+            patch("hermes_lark_streaming.plugin._is_gateway_run_process", return_value=True),
             patch("hermes_lark_streaming.plugin._ensure_streaming_config"),
             patch("hermes_lark_streaming.patching.apply_patches"),
             patch("hermes_lark_streaming.plugin._logger") as mock_logger,
@@ -45,6 +46,7 @@ class TestPatchBasics:
         mock_ctx = MagicMock()
         # 模拟无运行事件循环的场景（触发 pre-warm 的 except RuntimeError）
         with (
+            patch("hermes_lark_streaming.plugin._is_gateway_run_process", return_value=True),
             patch("hermes_lark_streaming.plugin._ensure_streaming_config"),
             patch("hermes_lark_streaming.patching.apply_patches"),
             patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")),
@@ -59,6 +61,39 @@ class TestPatchBasics:
         hook_name = call_args[0][0] if call_args[0] else call_args[1].get("hook_name")
         assert hook_name == "pre_gateway_dispatch", \
             f"Expected pre_gateway_dispatch hook, got: {hook_name}"
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (["hermes", "gateway", "run", "--replace"], True),
+            (["/opt/hermes/hermes_cli/main.py", "--profile", "image", "gateway", "run"], True),
+            (["hermes", "gateway", "status"], False),
+            (["hermes", "profile", "list"], False),
+            (["hermes_bridge.py", "--endpoint", "ipc:///tmp/x.sock"], False),
+        ],
+    )
+    def test_is_gateway_run_process(self, argv: list[str], expected: bool) -> None:
+        """Only ``gateway run`` counts as the long-lived gateway process."""
+        from hermes_lark_streaming.plugin import _is_gateway_run_process
+
+        with patch("sys.argv", argv):
+            assert _is_gateway_run_process() is expected
+
+    def test_register_skips_outside_gateway_run(self) -> None:
+        """CLI processes like ``hermes profile list`` must not apply patches or register hooks."""
+        from hermes_lark_streaming.plugin import register
+
+        mock_ctx = MagicMock()
+        with (
+            patch("sys.argv", ["hermes", "profile", "list"]),
+            patch("hermes_lark_streaming.plugin._ensure_streaming_config") as mock_ensure,
+            patch("hermes_lark_streaming.patching.apply_patches") as mock_apply,
+        ):
+            register(mock_ctx)
+
+        mock_ensure.assert_not_called()
+        mock_apply.assert_not_called()
+        mock_ctx.register_hook.assert_not_called()
 
     def test_monkey_patch_module_imports_version(self) -> None:
         """patching module should import __version__ from the package."""

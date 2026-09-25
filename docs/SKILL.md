@@ -99,7 +99,7 @@ Hook 11 里封口当前卡片、开一张新卡续写；后续回调带的仍是
 | **aowen/** | **监控命令子包 (v1.1.0)** | |
 | `└ __init__.py` | /aowen 命令体系 | pre_gateway_dispatch hook + metrics 收集 + 卡片构建 |
 | **plugin/** | **插件注册子包 (v1.1.0)** | |
-| `└ __init__.py` | 注册入口 | `register()`/`unregister()` + 自动备份 config + FeishuClient 预热 + monitor 启动 |
+| `└ __init__.py` | 注册入口 | `register()`/`unregister()` + 自动备份 config + FeishuClient 预热 + monitor 启动；非 `gateway run` 进程直接跳过 (v1.10) |
 | `__main__.py` | CLI 入口 | status/verify/doctor/cleanup/python |
 
 ---
