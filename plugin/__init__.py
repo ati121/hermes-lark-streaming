@@ -168,6 +168,17 @@ def register(ctx: "PluginContext") -> None:
         _logger.debug("hermes-lark-streaming v%s: not a gateway run process, skipping", __version__)
         return
 
+    # Register hooks before the slow patching below: the Hermes loader gives
+    # register() 10s, and on slow hosts importing the patches (lark_oapi) takes
+    # longer.  Patches still land after the timeout, but hook registrations
+    # made after it are ignored.
+    try:
+        from ..aowen import handle_pre_gateway_dispatch
+        ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
+        _logger.info("hermes-lark-streaming v%s: /aowen commands registered (help, status, monitor)", __version__)
+    except Exception:
+        _logger.debug("hermes-lark-streaming v%s: /aowen hook registration skipped", __version__, exc_info=True)
+
     _ensure_streaming_config()
 
     try:
@@ -226,13 +237,6 @@ def register(ctx: "PluginContext") -> None:
                 _logger.debug("hermes-lark-streaming v%s: event loop not running, skipping pre-warm", __version__)
     except Exception:
         _logger.debug("hermes-lark-streaming v%s: FeishuClient pre-warm skipped", __version__, exc_info=True)
-
-    try:
-        from ..aowen import handle_pre_gateway_dispatch
-        ctx.register_hook("pre_gateway_dispatch", handle_pre_gateway_dispatch)
-        _logger.info("hermes-lark-streaming v%s: /aowen commands registered (help, status, monitor)", __version__)
-    except Exception:
-        _logger.debug("hermes-lark-streaming v%s: /aowen hook registration skipped", __version__, exc_info=True)
 
 def unregister(ctx: "PluginContext") -> None:
     """Unregister — clean up injected config and clear sessions."""

@@ -95,6 +95,23 @@ class TestPatchBasics:
         mock_apply.assert_not_called()
         mock_ctx.register_hook.assert_not_called()
 
+    def test_register_hook_before_patches(self) -> None:
+        """The hook must be registered before the slow patching: the Hermes loader
+        ignores register_hook() calls that arrive after its 10s register() timeout."""
+        from hermes_lark_streaming.plugin import register
+
+        order: list[str] = []
+        mock_ctx = MagicMock()
+        mock_ctx.register_hook.side_effect = lambda *a, **k: order.append("hook")
+        with (
+            patch("hermes_lark_streaming.plugin._is_gateway_run_process", return_value=True),
+            patch("hermes_lark_streaming.plugin._ensure_streaming_config"),
+            patch("hermes_lark_streaming.patching.apply_patches", side_effect=lambda: order.append("patches")),
+        ):
+            register(mock_ctx)
+
+        assert order == ["hook", "patches"]
+
     def test_monkey_patch_module_imports_version(self) -> None:
         """patching module should import __version__ from the package."""
         from hermes_lark_streaming.patching import __version__ as mp_version

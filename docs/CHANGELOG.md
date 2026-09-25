@@ -4,6 +4,17 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.11 (2026-09-26, personal fork)
+
+### Fixed — `/aowen` commands lost on slow hosts
+
+The Hermes plugin loader gives `register()` 10 seconds. On slower hosts importing
+the patches takes longer than that inside the gateway; the patches still land once
+the import finishes, but the loader ignores any `register_hook()` call made after
+the timeout, so the `pre_gateway_dispatch` hook behind `/aowen` was silently
+dropped. `register()` now registers the hook first, before config injection and
+patching.
+
 ## v1.10 (2026-09-25, personal fork)
 
 ### Fixed — short-lived `hermes` CLI commands no longer pay for the plugin
