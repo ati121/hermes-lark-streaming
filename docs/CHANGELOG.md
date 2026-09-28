@@ -4,6 +4,16 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.13 (2026-09-28, personal fork)
+
+### Fixed — extra OpenViking preparation step before real stages
+
+Automatic prefetch now shows only the loading animation until a real stage
+arrives, then displays `意图分析` → `记忆检索`. Removed the preparation hint
+from initial cards and live updates, including when prefetch begins after the
+card is created. Real stages remain visible when spinner text updates are
+unsupported; completion restores the normal model-waiting status.
+
 ## v1.12 (2026-09-28, personal fork)
 
 ### Added — real OpenViking prefetch phases

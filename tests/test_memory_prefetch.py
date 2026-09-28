@@ -20,12 +20,13 @@ from hermes_lark_streaming.patching import (
     _thread_local_ctx,
 )
 from hermes_lark_streaming.patching.memory import _maybe_wrap_memory_prefetch
+from hermes_lark_streaming.patching.memory_progress import _progress_context
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 from hermes_lark_streaming.state.phase import CardPhase, TerminalReason
 
 pytestmark = pytest.mark.asyncio
 
-_RECALL = "📖 OpenViking · 准备记忆上下文"
+_INTENT = "📖 OpenViking · 意图分析"
 _WAITING = "等待上游模型响应"
 
 
@@ -135,6 +136,7 @@ async def test_worker_prefetch_updates_card_and_restores_waiting(make_pipeline):
 
     def retrieve(provider, query, *, session_id):
         received.append((provider.name, query, session_id))
+        _progress_context.get().stage("intent_analysis")
         entered.set()
         if not release.wait(5):
             raise TimeoutError("test did not release retrieval")
@@ -150,8 +152,8 @@ async def test_worker_prefetch_updates_card_and_restores_waiting(make_pipeline):
         await pipeline.ctrl._do_unified_flush(pipeline.session)
         update = hint_updates(pipeline.client)[-1]
         assert "tag" not in update  # Preserve the existing lark_md tag on partial updates.
-        assert update["i18n_content"]["zh_cn"] == _RECALL
-        assert update["i18n_content"]["en_us"] == "📖 OpenViking · Preparing memory context"
+        assert update["i18n_content"]["zh_cn"] == _INTENT
+        assert update["i18n_content"]["en_us"] == "📖 OpenViking · Analyzing intent"
         assert pipeline.session.tool_use.build_display_steps() == []
         assert not pipeline.session.unified_state.panel_visible
     finally:
@@ -292,7 +294,7 @@ async def test_context_lookup_failure_does_not_skip_provider():
 
 @pytest.mark.parametrize("interactive", [False, True])
 @pytest.mark.parametrize("stage,expected", [
-    (None, _RECALL),
+    (None, None),
     ("intent_analysis", "📖 OpenViking · 意图分析"),
     ("memory_retrieval", "📖 OpenViking · 记忆检索"),
 ])
@@ -312,9 +314,77 @@ async def test_initial_card_shows_active_recall_once(make_pipeline, interactive,
         pipeline.client.reply_card.await_args.args[1] if interactive
         else pipeline.client.cardkit_create.await_args.args[0]
     )
-    assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == expected
+    if expected is None:
+        assert not any(item.get("element_id") == _LOADING_HINT_ELEMENT_ID for item in card["body"]["elements"])
+    else:
+        assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == expected
     assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
     assert _WAITING not in json.dumps(card, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("interactive,spinner_supported", [(False, True), (False, False), (True, True)])
+@pytest.mark.parametrize("ready", [False, True])
+async def test_unknown_stage_is_spinner_only_then_real_stages_appear(
+    make_pipeline, interactive, spinner_supported, ready,
+):
+    pipeline = make_pipeline(ready=ready)
+    session = pipeline.session
+    if interactive:
+        pipeline.ctrl._cfg._raw["hermes_lark_streaming"]["text_sizes"] = {"body": "normal"}
+        session.interactive_mode = True
+    session._loading_label_supported = spinner_supported
+    request = object()
+    update = pipeline.ctrl.on_memory_prefetch_update
+    update(message_id="message-1", request_id=request, active=True)
+    if not ready:
+        await pipeline.ctrl._do_create_linear_card(session)
+    await pipeline.ctrl._do_unified_flush(session)
+
+    if interactive:
+        card = pipeline.client.update_card.await_args.args[1]
+        assert [item["element_id"] for item in card["body"]["elements"]] == [_LOADING_ELEMENT_ID]
+        assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
+    else:
+        assert session.existing_elements == {_LOADING_ELEMENT_ID}
+        assert session._loading_status_key is None
+        assert not hint_updates(pipeline.client)
+    assert "准备记忆上下文" not in str(pipeline.client.mock_calls)
+    assert "Preparing memory context" not in str(pipeline.client.mock_calls)
+
+    for stage, expected in [
+        ("intent_analysis", _INTENT),
+        ("memory_retrieval", "📖 OpenViking · 记忆检索"),
+        (None, _WAITING),
+    ]:
+        update(message_id="message-1", request_id=request, active=stage is not None, stage=stage)
+        await pipeline.ctrl._do_unified_flush(session)
+        if interactive:
+            card = pipeline.client.update_card.await_args.args[1]
+            assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == expected
+            assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
+        else:
+            actions = pipeline.client.cardkit_batch_update.await_args.args[1]
+            if stage == "intent_analysis":
+                hint = next(item for action in actions if action["action"] == "add_elements"
+                            for item in action["params"]["elements"])
+                assert hint["element_id"] == _LOADING_HINT_ELEMENT_ID
+                assert hint["text"]["i18n_content"]["zh_cn"] == expected
+            else:
+                assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == expected
+            assert _LOADING_HINT_ELEMENT_ID in session.existing_elements
+            assert session._loading_status_key is None
+
+    # Once the model starts, the hint must not be brought back by late stages.
+    pipeline.agent.stream_delta_callback("answer")
+    await pipeline.ctrl._do_unified_flush(session)
+    update(message_id="message-1", request_id=request, active=True, stage="intent_analysis")
+    await pipeline.ctrl._do_unified_flush(session)
+    if interactive:
+        card = pipeline.client.update_card.await_args.args[1]
+        assert not any(item.get("element_id") == _LOADING_HINT_ELEMENT_ID for item in card["body"]["elements"])
+    else:
+        assert _LOADING_HINT_ELEMENT_ID not in session.existing_elements
+    assert not session._memory_prefetch_stages
 
 
 async def test_recall_finishing_before_card_creation_does_not_flash_stale_status(make_pipeline):
@@ -324,7 +394,7 @@ async def test_recall_finishing_before_card_creation_does_not_flash_stale_status
 
     card = pipeline.client.cardkit_create.await_args.args[0]
     assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == _WAITING
-    assert _RECALL not in json.dumps(card, ensure_ascii=False)
+    assert _INTENT not in json.dumps(card, ensure_ascii=False)
 
 
 async def test_completion_during_slow_card_creation_is_flushed(make_pipeline, monkeypatch):
@@ -342,6 +412,7 @@ async def test_completion_during_slow_card_creation_is_flushed(make_pipeline, mo
     monkeypatch.setattr(pipeline.ctrl, "_fire_and_forget", lambda coro, loop: scheduled.append(coro))
     request = object()
     pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=True)
+    pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=True, stage="intent_analysis")
     creation = asyncio.create_task(pipeline.ctrl._do_create_linear_card(pipeline.session))
     try:
         await asyncio.wait_for(create_started.wait(), 5)
@@ -371,7 +442,7 @@ async def test_completion_while_start_patch_is_in_flight_reflushes_waiting(make_
             if action["params"].get("element_id") != _LOADING_HINT_ELEMENT_ID:
                 continue
             text = action["params"]["partial_element"]["text"]["i18n_content"]["zh_cn"]
-            if text == _RECALL:
+            if text == _INTENT:
                 start_patch.set()
                 await release_patch.wait()
             elif text == _WAITING:
@@ -381,6 +452,7 @@ async def test_completion_while_start_patch_is_in_flight_reflushes_waiting(make_
     pipeline.client.cardkit_batch_update.side_effect = patch_card
     request = object()
     pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=True)
+    pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=True, stage="intent_analysis")
     try:
         await asyncio.wait_for(start_patch.wait(), 5)
         pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=False)
@@ -416,7 +488,7 @@ async def test_later_activity_wins_over_recall_completion(make_pipeline, later_e
 
     assert pipeline.session._response_phase == expected_phase != "waiting"
     assert not pipeline.session._memory_prefetch_requests
-    assert _RECALL not in str(pipeline.client.cardkit_batch_update.await_args_list)
+    assert _INTENT not in str(pipeline.client.cardkit_batch_update.await_args_list)
     if later_event == "tool":
         assert pipeline.session.tool_use.last_tool_names[1] == "OpenViking · 检索记忆"
         assert len(pipeline.session.tool_use.build_display_steps()) == 1
@@ -427,10 +499,11 @@ async def test_overlapping_requests_and_unknown_completions_keep_active_status(m
     first, second = object(), object()
     for token in (first, first, second):
         pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=token, active=True)
+    pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=second, active=True, stage="intent_analysis")
     for token in (first, object(), first):
         pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=token, active=False)
     await pipeline.ctrl._do_unified_flush(pipeline.session)
-    assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == _RECALL
+    assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == _INTENT
 
     pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=second, active=False)
     await pipeline.ctrl._do_unified_flush(pipeline.session)

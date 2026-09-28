@@ -235,7 +235,8 @@ class UnifiedControllerMixin:
                 # waiting, memory retrieval and compression. The spinner takes over after
                 # model activity starts (or when content already exists).
                 hint_status = self._loading_hint_status(session)
-                elements.append(_loading_hint_element(hint_status))
+                if hint_status != "openviking_prefetch":
+                    elements.append(_loading_hint_element(hint_status))
                 label, status_key, emoji = None, None, None
             elements.append(_loading_element(
                 label,
@@ -293,8 +294,11 @@ class UnifiedControllerMixin:
                     # the waiting hint entirely and let the spinner row open on
                     # 模型思考中 rather than flashing a stale 等待上游模型响应.
                     label, status_key, emoji = self._current_loading_status(session)
-                    include_hint = session._response_phase in ("waiting", "compression")
                     loading_hint_status = self._loading_hint_status(session)
+                    include_hint = (
+                        session._response_phase in ("waiting", "compression")
+                        and loading_hint_status != "openviking_prefetch"
+                    )
                     if include_hint:
                         label, status_key, emoji = None, None, None
                     card = build_streaming_card_v2(
@@ -855,7 +859,7 @@ class UnifiedControllerMixin:
         return session.tool_use.last_tool_names
 
     def _loading_hint_status(self, session: CardSession) -> str:
-        """Preparation status used by initial cards and subsequent updates."""
+        """Live hint status; openviking_prefetch means no stage is known yet."""
         if session._response_phase == "compression":
             return "context_compressing"
         if session._response_phase == "waiting" and session._memory_prefetch_requests:
@@ -885,9 +889,13 @@ class UnifiedControllerMixin:
                 return None, None, None
             return None, "context_compressing", _COMPRESSION_EMOJI
         if session._response_phase == "waiting" and session._memory_prefetch_requests:
-            if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
+            status_key = self._loading_hint_status(session)
+            if (
+                _LOADING_HINT_ELEMENT_ID in session.existing_elements
+                or status_key == "openviking_prefetch"
+            ):
                 return None, None, None
-            return None, self._loading_hint_status(session), None
+            return None, status_key, None
         label = self._current_tool_label(session)
         if label:
             return label, None, session.tool_use.last_tool_emoji
@@ -902,18 +910,17 @@ class UnifiedControllerMixin:
         return self._current_tool_label(session)
 
     async def _sync_loading_context(self, session: CardSession) -> None:
-        """Fallback hint update for cards whose spinner row can't be updated.
+        """Show real pre-model stages, hiding the hint until recall reports one.
 
-        Normally the spinner row carries 模型思考中 (see ``_sync_loading_label``)
-        and this is a no-op: the hint element is deleted in the same flush that
-        renders the first visible content, so writing to it there costs an API
-        call for a line the user never sees. Only when Feishu has rejected
-        spinner-row updates is the hint worth touching.
+        A hint hidden for prefetch can return on a real stage or completion.
+        Keep it separate from spinner updates so their schema fallback still
+        works. Once model content removes the hint, it must stay removed.
         """
         if session.interactive_mode or session._streaming_closed:
             return
-        if not session.card_id or _LOADING_HINT_ELEMENT_ID not in session.existing_elements:
+        if not session.card_id:
             return
+        has_hint = _LOADING_HINT_ELEMENT_ID in session.existing_elements
 
         if session._response_phase in ("waiting", "compression"):
             status_key = self._loading_hint_status(session)
@@ -921,30 +928,54 @@ class UnifiedControllerMixin:
             return  # spinner row owns model/tool status
         else:
             status_key = "model_thinking"
-        if status_key == session._loading_hint_state:
-            return
-
-        hint = _loading_hint_element(status_key)
-        actions = [{
-            "action": "partial_update_element",
-            "params": {
-                "element_id": _LOADING_HINT_ELEMENT_ID,
-                # Keep the existing lark_md tag; CardKit partial updates reject
-                # attempts to replace an element's tag.
-                "partial_element": {
-                    "text": {
-                        "content": hint["text"]["content"],
-                        "i18n_content": hint["text"]["i18n_content"],
+        if status_key == "openviking_prefetch":
+            if not has_hint:
+                return
+            actions = [{
+                "action": "delete_elements",
+                "params": {"element_ids": [_LOADING_HINT_ELEMENT_ID]},
+            }]
+        elif not has_hint:
+            if (
+                session._loading_hint_state != "openviking_prefetch"
+                or "hint_removed" in session._creation_stages
+            ):
+                return
+            actions = [{
+                "action": "add_elements",
+                "params": {
+                    "type": "insert_before",
+                    "target_element_id": _LOADING_ELEMENT_ID,
+                    "elements": [_loading_hint_element(status_key)],
+                },
+            }]
+        else:
+            if status_key == session._loading_hint_state:
+                return
+            hint = _loading_hint_element(status_key)
+            actions = [{
+                "action": "partial_update_element",
+                "params": {
+                    "element_id": _LOADING_HINT_ELEMENT_ID,
+                    # Preserve the existing lark_md tag on partial updates.
+                    "partial_element": {
+                        "text": {
+                            "content": hint["text"]["content"],
+                            "i18n_content": hint["text"]["i18n_content"],
+                        },
                     },
                 },
-            },
-        }]
+            }]
         session.sequence += 1
         try:
             await self._client.cardkit_batch_update(
                 session.card_id, actions, sequence=session.sequence,
             )
             session._loading_hint_state = status_key
+            if status_key == "openviking_prefetch":
+                session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+            else:
+                session.existing_elements.add(_LOADING_HINT_ELEMENT_ID)
         except FeishuAPIError as e:
             if e.code == CARDKIT_STREAMING_CLOSED:
                 session._streaming_closed = True

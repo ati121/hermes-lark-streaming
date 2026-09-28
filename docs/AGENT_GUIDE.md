@@ -265,8 +265,8 @@ chunk 之间时按会话保持开合状态，正确分流。
 统一用 👁️，OpenViking 的六个工具统一用 📖；Hermes 内置记忆用 🧠，会话检索用 🔎。
 工具面板同步使用带来源的中英文名称。
 
-Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片先显示
-`📖 OpenViking · 准备记忆上下文`。安装[服务端进度扩展](../integrations/README.md)后，
+Hermes 在模型调用前自动预取 OpenViking 记忆时，实际阶段返回前只显示加载动画。
+安装[服务端进度扩展](../integrations/README.md)后，
 进入分析模型时切换为 `📖 OpenViking · 意图分析`，实际检索开始时切换为
 `📖 OpenViking · 记忆检索`；结束后恢复等待主模型的提示。
 按 [OpenViking 官方检索机制](https://docs.openviking.ai/en/concepts/07-retrieval)，
@@ -281,7 +281,7 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片先显示
   不能用于实时切换。扩展在 `IntentAnalyzer.analyze` / `HierarchicalRetriever.retrieve`
   的真实入口发送事件，使用同一次 HTTP 请求传回阶段和原始结果，不增加检索请求。
 - 直接走 `find` 时跳过意图分析提示；分析生成零条查询时不会显示检索。
-  未安装扩展的服务器继续返回普通 JSON，`search` 等待期间保持准备提示。
+  未安装扩展的服务器继续返回普通 JSON，`search` 等待期间只显示加载动画。
   超时结束后，旧线程的迟到阶段事件不会恢复提示或污染下一轮卡片。
 
 插件包装当前 agent 的 `MemoryManager._prefetch_provider` 等待边界，因此请求失败或

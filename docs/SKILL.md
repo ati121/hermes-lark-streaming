@@ -144,7 +144,7 @@ Hook 11 里封口当前卡片、开一张新卡续写；后续回调带的仍是
 
 **4.18 多 Profile 网关隔离 (v1.6.25)**: Hermes multiplex 用一个进程按 profile 各加载一次插件。控制器按 `get_hermes_home()` 分 home 建立；补丁标记写在共享的宿主对象上做跨副本去重；进程级登记表挂在 `runtime_globals.shared_store`。细节和排查见 [AGENT_GUIDE.md「多 Profile 网关」](AGENT_GUIDE.md#多-profile-网关multiplex)。
 
-**4.19 记忆自动预取状态 (v1.6.22)**: `patching/memory.py` 包装 `MemoryManager._prefetch_provider` 的等待边界。默认显示准备记忆上下文；配合 `integrations/openviking_progress.py` 服务端扩展，按真实事件分段显示意图分析、记忆检索。结束或超时后恢复，忽略迟到事件；不计入工具调用记录。安装方式见 [进度扩展](../integrations/README.md)。
+**4.19 记忆自动预取状态 (v1.6.22; v1.13 隐藏准备提示)**: `patching/memory.py` 包装 `MemoryManager._prefetch_provider` 的等待边界。实际阶段返回前只显示加载动画；配合 `integrations/openviking_progress.py` 服务端扩展，按真实事件分段显示意图分析、记忆检索。结束或超时后恢复，忽略迟到事件；不计入工具调用记录。安装方式见 [进度扩展](../integrations/README.md)。
 
 **4.20 页脚速度字段 (v1.6.23–v1.6.28)**: `speed` 取最后一次模型调用的可见输出 token 除以时间窗口。窗口优先用可见正文首末块间隔，整段下发时回退到该次调用「首个上游活动 → 末个可见块」；两个窗口都在模型调用边界清零。原始用量由 `patching/usage.py` 在归一化前保存。窗口选择规则见 [AGENT_GUIDE.md「配置项」](AGENT_GUIDE.md#配置项)。
 
