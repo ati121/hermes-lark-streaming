@@ -850,16 +850,21 @@ class TestTerminalProgramAliases:
         assert _tool_display_names("terminal", command) == ("Terminal", "终端命令")
         assert _tool_emoji("terminal", command) == "🖥️"
 
-    @pytest.mark.parametrize("command", [
-        'python3 /opt/data/.hermes/profiles/image/workspace/scripts/zimage_gen.py "Eye-level shot"',
-        'python3 /opt/data/.hermes/profiles/image/workspace/scripts/gpt_image_gen.py --size 1024 "a cat"',
-        './gpt_image_gen.py "x"',
-        "cd /tmp && python run_gpt_image.py --n 2",
-        "bash make_image.sh",
+    @pytest.mark.parametrize("command, family", [
+        ('python3 /workspace/scripts/zimage_gen.py "Eye-level shot"', "Zimage"),
+        ('python3 /workspace/scripts/gpt_image_gen.py "a cat" out.png 1024x1024', "GPT Image"),
+        ('./gpt_image_gen.py "x"', "GPT Image"),
+        ('python3 -u /workspace/scripts/zimage_gen.py "a cat"', "Zimage"),
+        ('cd /tmp && python gpt_image_gen.py "a cat" --format png', "GPT Image"),
+        ('python3 "/workspace/my scripts/gpt_image_gen.py" "a cat"', "GPT Image"),
+        ('PY=python3; SCRIPT=/workspace/gpt_image_gen.py; $PY "$SCRIPT" "a cat"', "GPT Image"),
+        ('python gpt_image_gen.py "a cat" 2>&1 | head -n 10', "GPT Image"),
+        ('python gpt_image_gen.py -h && python gpt_image_gen.py "a cat"', "GPT Image"),
+        ('python gpt_image_gen.py "a cat; sitting\non a rug | indoors"', "GPT Image"),
+        ('python gpt_image_gen.py -- "--help"', "GPT Image"),
     ])
-    def test_any_image_script_renders_as_image_generation(self, command: str) -> None:
-        """老大 2026-09-21：脚本名里含 image 的一律按生成图片显示，不逐个列脚本名。"""
-        assert _tool_display_names("terminal", command) == ("Generate image", "生成图片")
+    def test_known_image_scripts_with_prompts_show_the_generator(self, command: str, family: str) -> None:
+        assert _tool_display_names("terminal", command) == (f"{family} · Generate image", f"{family} · 生成图片")
         assert _tool_emoji("terminal", command) == "🎨"
 
     @pytest.mark.parametrize("command", [
@@ -868,17 +873,57 @@ class TestTerminalProgramAliases:
         '/opt/hermes/.venv/bin/python -c "print(1)"',
         "docker logs octopus | grep -i images/generations",
         "cat << EOF > /tmp/x.py\nimport image\nEOF",
+        "python resize_image.py input.png",
+        "python image_info.py input.png",
+        "python test_grok_imagine.py",
+        "python run_gpt_image.py --n 2",
+        "bash make_image.sh",
+        "python gpt_image_gen.py",
+        "python zimage_gen.py",
+        "python gpt_image_gen.py --image input.png",
+        'python gpt_image_gen.py ""',
+        "python -m py_compile gpt_image_gen.py",
+        "python -c 'import gpt_image_gen'",
+        "cat gpt_image_gen.py",
+        'echo "python gpt_image_gen.py a cat"',
+        'echo "example:\npython gpt_image_gen.py a-cat"',
+        'python -c "example = \'x; python gpt_image_gen.py cat\'"',
+        "# example; python gpt_image_gen.py cat",
+        "cat <<'EOF' > example.sh\npython gpt_image_gen.py cat\nEOF",
+        'printf "%s" "$(python gpt_image_gen.py -h)"',
+        'python gpt_image_gen.py "unfinished',
     ])
-    def test_image_only_in_arguments_stays_terminal(self, command: str) -> None:
+    def test_image_inspection_and_unrecognized_scripts_stay_terminal(self, command: str) -> None:
         assert _tool_display_names("terminal", command) == ("Terminal", "终端命令")
+        assert _tool_emoji("terminal", command) == "🖥️"
+
+    @pytest.mark.parametrize("flag", ["-h", "--help"])
+    def test_gpt_script_help_is_not_generation(self, flag: str) -> None:
+        command = f"python3 /workspace/scripts/gpt_image_gen.py {flag}"
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", command[:40], args={"command": command})
+        tracker.record_end("terminal", output="usage: gpt_image_gen.py [-h] prompt")
+        step = tracker.build_display_steps()[0]
+        assert step["title_zh"].startswith("GPT Image · 查看帮助")
+        assert step["emoji"] == "📖"
+        assert step["detail"] == flag
+        assert tracker.last_tool_names == ("GPT Image · Help", "GPT Image · 查看帮助")
+
+    @pytest.mark.parametrize("command", [
+        'python gpt_image_gen.py --image input.png "change the background" out.png',
+        'python gpt_image_gen.py "change the background" --image=input.png',
+    ])
+    def test_gpt_reference_image_call_shows_editing(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("GPT Image · Edit image", "GPT Image · 编辑图片")
+        assert _tool_emoji("terminal", command) == "🎨"
 
     def test_image_script_detail_drops_interpreter_and_script(self) -> None:
         tracker = ToolUseTracker()
-        tracker.record_start("terminal", 'python3 /opt/data/x/scripts/gpt_image_gen.py --size 1024 "a cat"')
+        tracker.record_start("terminal", 'python3 /workspace/scripts/gpt_image_gen.py "a cat" out.png 1024x1024')
         step = tracker.build_display_steps()[0]
-        assert step["title_zh"].startswith("生成图片")
+        assert step["title_zh"].startswith("GPT Image · 生成图片")
         assert step["emoji"] == "🎨"
-        assert step["detail"] == '--size 1024 "a cat"'
+        assert step["detail"] == '"a cat" out.png 1024x1024'
 
 
 class TestToolArgsBeatTruncatedPreview:
@@ -893,17 +938,17 @@ class TestToolArgsBeatTruncatedPreview:
 
     def test_args_identify_the_script(self) -> None:
         args = {"command": self._CMD}
-        assert _tool_display_names("terminal", self._PREVIEW, args) == ("Generate image", "生成图片")
+        assert _tool_display_names("terminal", self._PREVIEW, args) == ("Zimage · Generate image", "Zimage · 生成图片")
         assert _tool_emoji("terminal", self._PREVIEW, args) == "🎨"
 
     def test_display_step_rebuilds_detail_from_full_command(self) -> None:
         tracker = ToolUseTracker()
         tracker.record_start("terminal", self._PREVIEW, args={"command": self._CMD})
         step = tracker.build_display_steps()[0]
-        assert step["title_zh"].startswith("生成图片")
+        assert step["title_zh"].startswith("Zimage · 生成图片")
         assert step["emoji"] == "🎨"
         assert step["detail"] == '"Eye-level full-body wide shot"'
-        assert tracker.last_tool_names == ("Generate image", "生成图片")
+        assert tracker.last_tool_names == ("Zimage · Generate image", "Zimage · 生成图片")
         assert tracker.last_tool_emoji == "🎨"
 
     def test_gh_detail_is_no_longer_cut_at_forty_chars(self) -> None:

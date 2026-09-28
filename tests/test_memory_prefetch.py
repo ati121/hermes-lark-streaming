@@ -25,8 +25,26 @@ from hermes_lark_streaming.state.phase import CardPhase, TerminalReason
 
 pytestmark = pytest.mark.asyncio
 
-_RECALL = "📖 OpenViking · 自动检索记忆"
+_RECALL = "📖 OpenViking · 准备记忆上下文"
 _WAITING = "等待上游模型响应"
+
+
+async def test_real_stages_switch_the_card_and_late_events_cannot_revive_it(make_pipeline):
+    pipeline = make_pipeline()
+    request = object()
+    update = pipeline.ctrl.on_memory_prefetch_update
+    update(message_id="message-1", request_id=request, active=True)
+    for stage, label in (("intent_analysis", "意图分析"), ("memory_retrieval", "记忆检索")):
+        update(message_id="message-1", request_id=request, active=True, stage=stage)
+        await pipeline.ctrl._do_unified_flush(pipeline.session)
+        assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == f"📖 OpenViking · {label}"
+        assert pipeline.session.tool_use.build_display_steps() == []
+    update(message_id="message-1", request_id=request, active=False)
+    update(message_id="message-1", request_id=request, active=True, stage="intent_analysis")
+    await pipeline.ctrl._do_unified_flush(pipeline.session)
+    assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == _WAITING
+    assert not pipeline.session._memory_prefetch_requests
+    assert not pipeline.session._memory_prefetch_stages
 
 
 class MemoryManager:
@@ -133,7 +151,7 @@ async def test_worker_prefetch_updates_card_and_restores_waiting(make_pipeline):
         update = hint_updates(pipeline.client)[-1]
         assert "tag" not in update  # Preserve the existing lark_md tag on partial updates.
         assert update["i18n_content"]["zh_cn"] == _RECALL
-        assert update["i18n_content"]["en_us"] == "📖 OpenViking · Recalling memory"
+        assert update["i18n_content"]["en_us"] == "📖 OpenViking · Preparing memory context"
         assert pipeline.session.tool_use.build_display_steps() == []
         assert not pipeline.session.unified_state.panel_visible
     finally:
@@ -273,13 +291,19 @@ async def test_context_lookup_failure_does_not_skip_provider():
 
 
 @pytest.mark.parametrize("interactive", [False, True])
-async def test_initial_card_shows_active_recall_once(make_pipeline, interactive):
+@pytest.mark.parametrize("stage,expected", [
+    (None, _RECALL),
+    ("intent_analysis", "📖 OpenViking · 意图分析"),
+    ("memory_retrieval", "📖 OpenViking · 记忆检索"),
+])
+async def test_initial_card_shows_active_recall_once(make_pipeline, interactive, stage, expected):
     pipeline = make_pipeline(ready=False)
     if interactive:
         pipeline.ctrl._cfg._raw["hermes_lark_streaming"]["text_sizes"] = {"body": "normal"}
-    pipeline.ctrl.on_memory_prefetch_update(
-        message_id=pipeline.session.message_id, request_id=object(), active=True,
-    )
+    request = object()
+    pipeline.ctrl.on_memory_prefetch_update(message_id=pipeline.session.message_id, request_id=request, active=True)
+    if stage is not None:
+        pipeline.ctrl.on_memory_prefetch_update(message_id=pipeline.session.message_id, request_id=request, active=True, stage=stage)
     assert pipeline.session._pending_flush
 
     await pipeline.ctrl._do_create_linear_card(pipeline.session)
@@ -288,7 +312,7 @@ async def test_initial_card_shows_active_recall_once(make_pipeline, interactive)
         pipeline.client.reply_card.await_args.args[1] if interactive
         else pipeline.client.cardkit_create.await_args.args[0]
     )
-    assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == _RECALL
+    assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == expected
     assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
     assert _WAITING not in json.dumps(card, ensure_ascii=False)
 

@@ -26,9 +26,11 @@ __all__ = [
 import json
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
 
 @dataclass
 class ToolStep:
@@ -347,13 +349,13 @@ _TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
     "gh": ("GitHub", "GitHub", "🐙"),
 }
 
-# Rules matched against the program/script basename when no exact entry
-# hits. The image bot drives its generators through terminal
-# (``python3 …/zimage_gen.py``, ``gpt_image_gen.py`` …), so any script with
-# "image" in its name renders like the native ``image_generate`` tool
-# (老大 2026-09-21).
-_TERMINAL_PROGRAM_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, str, str]], ...] = (
-    (re.compile(r"image", re.IGNORECASE), ("生成图片", "Generate image", "🎨")),
+# Only known entry points identify image generation. Inspecting a script or
+# running its help is not generation, even when its filename contains image.
+_IMAGE_SCRIPTS = {"gpt_image_gen.py": "GPT Image", "zimage_gen.py": "Zimage"}
+_PYTHON_SCRIPT_FLAGS = frozenset({"-u", "-B", "-E", "-s", "-S", "-I", "-O", "-OO"})
+_SHELL_PART_RE = re.compile(
+    r"'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"|\\[\s\S]|(?<!\S)\#[^\n]*"
+    r"|(?P<unsupported><<|`|\$\()|(?P<separator>&&|\|\||[;|\n])"
 )
 
 # Words that can precede the real program on a command line.
@@ -427,13 +429,122 @@ def _command_programs(command: str) -> list[list[str]]:
 
 
 def _lookup_terminal_program(basename: str) -> tuple[str, str, str] | None:
-    spec = _TERMINAL_PROGRAM_SPECS.get(basename.lower())
-    if spec is not None:
-        return spec
-    for pattern, pat_spec in _TERMINAL_PROGRAM_PATTERNS:
-        if pattern.search(basename):
-            return pat_spec
-    return None
+    return _TERMINAL_PROGRAM_SPECS.get(basename.lower())
+
+
+def _image_command_segments(command: str) -> list[list[str]]:
+    """Tokenize simple shell calls without treating quoted code as commands.
+
+    Heredocs and command substitutions require a real shell parser; leave
+    those as terminal work instead of guessing from their embedded text.
+    """
+    segments = []
+    start = 0
+    for match in _SHELL_PART_RE.finditer(command):
+        if match.lastgroup == "unsupported":
+            return []
+        if match.lastgroup == "separator":
+            segments.append(command[start:match.start()])
+            start = match.end()
+    segments.append(command[start:])
+    try:
+        return [shlex.split(segment, comments=True) for segment in segments]
+    except ValueError:
+        return []  # Truncated previews or incomplete quoting are not evidence.
+
+
+def _image_script_action(script: str, args: list[str]) -> tuple[str, str, str] | None:
+    family = _IMAGE_SCRIPTS[script]
+    if script == "zimage_gen.py":
+        # Zimage's entry point consumes positional arguments, without argparse.
+        if args and args[0].strip() and not args[0].startswith("-"):
+            return f"{family} · 生成图片", f"{family} · Generate image", "🎨"
+        return None
+
+    positionals = []
+    image = False
+    options = True
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+        elif options and arg in ("-h", "--help"):
+            return f"{family} · 查看帮助", f"{family} · Help", "📖"
+        elif options and arg.startswith("-"):
+            option, sep, value = arg.partition("=")
+            if option not in ("--image", "--background", "--format"):
+                return None
+            if not sep:
+                i += 1
+                if i >= len(args) or args[i].startswith("-"):
+                    return None
+                value = args[i]
+            if not value:
+                return None
+            image = image or option == "--image"
+        else:
+            positionals.append(arg)
+        i += 1
+    if not positionals or not positionals[0].strip() or len(positionals) > 4:
+        return None
+    if image:
+        return f"{family} · 编辑图片", f"{family} · Edit image", "🎨"
+    return f"{family} · 生成图片", f"{family} · Generate image", "🎨"
+
+
+def _terminal_image_spec(command: str) -> tuple[list[str], tuple[str, str, str]] | None:
+    variables: dict[str, str] = {}
+    help_match = None
+    for tokens in _image_command_segments(command):
+        i = 0
+        if tokens and tokens[0] == "export":
+            for token in tokens[1:]:
+                if _ENV_ASSIGN_RE.match(token):
+                    key, _, value = token.partition("=")
+                    variables[key] = value
+            continue
+        while i < len(tokens):
+            token = tokens[i]
+            if _ENV_ASSIGN_RE.match(token):
+                key, _, value = token.partition("=")
+                variables[key] = value
+            elif token not in _COMMAND_WRAPPERS:
+                break
+            i += 1
+        if i >= len(tokens):
+            continue
+        program = os.path.basename(_resolve_var_token(tokens[i], variables).replace("\\", "/"))
+        leading = [program]
+        i += 1
+        if re.fullmatch(r"(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?", program, re.IGNORECASE):
+            while i < len(tokens) and tokens[i] in _PYTHON_SCRIPT_FLAGS:
+                i += 1
+            if i >= len(tokens):
+                continue
+            script = os.path.basename(_resolve_var_token(tokens[i], variables).replace("\\", "/"))
+            leading.append(script)
+            i += 1
+        else:
+            script = program
+        if script not in _IMAGE_SCRIPTS:
+            continue
+        # Redirections/background markers are shell syntax, not prompt args.
+        args = []
+        while i < len(tokens):
+            token = tokens[i]
+            if re.match(r"^\d*(?:>>?|<)", token):
+                if re.fullmatch(r"\d*(?:>>?|<)", token):
+                    i += 1
+            elif token != "&":
+                args.append(token)
+            i += 1
+        action = _image_script_action(script, args)
+        if action is not None:
+            if action[2] == "🎨":
+                return leading, action
+            help_match = (leading, action)
+    return help_match
 
 
 def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
@@ -450,6 +561,9 @@ def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str,
     command = _terminal_command_text(name, detail, args)
     if not command:
         return None
+    image = _terminal_image_spec(command)
+    if image is not None:
+        return image
     for entry in _command_programs(command):
         # The script (if any) is the more specific name; try it first.
         for candidate in reversed(entry):

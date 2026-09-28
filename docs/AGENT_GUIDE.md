@@ -265,9 +265,25 @@ chunk 之间时按会话保持开合状态，正确分流。
 统一用 👁️，OpenViking 的六个工具统一用 📖；Hermes 内置记忆用 🧠，会话检索用 🔎。
 工具面板同步使用带来源的中英文名称。
 
-Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片显示
-`📖 OpenViking · 自动检索记忆`，结束后恢复等待模型的提示。此过程包含
-`POST /api/v1/search/search`，以及检索降级、读取记忆内容等自动预取工作。
+Hermes 在模型调用前自动预取 OpenViking 记忆时，卡片先显示
+`📖 OpenViking · 准备记忆上下文`。安装[服务端进度扩展](../integrations/README.md)后，
+进入分析模型时切换为 `📖 OpenViking · 意图分析`，实际检索开始时切换为
+`📖 OpenViking · 记忆检索`；结束后恢复等待主模型的提示。
+按 [OpenViking 官方检索机制](https://docs.openviking.ai/en/concepts/07-retrieval)，
+意图分析生成检索计划，随后进行层级检索和重排；分析使用 `query_planner` 模型，
+未单独配置时回退到 `vlm`。结合 OpenViking 0.4.22 与 Hermes provider 的实现：
+
+- 自动预取先准备会话记忆，再按当前问题检索。有会话 ID 时优先调用
+  `POST /api/v1/search/search`；没有会话 ID 或发生可降级错误时使用 `search/find`。
+- `search` 在启用意图分析且存在会话摘要或历史消息时才调用分析模型。
+  分析可以生成零条查询，此时不执行后续检索；`find` 直接检索，不调用意图分析模型。
+- 预取还包含读取命中内容等工作。原版 `search` 的 telemetry 随最终结果返回，
+  不能用于实时切换。扩展在 `IntentAnalyzer.analyze` / `HierarchicalRetriever.retrieve`
+  的真实入口发送事件，使用同一次 HTTP 请求传回阶段和原始结果，不增加检索请求。
+- 直接走 `find` 时跳过意图分析提示；分析生成零条查询时不会显示检索。
+  未安装扩展的服务器继续返回普通 JSON，`search` 等待期间保持准备提示。
+  超时结束后，旧线程的迟到阶段事件不会恢复提示或污染下一轮卡片。
+
 插件包装当前 agent 的 `MemoryManager._prefetch_provider` 等待边界，因此请求失败或
 达到 Hermes 的等待超时后也会结束提示；自动预取不计入模型的工具调用记录。
 正常的模型输出、工具调用和上下文压缩优先于此准备状态。
@@ -332,9 +348,20 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
 
 - `_TERMINAL_PROGRAM_SPECS`：精确匹配，`程序名或脚本名: (中文名, 英文名, emoji)`。
   目前有 `smart-search` → 🔍、`gh` → 🐙 GitHub（Unicode 没有 GitHub 图形，用章鱼代指 Octocat）。
-- `_TERMINAL_PROGRAM_PATTERNS`：正则匹配程序/脚本名，精确表没命中时才用。目前有一条：
-  名字含 `image` 的一律显示为 🎨 生成图片（image bot 的 `zimage_gen.py`、`gpt_image_gen.py`
-  等都走这条，不必逐个列）。
+- `_IMAGE_SCRIPTS`：只识别已知生图入口 `gpt_image_gen.py` / `zimage_gen.py`，
+  并由 `_image_script_action` 按参数确定动作。GPT 脚本可覆盖模型，标签使用家族名，
+  不把默认模型版本写死在界面上。
+
+| 调用 | 显示 |
+|------|------|
+| GPT Image 脚本携带提示词 | 🎨 GPT Image · 生成图片 |
+| GPT Image 脚本携带提示词和 `--image` | 🎨 GPT Image · 编辑图片 |
+| GPT Image 脚本 `-h` / `--help` | 📖 GPT Image · 查看帮助 |
+| Zimage 脚本携带提示词 | 🎨 Zimage · 生成图片 |
+| 空参数、读取/编译脚本、其他含 image 的程序 | 🖥️ 终端命令 |
+
+生图匹配尊重引号和注释，不把示例字符串、内联 Python 或 heredoc 里的脚本文本
+当成实际执行；无法确认的复杂 shell 命令保留终端名称。
 
 匹配的是每个 shell 段开头的程序名，跳过 `sudo`/`env`/变量赋值并去掉路径；程序是
 `python3`/`bash`/`node` 这类解释器时，看它后面的脚本名。只出现在参数里不算

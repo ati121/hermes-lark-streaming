@@ -7,6 +7,8 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
+from .memory_progress import PrefetchProgress, _progress_context, maybe_wrap_viking_http
+
 _logger = logging.getLogger("hermes_lark_streaming")
 
 
@@ -34,22 +36,31 @@ def _maybe_wrap_memory_prefetch(
         # turn while an old request is finishing.
         request_id = object()
 
-        def notify(active: bool) -> None:
+        def notify(active: bool, *, stage: str | None = None) -> None:
             try:
                 from .hooks import on_memory_prefetch_updated
 
                 on_memory_prefetch_updated(
                     message_id=message_id, request_id=request_id, active=active,
+                    stage=stage,
                 )
             except Exception:
                 _logger.debug("HLS: memory prefetch status failed", exc_info=True)
 
+        try:
+            maybe_wrap_viking_http(provider)
+        except Exception:
+            _logger.debug("HLS: OpenViking progress transport unavailable", exc_info=True)
+        progress = PrefetchProgress(notify)
+        context_token = _progress_context.set(progress)
         notify(True)
         try:
             # Wrap the manager's bounded wait, not the provider's daemon
             # thread: the status must end when Hermes gives up on a timeout.
             return original(provider, *args, **kwargs)
         finally:
+            progress.closed = True
+            _progress_context.reset(context_token)
             notify(False)
 
     prefetch_wrapper._hls_prefetch_wrapper = True

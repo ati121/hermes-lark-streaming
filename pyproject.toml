@@ -21,6 +21,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21.0",
+    "httpx>=0.24.0",
     "ruff>=0.1.0",
 ]
 
@@ -33,7 +34,7 @@ hermes_lark_streaming = "."
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["controller*", "cardkit*", "patching*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*"]
+include = ["controller*", "cardkit*", "patching*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*", "integrations*"]
 
 [tool.setuptools.package-data]
 hermes_lark_streaming = ["plugin.yaml"]

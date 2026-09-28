@@ -251,7 +251,8 @@ def _loading_element(
 def _loading_hint_element(status_key: str = "loading_context") -> dict:
     """上下文状态占位元素 — 首卡创建后插入，首字即显时删除."""
     if status_key not in (
-        "loading_context", "openviking_prefetch", "context_compressing", "model_thinking",
+        "loading_context", "openviking_prefetch", "openviking_intent", "openviking_retrieval",
+        "context_compressing", "model_thinking",
     ):
         status_key = "loading_context"
     return {

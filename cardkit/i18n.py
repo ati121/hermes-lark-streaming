@@ -35,10 +35,13 @@ _T: dict[str, tuple[str, str]] = {
     "partial_continues": ("Continues in next message", "内容未完，继续在下一条消息"),
     # ── Upstream model placeholder (first card only, removed on first event) ──
     "loading_context": ("Waiting for upstream model...", "等待上游模型响应"),
+    # Preparation is the fallback until a concrete retrieval stage is known.
     "openviking_prefetch": (
-        "📖 OpenViking · Recalling memory",
-        "📖 OpenViking · 自动检索记忆",
+        "📖 OpenViking · Preparing memory context",
+        "📖 OpenViking · 准备记忆上下文",
     ),
+    "openviking_intent": ("📖 OpenViking · Analyzing intent", "📖 OpenViking · 意图分析"),
+    "openviking_retrieval": ("📖 OpenViking · Retrieving memory", "📖 OpenViking · 记忆检索"),
     "context_compressing": ("Compressing context...", "上下文压缩中..."),
     "model_thinking": ("Model is thinking...", "模型思考中..."),
     # ── Live tool status shown beside the loading spinner ──

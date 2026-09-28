@@ -859,6 +859,9 @@ class UnifiedControllerMixin:
         if session._response_phase == "compression":
             return "context_compressing"
         if session._response_phase == "waiting" and session._memory_prefetch_requests:
+            if session._memory_prefetch_stages:
+                stage = next(reversed(session._memory_prefetch_stages.values()))
+                return "openviking_intent" if stage == "intent_analysis" else "openviking_retrieval"
             return "openviking_prefetch"
         return "loading_context"
 
@@ -884,7 +887,7 @@ class UnifiedControllerMixin:
         if session._response_phase == "waiting" and session._memory_prefetch_requests:
             if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
                 return None, None, None
-            return None, "openviking_prefetch", None
+            return None, self._loading_hint_status(session), None
         label = self._current_tool_label(session)
         if label:
             return label, None, session.tool_use.last_tool_emoji

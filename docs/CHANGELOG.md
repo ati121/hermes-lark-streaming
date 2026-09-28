@@ -4,6 +4,26 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.12 (2026-09-28, personal fork)
+
+### Added — real OpenViking prefetch phases
+
+Automatic prefetch now supports `意图分析` → `记忆检索` using events from the
+actual server method entries. The optional OpenViking extension streams stages
+and the original HTTP result in one opt-in request; ordinary clients retain
+normal JSON responses. Unmodified servers remain compatible and show
+`准备记忆上下文` while waiting. Direct `find` skips analysis, zero-query plans
+skip retrieval, and late worker events cannot revive a completed or timed-out
+prefetch. Setup and removal are documented in `integrations/README.md`.
+
+### Fixed — image script help and inspection labelled as image generation
+
+Terminal labels now recognize the known GPT Image and Zimage script entry
+points and their arguments. GPT help gets a help label; reference-image calls
+get an edit label. Empty invocations, script inspection and unrelated programs
+containing `image` keep the terminal label. Quoted examples and heredoc contents
+are not treated as executable script calls.
+
 ## v1.11 (2026-09-26, personal fork)
 
 ### Fixed — `/aowen` commands lost on slow hosts
