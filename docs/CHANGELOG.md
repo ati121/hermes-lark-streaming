@@ -4,7 +4,7 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
-## v1.14 (2026-09-29, personal fork)
+## v1.20 (2026-09-29, personal fork)
 
 ### Changed — OpenViking status needs no server modifications
 
