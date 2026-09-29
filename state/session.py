@@ -50,7 +50,6 @@ class CardSession:
         "_last_answer_time",
         "_loop",
         "_memory_prefetch_requests",
-        "_memory_prefetch_stages",
         "_pending_flush",
         "_response_phase",
         "_reasoning_splitter",
@@ -151,7 +150,6 @@ class CardSession:
         # Automatic recall is preparation, not a model-issued tool step. Each
         # request owns its token so a late completion cannot clear a newer one.
         self._memory_prefetch_requests: set[object] = set()
-        self._memory_prefetch_stages: dict[object, str] = {}
         # Temporary response phase used while Hermes compacts the conversation
         # before making the next model call.  The previous phase is restored
         # only if no model activity arrived during compression.

@@ -677,7 +677,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._linear_on_thinking(session, text)
 
     def on_memory_prefetch_update(
-        self, *, message_id: str, request_id: object, active: bool, stage: str | None = None,
+        self, *, message_id: str, request_id: object, active: bool,
     ) -> None:
         """Track automatic retrieval without changing the model/tool phase."""
         if not self.enabled:
@@ -690,19 +690,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             if not session.accepts_stream_updates:
                 return
             previous_status = self._loading_hint_status(session)
-            if stage is not None:
-                if (
-                    not active or request_id not in session._memory_prefetch_requests
-                    or stage not in ("intent_analysis", "memory_retrieval")
-                ):
-                    return  # A late worker cannot revive an ended request.
-                session._memory_prefetch_stages.pop(request_id, None)
-                session._memory_prefetch_stages[request_id] = stage
             if active:
                 session._memory_prefetch_requests.add(request_id)
             else:
                 session._memory_prefetch_requests.discard(request_id)
-                session._memory_prefetch_stages.pop(request_id, None)
             if (
                 session._response_phase == "waiting"
                 and self._loading_hint_status(session) != previous_status

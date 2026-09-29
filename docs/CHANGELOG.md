@@ -4,6 +4,21 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.14 (2026-09-29, personal fork)
+
+### Changed — OpenViking status needs no server modifications
+
+Automatic recall now displays `OpenViking · 查询记忆` for the bounded Hermes
+prefetch operation, then returns to the normal model status. Internal intent
+analysis and retrieval are no longer presented as independently observable
+stages. No preparation hint is shown.
+
+Removed the custom HTTP progress transport, server extension, and startup
+installer. OpenViking uses its official image and entrypoint with no plugin
+mounts or patches. Existing installations of the extension should remove their
+progress mount and entrypoint override, then recreate the service from the
+official image; see `integrations/README.md`. Image tool labels are unchanged.
+
 ## v1.13 (2026-09-28, personal fork)
 
 ### Fixed — extra OpenViking preparation step before real stages

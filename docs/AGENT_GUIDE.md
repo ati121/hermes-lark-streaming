@@ -265,10 +265,11 @@ chunk 之间时按会话保持开合状态，正确分流。
 统一用 👁️，OpenViking 的六个工具统一用 📖；Hermes 内置记忆用 🧠，会话检索用 🔎。
 工具面板同步使用带来源的中英文名称。
 
-Hermes 在模型调用前自动预取 OpenViking 记忆时，实际阶段返回前只显示加载动画。
-安装[服务端进度扩展](../integrations/README.md)后，
-进入分析模型时切换为 `📖 OpenViking · 意图分析`，实际检索开始时切换为
-`📖 OpenViking · 记忆检索`；结束后恢复等待主模型的提示。
+Hermes 在模型调用前自动预取 OpenViking 记忆时，统一显示
+`📖 OpenViking · 查询记忆`；结束后恢复等待主模型的提示。
+该状态表示整次预取，不声明当前正在执行意图分析还是检索，也不显示准备提示。
+插件只观察 Hermes 的预取开始和结束，不改 OpenViking 服务端、Compose 或启动入口，
+不包装 provider 的 HTTP 客户端，不发送自定义进度请求头。
 按 [OpenViking 官方检索机制](https://docs.openviking.ai/en/concepts/07-retrieval)，
 意图分析生成检索计划，随后进行层级检索和重排；分析使用 `query_planner` 模型，
 未单独配置时回退到 `vlm`。结合 OpenViking 0.4.22 与 Hermes provider 的实现：
@@ -278,11 +279,10 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，实际阶段返回�
 - `search` 在启用意图分析且存在会话摘要或历史消息时才调用分析模型。
   分析可以生成零条查询，此时不执行后续检索；`find` 直接检索，不调用意图分析模型。
 - 预取还包含读取命中内容等工作。原版 `search` 的 telemetry 随最终结果返回，
-  不能用于实时切换。扩展在 `IntentAnalyzer.analyze` / `HierarchicalRetriever.retrieve`
-  的真实入口发送事件，使用同一次 HTTP 请求传回阶段和原始结果，不增加检索请求。
-- 直接走 `find` 时跳过意图分析提示；分析生成零条查询时不会显示检索。
-  未安装扩展的服务器继续返回普通 JSON，`search` 等待期间只显示加载动画。
-  超时结束后，旧线程的迟到阶段事件不会恢复提示或污染下一轮卡片。
+  不能用于实时切换。`search` 和 `find` 都使用“查询记忆”表示整次预取。
+- 超时结束后，旧请求的迟到结束通知不会清除新请求的状态或污染下一轮卡片。
+- v1.12–v1.13 的服务端扩展已撤除，旧部署的清理方式见
+  [迁移说明](../integrations/README.md)。
 
 插件包装当前 agent 的 `MemoryManager._prefetch_provider` 等待边界，因此请求失败或
 达到 Hermes 的等待超时后也会结束提示；自动预取不计入模型的工具调用记录。
