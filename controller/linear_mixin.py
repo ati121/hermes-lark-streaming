@@ -855,11 +855,15 @@ class UnifiedControllerMixin:
         return session.tool_use.last_tool_names
 
     def _loading_hint_status(self, session: CardSession) -> str:
-        """Show the whole recall operation; server-internal stages are opaque."""
+        """Show preprocessing only until model/tool activity takes over."""
         if session._response_phase == "compression":
             return "context_compressing"
+        if session._response_phase == "waiting" and session._image_analysis_requests:
+            return "image_analyzing"
         if session._response_phase == "waiting" and session._memory_prefetch_requests:
             return "openviking_recall"
+        if session._response_phase == "waiting" and session._has_native_image_input:
+            return "image_processing"
         return "loading_context"
 
     def _current_loading_status(

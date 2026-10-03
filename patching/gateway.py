@@ -52,6 +52,67 @@ def _visible_output_tokens(usage: Any) -> int:
         return int(output_tokens)
     return max(0, int(output_tokens - reasoning_tokens))
 
+def _wrap_enrich_inbound_images(orig: Callable) -> Callable:
+    """Observe newly attached native pixels; never resolve or change routing."""
+    @functools.wraps(orig)
+    async def wrapper(self, source, session_key, message_text, image_paths, *args, **kwargs):
+        ctx = _msg_ctx.get()
+        mid = (ctx or {}).get("event_message_id") or (ctx or {}).get("message_id")
+        before = None
+        try:
+            before = self._session_state(session_key).persistent.native_image_paths
+        except (AttributeError, KeyError, TypeError):
+            pass
+        result = await orig(self, source, session_key, message_text, image_paths, *args, **kwargs)
+        if mid and image_paths:
+            try:
+                after = self._session_state(session_key).persistent.native_image_paths
+                # The native route assigns a new list. A stale attachment from
+                # an earlier turn must not brand this turn's text-only route.
+                if after is not before and after and list(after) == list(image_paths):
+                    from .hooks import on_native_image_input
+                    on_native_image_input(message_id=mid)
+            except Exception:  # noqa: BLE001 — status must not change image delivery
+                _logger.debug("HLS: native image status unavailable", exc_info=True)
+        return result
+
+    return wrapper
+
+
+def _wrap_enrich_message_with_vision(orig: Callable) -> Callable:
+    """Observe the gateway's auxiliary vision wait without changing image routing."""
+    if getattr(orig, "_hls_image_analysis_wrapped", False) is True:
+        return orig
+
+    @functools.wraps(orig)
+    async def wrapper(self, user_text, image_paths, *args, **kwargs):
+        # This coroutine owns the START context, before _run_agent. Do not use
+        # thread-local fallback: it may belong to another bot or an earlier turn.
+        ctx = _msg_ctx.get()
+        mid = (ctx or {}).get("event_message_id") or (ctx or {}).get("message_id")
+        if not mid or not image_paths:
+            return await orig(self, user_text, image_paths, *args, **kwargs)
+        request_id = object()
+
+        def notify(active: bool) -> None:
+            try:
+                from .hooks import on_image_analysis_updated
+                on_image_analysis_updated(
+                    message_id=mid, request_id=request_id, active=active,
+                )
+            except Exception:  # noqa: BLE001 — display failures must not abort vision
+                _logger.debug("HLS: image analysis status failed", exc_info=True)
+
+        notify(True)
+        try:
+            return await orig(self, user_text, image_paths, *args, **kwargs)
+        finally:
+            notify(False)
+
+    wrapper._hls_image_analysis_wrapped = True
+    return wrapper
+
+
 def _wrap_handle_message(orig: Callable) -> Callable:
     """Inject NORMALIZE hook at the top of GatewayRunner._handle_message."""
 

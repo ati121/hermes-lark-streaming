@@ -351,7 +351,7 @@ _TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
 
 # Only known entry points identify image generation. Inspecting a script or
 # running its help is not generation, even when its filename contains image.
-_IMAGE_SCRIPTS = {"gpt_image_gen.py": "GPT Image", "zimage_gen.py": "Zimage"}
+_IMAGE_SCRIPTS = {"gpt_image_gen.py": "GPT", "zimage_gen.py": "Zimage"}
 _PYTHON_SCRIPT_FLAGS = frozenset({"-u", "-B", "-E", "-s", "-S", "-I", "-O", "-OO"})
 _SHELL_PART_RE = re.compile(
     r"'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"|\\[\s\S]|(?<!\S)\#[^\n]*"
@@ -473,7 +473,7 @@ def _image_script_action(script: str, args: list[str]) -> tuple[str, str, str] |
             return f"{family} · 查看帮助", f"{family} · Help", "📖"
         elif options and arg.startswith("-"):
             option, sep, value = arg.partition("=")
-            if option not in ("--image", "--background", "--format"):
+            if option not in ("--image", "--background", "--format", "--model"):
                 return None
             if not sep:
                 i += 1
@@ -865,6 +865,10 @@ def _tool_display_names(name: str | None, detail: str | None = None, args: dict[
     """
     if not name:
         return "Tool", "工具"
+    if _normalize_tool_name(name) == "image_generate" and isinstance(args, dict):
+        model = str(args.get("model") or "").strip().lower()
+        if re.fullmatch(r"(?:[a-z0-9_.-]+/)*gpt[-_ ]image(?:[-_. ][a-z0-9]+)*", model):
+            return "GPT · Generate image", "GPT · 生成图片"
     aliased = _terminal_program_spec(name, detail, args)
     if aliased is not None:
         _zh, _en, _emoji = aliased[1]

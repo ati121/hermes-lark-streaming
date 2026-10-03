@@ -259,6 +259,20 @@ chunk 之间时按会话保持开合状态，正确分流。
 `on_tool_updated`、`on_memory_prefetch_updated`、`on_background_review_message`、
 `on_cron_deliver`。编号与职责见 [SKILL.md「Hook 索引」](SKILL.md#9-hook-索引)。
 
+## 入站图片预识别状态
+
+Hermes 走图片转文字路径时（包括主模型无视觉能力、单独配置视觉模型），
+插件在网关 `_enrich_message_with_vision` 的等待期间显示“图像分析中…”。
+结束、异常或取消后移除该准备状态；等待主模型时恢复“等待上游模型响应”。
+已经开始的模型输出、工具调用和上下文压缩具有更高优先级。
+原生图片直传在网关确认附图后显示“图像分析中…”，首次模型活动后切换正常状态；
+记忆预取和上下文压缩期间优先显示对应状态。模型主动调用 `vision_analyze` 仍显示“图像分析”。
+这只更新卡片，不修改图片路由、视觉模型或识图结果，也不增加工具步骤。
+
+`image_generate` 使用 GPT Image 系列模型时，状态行和工具面板显示
+“GPT · 生成图片”。工具开始时快照模型参数或当前 Profile 的 `image_gen.model`；
+无法确定模型时保留通用名称，不从提示词猜测模型。
+
 ## 记忆工具显示
 
 状态行按记忆来源使用不同图标，所有文案都带上来源名称。Hindsight 的四个工具映射
@@ -354,9 +368,9 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
 
 | 调用 | 显示 |
 |------|------|
-| GPT Image 脚本携带提示词 | 🎨 GPT Image · 生成图片 |
-| GPT Image 脚本携带提示词和 `--image` | 🎨 GPT Image · 编辑图片 |
-| GPT Image 脚本 `-h` / `--help` | 📖 GPT Image · 查看帮助 |
+| GPT Image 脚本携带提示词 | 🎨 GPT · 生成图片 |
+| GPT Image 脚本携带提示词和 `--image` | 🎨 GPT · 编辑图片 |
+| GPT Image 脚本 `-h` / `--help` | 📖 GPT · 查看帮助 |
 | Zimage 脚本携带提示词 | 🎨 Zimage · 生成图片 |
 | 空参数、读取/编译脚本、其他含 image 的程序 | 🖥️ 终端命令 |
 

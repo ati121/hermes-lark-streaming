@@ -700,6 +700,44 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             ):
                 self._schedule_linear_flush(session, force=True)
 
+    def on_native_image_input(self, *, message_id: str) -> None:
+        """The gateway attached pixels for this turn, without an auxiliary call."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_native_image_input"):
+            return
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            previous_status = self._loading_hint_status(session)
+            session._has_native_image_input = True
+            if self._loading_hint_status(session) != previous_status:
+                self._schedule_linear_flush(session, force=True)
+
+    def on_image_analysis_update(
+        self, *, message_id: str, request_id: object, active: bool,
+    ) -> None:
+        """Track gateway image preprocessing separately from model/tool activity."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None or session.guard.should_skip("on_image_analysis_update"):
+            return
+        with session._stream_lock:
+            if not session.accepts_stream_updates:
+                return
+            previous_status = self._loading_hint_status(session)
+            if active:
+                session._image_analysis_requests.add(request_id)
+            else:
+                session._image_analysis_requests.discard(request_id)
+            if (
+                session._response_phase == "waiting"
+                and self._loading_hint_status(session) != previous_status
+            ):
+                self._schedule_linear_flush(session, force=True)
+
     def on_compression_started(
         self, *, message_id: str, source: str = "context compression started",
     ) -> None:

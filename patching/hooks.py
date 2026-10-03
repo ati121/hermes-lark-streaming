@@ -161,6 +161,21 @@ def on_memory_prefetch_updated(
     return True
 
 @_safe_hook(default_return=False, log_level="debug")
+def on_native_image_input(*, ctrl: Any, message_id: str) -> bool:
+    ctrl.on_native_image_input(message_id=message_id)
+    return True
+
+@_safe_hook(default_return=False, log_level="debug")
+def on_image_analysis_updated(
+    *, ctrl: Any, message_id: str, request_id: object, active: bool,
+) -> bool:
+    """Gateway vision enrichment, before the main agent starts."""
+    ctrl.on_image_analysis_update(
+        message_id=message_id, request_id=request_id, active=active,
+    )
+    return True
+
+@_safe_hook(default_return=False, log_level="debug")
 def on_answer_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     """[注入点 4] _stream_delta_cb — answer.delta."""
     ctrl.on_answer(message_id=message_id, text=text)

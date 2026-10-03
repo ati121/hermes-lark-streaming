@@ -4,6 +4,23 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.21 (2026-10-03, personal fork)
+
+### Fixed — incoming image preprocessing status
+
+- Display `图像分析中…` while the gateway waits for auxiliary vision, including
+  image-only messages and separately configured vision providers. Restore the
+  waiting hint on completion, failure or cancellation without overwriting later
+  model, tool or compression activity. Both card transports preserve the status
+  when image analysis races card creation; request tokens isolate late completions.
+- Register the optional gateway wrapper through the shared per-method guard so
+  multiplex plugin copies do not duplicate it. Image routing is unchanged.
+- Native attachments show `图像分析中…` before the main model responds, with
+  memory retrieval/compression taking precedence; stale attachments are ignored.
+- Use `GPT · 生成图片` for GPT Image generation scripts and explicit GPT Image
+  model arguments or profile model configuration on `image_generate`; retain
+  edit/help actions and generic labels when the model is unknown.
+
 ## v1.20 (2026-09-29, personal fork)
 
 ### Changed — OpenViking status needs no server modifications

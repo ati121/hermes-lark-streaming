@@ -237,6 +237,8 @@ def _get_thread_local_ctx() -> dict | None:
 # These imports must come AFTER shared state is defined to avoid circular
 
 from .gateway import (  # noqa: E402
+    _wrap_enrich_inbound_images,
+    _wrap_enrich_message_with_vision,
     _wrap_handle_message,
     _wrap_handle_message_with_agent,
     _wrap_handle_active_session_busy_message,
@@ -355,6 +357,8 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
             ('_handle_active_session_busy_message', _wrap_handle_active_session_busy_message),
             ('_run_agent', _wrap_run_agent),
             ('_run_background_task', _wrap_run_background_task),
+            ('_enrich_message_with_vision', _wrap_enrich_message_with_vision),
+            ('_enrich_inbound_images', _wrap_enrich_inbound_images),
         ):
             _outcome = _wrap_method_once(GatewayRunner, _name, _factory)
             if _outcome == "patched":
@@ -368,7 +372,7 @@ def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
             else:
                 _logger.debug(
                     "hermes-lark-streaming: GatewayRunner.%s not found, "
-                    "background cards disabled", _name,
+                    "optional hook unavailable", _name,
                 )
 
         if not _patched_methods and not _adopted_methods:
