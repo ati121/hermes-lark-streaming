@@ -383,19 +383,16 @@ def _maybe_wrap_callbacks(agent) -> None:
                     # preview is capped by display.tool_preview_length and
                     # skips keys like ``uri``, so the card keeps the dict too.
                     _tool_args = args[0] if args and isinstance(args[0], dict) else None
-                    if event_type == "tool.started" and tool_name == "image_generate":
-                        # Hermes selects this tool's model from profile config,
-                        # not from its public arguments. Snapshot only the model
-                        # for display; never change the arguments sent to the tool.
+                    if event_type == "tool.started" and tool_name in ("image_generate", "terminal"):
+                        # Snapshot display metadata, including terminal scripts
+                        # that call Hermes's image provider internally.
                         try:
-                            from tools.image_generation_tool import (
-                                _read_configured_image_model,
+                            from .image_labels import image_display_args
+
+                            _tool_args = image_display_args(
+                                tool_name, _tool_args, str(getattr(agent, "session_id", "") or "")
                             )
-                            if not (_tool_args or {}).get("model"):
-                                _image_model = _read_configured_image_model()
-                                if _image_model:
-                                    _tool_args = {**(_tool_args or {}), "model": _image_model}
-                        except (ImportError, AttributeError, OSError, ValueError, TypeError):
+                        except (ImportError, AttributeError, OSError, ValueError, TypeError, RuntimeError):
                             _logger.debug("HLS: image model label unavailable", exc_info=True)
                     if on_tool_updated(
                         message_id=_eid,

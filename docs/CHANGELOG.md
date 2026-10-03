@@ -4,6 +4,21 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.22 (2026-10-03, personal fork)
+
+### Fixed — GPT image labels for Hermes provider scripts
+
+- Recognize local terminal Python scripts and inline Python that directly call
+  Hermes's image-generation dispatcher. GPT Image providers now display
+  `GPT · 生成图片` in both the running status and completed tool panel even when
+  the gateway only reports a `terminal` tool event.
+- Snapshot labels once at tool start using bounded static inspection, without
+  executing scripts or modifying tool arguments. Imports, mentions, uncalled
+  functions, help and image copying retain their existing labels; unsupported
+  commands and unavailable files fall back to the terminal label.
+- Read Octopus's effective model through the loaded provider's configuration
+  helpers, respecting its model precedence and defaults across profiles.
+
 ## v1.21 (2026-10-03, personal fork)
 
 ### Fixed — incoming image preprocessing status

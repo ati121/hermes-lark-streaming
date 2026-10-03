@@ -558,6 +558,9 @@ def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str,
     """
     if not name or _normalize_tool_name(name) != "terminal":
         return None
+    if isinstance(args, dict) and args.get("_hls_image_generate") is True:
+        en, zh = _tool_display_names("image_generate", args=args)
+        return [], (zh, en, "🎨")
     command = _terminal_command_text(name, detail, args)
     if not command:
         return None
