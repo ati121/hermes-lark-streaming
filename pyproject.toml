@@ -37,7 +37,7 @@ where = ["."]
 include = ["controller*", "cardkit*", "patching*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*"]
 
 [tool.setuptools.package-data]
-hermes_lark_streaming = ["plugin.yaml"]
+hermes_lark_streaming = ["plugin.yaml", "feishu/assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -199,6 +199,9 @@ class FeishuClient:
     """飞书 REST API 封装 — 基于 lark-oapi SDK."""
 
     def __init__(self, config: FeishuClientConfig) -> None:
+        from .branding import BrandAssets
+
+        self._brand_assets = BrandAssets()
         self.config = config
         builder = lark.Client.builder().app_id(config.app_id).app_secret(config.app_secret)
         # .domain() 只接受域名（如 https://open.feishu.cn），不带 /open-apis 后缀
@@ -324,6 +327,9 @@ class FeishuClient:
     def _dumps(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False)
 
+    async def _card_json(self, payload: Any) -> str:
+        return self._dumps(await self._brand_assets.resolve(payload, self.upload_local_image))
+
     async def send_card_to_chat(self, chat_id: str, card: dict[str, Any]) -> str:
         """发送独立卡片到聊天（非回复），返回 message_id."""
         request = (
@@ -333,7 +339,7 @@ class FeishuClient:
                 CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
                 .msg_type("interactive")
-                .content(self._dumps(card))
+                .content(await self._card_json(card))
                 .build()
             )
             .build()
@@ -369,7 +375,7 @@ class FeishuClient:
         request = (
             ReplyMessageRequest.builder()
             .message_id(message_id)
-            .request_body(ReplyMessageRequestBody.builder().msg_type("interactive").content(self._dumps(card)).build())
+            .request_body(ReplyMessageRequestBody.builder().msg_type("interactive").content(await self._card_json(card)).build())
             .build()
         )
         resp = await self._client.im.v1.message.areply(request)
@@ -433,7 +439,7 @@ class FeishuClient:
             request = (
                 PatchMessageRequest.builder()
                 .message_id(message_id)
-                .request_body(PatchMessageRequestBody.builder().content(self._dumps(card)).build())
+                .request_body(PatchMessageRequestBody.builder().content(await self._card_json(card)).build())
                 .build()
             )
             resp = await self._client.im.v1.message.apatch(request)
@@ -452,7 +458,7 @@ class FeishuClient:
         async def _do():
             request = (
                 CreateCardRequest.builder()
-                .request_body(CreateCardRequestBody.builder().type("card_json").data(self._dumps(card)).build())
+                .request_body(CreateCardRequestBody.builder().type("card_json").data(await self._card_json(card)).build())
                 .build()
             )
             t0 = _time.monotonic()
@@ -531,7 +537,7 @@ class FeishuClient:
         """全量更新 CardKit 卡片."""
         async def _do():
             body_builder = UpdateCardRequestBody.builder().card(
-                Card.builder().type("card_json").data(self._dumps(card)).build()
+                Card.builder().type("card_json").data(await self._card_json(card)).build()
             )
             body_builder = body_builder.sequence(sequence)
             request = UpdateCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
@@ -549,7 +555,7 @@ class FeishuClient:
     ) -> None:
         """局部更新 CardKit 卡片（增删改组件）."""
         async def _do():
-            body_builder = BatchUpdateCardRequestBody.builder().sequence(sequence).actions(self._dumps(actions))
+            body_builder = BatchUpdateCardRequestBody.builder().sequence(sequence).actions(await self._card_json(actions))
             request = BatchUpdateCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
             t0 = _time.monotonic()
             resp = await self._client.cardkit.v1.card.abatch_update(request)

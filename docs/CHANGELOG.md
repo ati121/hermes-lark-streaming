@@ -4,6 +4,20 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.23 (2026-10-05, personal fork)
+
+### Changed — OpenViking artwork and persistent retrieval records
+
+- Use the supplied official OpenViking artwork in retrieval status and tool
+  rows. Bundle the image, upload/cache it per Feishu client, and fall back to a
+  standard icon if upload is unavailable. Both card transports resolve assets.
+- Retain automatic memory retrieval outcomes and durations in the process
+  panel, including retrievals completed before the first card appears. Show
+  failures/timeouts separately without exposing recalled content.
+- Completed preparation records do not own the live status, interrupt current
+  reasoning, or count subsequent model waiting time as retrieval time. Preserve
+  the waiting hint while showing these records before the first model response.
+
 ## v1.22 (2026-10-03, personal fork)
 
 ### Fixed — GPT image labels for Hermes provider scripts

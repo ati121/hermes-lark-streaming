@@ -152,11 +152,11 @@ def on_tool_updated(
 
 @_safe_hook(default_return=False, log_level="debug")
 def on_memory_prefetch_updated(
-    *, ctrl: Any, message_id: str, request_id: object, active: bool,
+    *, ctrl: Any, message_id: str, request_id: object, active: bool, outcome: str = "completed",
 ) -> bool:
     """OpenViking's automatic retrieval before the model's first response."""
     ctrl.on_memory_prefetch_update(
-        message_id=message_id, request_id=request_id, active=active,
+        message_id=message_id, request_id=request_id, active=active, outcome=outcome,
     )
     return True
 

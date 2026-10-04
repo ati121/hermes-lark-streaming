@@ -677,7 +677,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._linear_on_thinking(session, text)
 
     def on_memory_prefetch_update(
-        self, *, message_id: str, request_id: object, active: bool,
+        self, *, message_id: str, request_id: object, active: bool, outcome: str = "completed",
     ) -> None:
         """Track automatic retrieval without changing the model/tool phase."""
         if not self.enabled:
@@ -690,13 +690,20 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             if not session.accepts_stream_updates:
                 return
             previous_status = self._loading_hint_status(session)
+            recorded = False
             if active:
-                session._memory_prefetch_requests.add(request_id)
+                session._memory_prefetch_requests.setdefault(request_id, time.monotonic())
             else:
-                session._memory_prefetch_requests.discard(request_id)
+                started = session._memory_prefetch_requests.pop(request_id, None)
+                if started is not None:
+                    recorded = session.tool_use.record_memory_retrieval(
+                        (time.monotonic() - started) * 1000, outcome,
+                    )
+                    if recorded and session.unified_state is not None:
+                        session.unified_state.on_tool_event(finalize_reasoning=False)
             if (
-                session._response_phase == "waiting"
-                and self._loading_hint_status(session) != previous_status
+                recorded or (session._response_phase == "waiting"
+                and self._loading_hint_status(session) != previous_status)
             ):
                 self._schedule_linear_flush(session, force=True)
 

@@ -48,6 +48,7 @@ class ToolStep:
     # Feishu) and skips keys like ``uri``; the full arguments let the row
     # identify a script by name or a Viking URI by prefix.
     args: dict[str, Any] | None = None
+    passive: bool = False  # Completed preparation records never own the spinner.
 
 @dataclass
 class ToolSession:
@@ -935,7 +936,14 @@ class ToolUseTracker:
     def elapsed_ms(self) -> float:
         if self._session is None or self._session.started_at is None:
             return 0.0
-        return (time.time() - self._session.started_at) * 1000
+        preparation_ms = sum(s.elapsed_ms for s in self._session.steps if s.passive)
+        if self.only_passive_steps:
+            return preparation_ms
+        return preparation_ms + (time.time() - self._session.started_at) * 1000
+
+    @property
+    def only_passive_steps(self) -> bool:
+        return bool(self._session and self._session.steps and all(s.passive for s in self._session.steps))
 
     @property
     def last_tool_names(self) -> tuple[str, str] | None:
@@ -946,7 +954,9 @@ class ToolUseTracker:
         """
         if self._session is None or not self._session.steps:
             return None
-        last = self._session.steps[-1]
+        last = next((s for s in reversed(self._session.steps) if not s.passive), None)
+        if last is None:
+            return None
         return _tool_display_names(last.name, last.detail, last.args)
 
     @property
@@ -954,12 +964,27 @@ class ToolUseTracker:
         """Emoji for whichever tool ``last_tool_names`` is reporting."""
         if self._session is None or not self._session.steps:
             return None
-        last = self._session.steps[-1]
+        last = next((s for s in reversed(self._session.steps) if not s.passive), None)
+        if last is None:
+            return None
         return _tool_emoji(last.name, last.detail, last.args)
+
+    def record_memory_retrieval(self, elapsed_ms: float, outcome: str = "completed") -> bool:
+        if self._session is None:
+            self._session = ToolSession(started_at=time.time())
+        if len(self._session.steps) >= self._max_steps:
+            return False
+        self._session.steps.append(ToolStep(
+            name="viking_prefetch", status="success" if outcome == "completed" else "error",
+            elapsed_ms=elapsed_ms, args={"outcome": outcome}, passive=True,
+        ))
+        return True
 
     def record_start(self, name: str, detail: str = "", args: dict[str, Any] | None = None) -> None:
         if self._session is None:
             self._session = ToolSession(started_at=time.time())
+        elif self.only_passive_steps:
+            self._session.started_at = time.time()
         if len(self._session.steps) >= self._max_steps:
             return
         self._session.steps.append(
@@ -1010,6 +1035,13 @@ class ToolUseTracker:
         for s in self._session.steps:
             desc = _resolve_tool_descriptor(s.name)
             base_title, base_title_zh = _tool_display_names(s.name, s.detail, s.args)
+            if s.name == "viking_prefetch":
+                outcome = (s.args or {}).get("outcome")
+                en, zh = {
+                    "completed": ("Memory retrieval completed", "已完成记忆检索"),
+                    "timeout": ("Memory retrieval timed out", "记忆检索超时"),
+                }.get(outcome, ("Memory retrieval failed", "记忆检索失败"))
+                base_title, base_title_zh = f"OpenViking · {en}", f"OpenViking · {zh}"
             if s.elapsed_ms > 0:
                 suffix = f" ({_format_duration_label(s.elapsed_ms)})"
                 base_title += suffix

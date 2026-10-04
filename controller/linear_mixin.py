@@ -136,6 +136,15 @@ _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 
 _THINKING_EMOJI = "💭"
 _COMPRESSION_EMOJI = "🗜️"
 
+def _only_preparation_records(session: CardSession) -> bool:
+    state = session.unified_state
+    return bool(
+        state and session._response_phase in ("waiting", "compression")
+        and session.tool_use.only_passive_steps
+        and not (state.answer_text or state.current_reasoning_text or state.reasoning_rounds)
+    )
+
+
 class UnifiedControllerMixin:
     """Unified panel linear mode — phased card lifecycle."""
 
@@ -230,7 +239,7 @@ class UnifiedControllerMixin:
                     elements.extend(action.get("params", {}).get("elements", []))
         else:
             label, status_key, emoji = self._current_loading_status(session)
-            if not elements and session._response_phase in ("waiting", "compression"):
+            if (not elements or _only_preparation_records(session)) and session._response_phase in ("waiting", "compression"):
                 # Before the first model byte, the reversible context row owns
                 # waiting, memory retrieval and compression. The spinner takes over after
                 # model activity starts (or when content already exists).
@@ -561,7 +570,8 @@ class UnifiedControllerMixin:
                 },
             })
             # Delete loading hint
-            if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
+            _keep_preparation_hint = _only_preparation_records(session)
+            if _LOADING_HINT_ELEMENT_ID in session.existing_elements and not _keep_preparation_hint:
                 actions.append({
                     "action": "delete_elements",
                     "params": {"element_ids": [_LOADING_HINT_ELEMENT_ID]},
@@ -578,12 +588,14 @@ class UnifiedControllerMixin:
                     )
                     # Update tracking after success
                     session._creation_stages.add("answer")
-                    session._creation_stages.add("hint_removed")
+                    if not _keep_preparation_hint:
+                        session._creation_stages.add("hint_removed")
                     session.existing_elements.add(ANSWER_ELEMENT_ID)
                     if _has_panel:
                         session._creation_stages.add("panel")
                         session.existing_elements.add(UNIFIED_PANEL_ELEMENT_ID)
-                    session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+                    if not _keep_preparation_hint:
+                        session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
                     # Clear dirty flags only after API success
                     state.panel_dirty = False
                     state.tool_steps_dirty = False
@@ -728,7 +740,7 @@ class UnifiedControllerMixin:
 
         # ── Delete loading hint if still present (safety net) ──
         _hint_delete_in_batch = False
-        has_visible_model_content = state.panel_visible or bool(state.answer_text)
+        has_visible_model_content = (state.panel_visible or bool(state.answer_text)) and not _only_preparation_records(session)
         # Once the spinner row says 模型思考中, leaving 等待上游模型响应 above it
         # would state the opposite. Drop the hint on the first upstream token
         # even when that token produced nothing visible yet (show_reasoning off).
@@ -924,6 +936,7 @@ class UnifiedControllerMixin:
                 "element_id": _LOADING_HINT_ELEMENT_ID,
                 # Preserve the existing lark_md tag on partial updates.
                 "partial_element": {
+                    "icon": hint["icon"],
                     "text": {
                         "content": hint["text"]["content"],
                         "i18n_content": hint["text"]["i18n_content"],
@@ -972,6 +985,7 @@ class UnifiedControllerMixin:
             "params": {
                 "element_id": _LOADING_ELEMENT_ID,
                 "partial_element": {
+                    "icon": _loading_element(label, status_key=status_key, emoji=emoji)["icon"],
                     "text": _loading_status_text(
                         label, status_key=status_key, emoji=emoji,
                         text_sizes=session.text_sizes,

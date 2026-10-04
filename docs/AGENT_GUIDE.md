@@ -284,11 +284,14 @@ Octopus 使用已加载插件的模型解析逻辑，包含环境变量、插件
 ## 记忆工具显示
 
 状态行按记忆来源使用不同图标，所有文案都带上来源名称。Hindsight 的四个工具映射
-统一用 👁️，OpenViking 的六个工具统一用 📖；Hermes 内置记忆用 🧠，会话检索用 🔎。
+统一用 👁️，OpenViking 的状态行和六个工具统一使用官方帆船图标；Hermes 内置记忆用 🧠，会话检索用 🔎。
 工具面板同步使用带来源的中英文名称。
+OpenViking 图片随插件打包，由各 bot 的飞书客户端上传并缓存；上传不可用时回退到标准检索图标。
 
 Hermes 在模型调用前自动预取 OpenViking 记忆时，统一显示
-`📖 OpenViking · 查询记忆`；结束后恢复等待主模型的提示。
+`OpenViking · 查询记忆`（官方图标）；结束后恢复等待主模型的提示。
+过程面板保留“OpenViking · 已完成记忆检索”和耗时，即使预取在首卡创建前已结束也可查看。
+失败或等待超时分别标注，不表示检索命中数量，也不展示私有检索内容。
 该状态表示整次预取，不声明当前正在执行意图分析还是检索，也不显示准备提示。
 插件只观察 Hermes 的预取开始和结束，不改 OpenViking 服务端、Compose 或启动入口，
 不包装 provider 的 HTTP 客户端，不发送自定义进度请求头。
@@ -307,7 +310,7 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，统一显示
   [迁移说明](../integrations/README.md)。
 
 插件包装当前 agent 的 `MemoryManager._prefetch_provider` 等待边界，因此请求失败或
-达到 Hermes 的等待超时后也会结束提示；自动预取不计入模型的工具调用记录。
+达到 Hermes 的等待超时后也会结束提示；只写卡片过程记录，不向模型历史增加工具调用。
 正常的模型输出、工具调用和上下文压缩优先于此准备状态。
 
 | 工具 | 状态行 | 用途 |
@@ -318,12 +321,12 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，统一显示
 | `hindsight_recall` | 👁️ Hindsight · 记忆回溯 | 检索历史记忆 |
 | `hindsight_reflect` | 👁️ Hindsight · 记忆推演 | 综合已有记忆进行推演 |
 | `hindsight_operation` | 👁️ Hindsight · 记忆操作 | 其他记忆操作的显示映射 |
-| `viking_search` | 📖 OpenViking · 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
-| `viking_read` | 📖 OpenViking · 读取记忆 | 按摘要、概览或全文读取指定内容；URI 在 `viking://resources/` 下时显示为 OpenViking · 知识库 |
-| `viking_browse` | 📖 OpenViking · 浏览记忆库 | 查看目录、层级或条目元信息；路径在 `viking://resources/` 下时显示为 OpenViking · 浏览知识库 |
-| `viking_remember` | 📖 OpenViking · 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
-| `viking_forget` | 📖 OpenViking · 删除记忆 | 按精确 URI 删除一条指定记忆 |
-| `viking_add_resource` | 📖 OpenViking · 导入资料 | 导入网址、本地文件或目录并建立索引 |
+| `viking_search` | OpenViking · 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
+| `viking_read` | OpenViking · 读取记忆 | 按摘要、概览或全文读取指定内容；URI 在 `viking://resources/` 下时显示为 OpenViking · 知识库 |
+| `viking_browse` | OpenViking · 浏览记忆库 | 查看目录、层级或条目元信息；路径在 `viking://resources/` 下时显示为 OpenViking · 浏览知识库 |
+| `viking_remember` | OpenViking · 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
+| `viking_forget` | OpenViking · 删除记忆 | 按精确 URI 删除一条指定记忆 |
+| `viking_add_resource` | OpenViking · 导入资料 | 导入网址、本地文件或目录并建立索引 |
 
 OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)。
 

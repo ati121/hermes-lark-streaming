@@ -215,7 +215,8 @@ def _loading_status_text(
         en_text, zh_text = _T[status_key]
     else:
         return {"tag": "plain_text", "content": " "}
-    mark = f"{emoji} " if emoji else ""
+    is_openviking = status_key == "openviking_recall" or bool(label and label[0].startswith("OpenViking · "))
+    mark = f"{emoji} " if emoji and not is_openviking else ""
     # EN SPACEs, not ASCII: a leading ASCII run is the kind of thing a renderer
     # feels free to collapse, and this gap is doing layout work.
     pad = "  "
@@ -235,9 +236,12 @@ def _loading_element(
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
     """Loading spinner element (div with icon — div natively supports icon, markdown varies)."""
+    from ..feishu.branding import openviking_icon
+
+    is_openviking = status_key == "openviking_recall" or bool(label and label[0].startswith("OpenViking · "))
     return {
         "tag": "div",
-        "icon": {
+        "icon": openviking_icon() if is_openviking else {
             "tag": "custom_icon",
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
@@ -255,9 +259,11 @@ def _loading_hint_element(status_key: str = "loading_context") -> dict:
         "context_compressing", "model_thinking",
     ):
         status_key = "loading_context"
+    from ..feishu.branding import openviking_icon
+
     return {
         "tag": "div",
-        "icon": {
+        "icon": openviking_icon() if status_key == "openviking_recall" else {
             "tag": "standard_icon",
             "token": "time_outlined",
             "size": "16px 16px",
@@ -801,7 +807,10 @@ def _build_tool_step_title(
     # built from one is grey whatever token is chosen. Emoji carry their own
     # colour. It sits *outside* the bold run on purpose — Feishu drops a bold
     # span that mixes emoji or punctuation into it.
-    mark = step.get("emoji") or ""
+    from ..feishu.branding import openviking_icon
+
+    is_openviking = str(step.get("name", "")).startswith("viking_")
+    mark = "" if is_openviking else step.get("emoji") or ""
     prefix = f"{mark} " if mark else ""
     content = f"{prefix}<font color='{color}'>**{_escape_md(title)}**</font>"
     text: dict[str, Any] = {
@@ -815,6 +824,7 @@ def _build_tool_step_title(
     return {
         "tag": "div",
         "text": text,
+        **({"icon": openviking_icon()} if is_openviking else {}),
     }
 
 def _build_reasoning_round_title(

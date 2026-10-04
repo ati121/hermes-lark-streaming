@@ -151,7 +151,7 @@ class CardSession:
         self._response_phase: str = "waiting"
         # Automatic recall is preparation, not a model-issued tool step. Each
         # request owns its token so a late completion cannot clear a newer one.
-        self._memory_prefetch_requests: set[object] = set()
+        self._memory_prefetch_requests: dict[object, float] = {}
         self._image_analysis_requests: set[object] = set()
         self._has_native_image_input = False
         # Temporary response phase used while Hermes compacts the conversation

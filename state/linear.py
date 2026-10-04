@@ -99,9 +99,10 @@ class UnifiedLinearState:
         self.answer_text += text
         self.answer_dirty = True
 
-    def on_tool_event(self, is_new_tool: bool = True) -> None:
+    def on_tool_event(self, is_new_tool: bool = True, *, finalize_reasoning: bool = True) -> None:
         """Tool call event. Finalizes any in-progress reasoning first."""
-        self._finalize_current_reasoning()
+        if finalize_reasoning:
+            self._finalize_current_reasoning()
         if is_new_tool:
             self._panel_events.append(("tool", self._tool_count))
             self._tool_count += 1

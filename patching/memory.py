@@ -34,23 +34,28 @@ def _maybe_wrap_memory_prefetch(
         # turn while an old request is finishing.
         request_id = object()
 
-        def notify(active: bool) -> None:
+        def notify(active: bool, outcome: str = "completed") -> None:
             try:
                 from .hooks import on_memory_prefetch_updated
 
                 on_memory_prefetch_updated(
-                    message_id=message_id, request_id=request_id, active=active,
+                    message_id=message_id, request_id=request_id, active=active, outcome=outcome,
                 )
             except Exception:
                 _logger.debug("HLS: memory prefetch status failed", exc_info=True)
 
         notify(True)
+        outcome = "error"
         try:
             # Wrap the manager's bounded wait, not the provider's daemon
             # thread: the status must end when Hermes gives up on a timeout.
-            return original(provider, *args, **kwargs)
+            result = original(provider, *args, **kwargs)
+            threads = getattr(manager, "_external_prefetch_threads", {})
+            worker = threads.get(provider.name) if isinstance(threads, dict) else None
+            outcome = "timeout" if worker is not None and worker.is_alive() else "completed"
+            return result
         finally:
-            notify(False)
+            notify(False, outcome)
 
     prefetch_wrapper._hls_prefetch_wrapper = True
     try:

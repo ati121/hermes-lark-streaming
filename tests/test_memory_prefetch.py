@@ -25,7 +25,7 @@ from hermes_lark_streaming.state.phase import CardPhase, TerminalReason
 
 pytestmark = pytest.mark.asyncio
 
-_RECALL = "📖 OpenViking · 查询记忆"
+_RECALL = "OpenViking · 查询记忆"
 _WAITING = "等待上游模型响应"
 
 
@@ -42,6 +42,10 @@ async def test_query_status_ends_without_invented_internal_stages(make_pipeline)
     await pipeline.ctrl._do_unified_flush(pipeline.session)
     assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == _WAITING
     assert not pipeline.session._memory_prefetch_requests
+    rows = pipeline.session.tool_use.build_display_steps()
+    assert len(rows) == 1  # Duplicate end events do not append another record.
+    assert rows[0]["title_zh"].startswith("OpenViking · 已完成记忆检索")
+    assert pipeline.session.tool_use.last_tool_names is None
     assert "意图分析" not in str(pipeline.client.mock_calls)
     assert "准备记忆上下文" not in str(pipeline.client.mock_calls)
 
@@ -150,7 +154,7 @@ async def test_worker_prefetch_updates_card_and_restores_waiting(make_pipeline):
         update = hint_updates(pipeline.client)[-1]
         assert "tag" not in update  # Preserve the existing lark_md tag on partial updates.
         assert update["i18n_content"]["zh_cn"] == _RECALL
-        assert update["i18n_content"]["en_us"] == "📖 OpenViking · Querying memory"
+        assert update["i18n_content"]["en_us"] == "OpenViking · Querying memory"
         assert pipeline.session.tool_use.build_display_steps() == []
         assert not pipeline.session.unified_state.panel_visible
     finally:
@@ -370,6 +374,36 @@ async def test_recall_finishing_before_card_creation_does_not_flash_stale_status
     card = pipeline.client.cardkit_create.await_args.args[0]
     assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == _WAITING
     assert _RECALL not in json.dumps(card, ensure_ascii=False)
+    await pipeline.ctrl._do_unified_flush(pipeline.session)
+    assert "已完成记忆检索" in str(pipeline.client.mock_calls)
+    assert pipeline.session._loading_hint_state == "loading_context"
+
+
+async def test_completed_recall_does_not_interrupt_new_reasoning(make_pipeline):
+    pipeline = make_pipeline()
+    request = object()
+    pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=True)
+    state = pipeline.session.unified_state
+    state.on_reasoning_delta("ongoing thought")
+    pipeline.session._response_phase = "thinking"
+    pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=request, active=False)
+    assert not state.reasoning_rounds
+    assert pipeline.session._response_phase == "thinking"
+    assert pipeline.session.tool_use.last_tool_names is None
+
+
+@pytest.mark.parametrize("outcome,expected", [("error", "记忆检索失败"), ("timeout", "记忆检索超时")])
+async def test_failed_recall_records_outcome_without_claiming_success(make_pipeline, outcome, expected):
+    pipeline = make_pipeline()
+    request = object()
+    update = pipeline.ctrl.on_memory_prefetch_update
+    update(message_id="message-1", request_id=request, active=True)
+    update(message_id="message-1", request_id=request, active=False, outcome=outcome)
+    row = pipeline.session.tool_use.build_display_steps()[0]
+    assert expected in row["title_zh"]
+    assert row["status"] == "error"
+    assert row["elapsed_ms"] >= 0
+    assert pipeline.ctrl._loading_hint_status(pipeline.session) == "loading_context"
 
 
 async def test_completion_during_slow_card_creation_is_flushed(make_pipeline, monkeypatch):
@@ -398,7 +432,7 @@ async def test_completion_during_slow_card_creation_is_flushed(make_pipeline, mo
         await asyncio.gather(*scheduled)
 
     assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == _WAITING
-    assert not pipeline.session._first_flush_done
+    assert pipeline.session.unified_state.panel_visible
 
 
 async def test_completion_while_start_patch_is_in_flight_reflushes_waiting(make_pipeline, monkeypatch):
@@ -464,7 +498,7 @@ async def test_later_activity_wins_over_recall_completion(make_pipeline, later_e
     assert _RECALL not in str(pipeline.client.cardkit_batch_update.await_args_list)
     if later_event == "tool":
         assert pipeline.session.tool_use.last_tool_names[1] == "OpenViking · 检索记忆"
-        assert len(pipeline.session.tool_use.build_display_steps()) == 1
+        assert len(pipeline.session.tool_use.build_display_steps()) == 2
 
 
 async def test_overlapping_requests_and_unknown_completions_keep_active_status(make_pipeline):
@@ -493,7 +527,7 @@ async def test_old_completion_cannot_clear_replacement_card(make_pipeline):
 
     pipeline.ctrl.on_memory_prefetch_update(message_id="message-1", request_id=old_request, active=False)
 
-    assert replacement._memory_prefetch_requests == {new_request}
+    assert set(replacement._memory_prefetch_requests) == {new_request}
     assert pipeline.ctrl._loading_hint_status(replacement) == "openviking_recall"
 
 

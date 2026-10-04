@@ -37,7 +37,7 @@ _T: dict[str, tuple[str, str]] = {
     "loading_context": ("Waiting for upstream model...", "等待上游模型响应"),
     "image_analyzing": ("Analyzing images...", "图像分析中…"),
     "image_processing": ("Processing images...", "图像分析中…"),
-    "openviking_recall": ("📖 OpenViking · Querying memory", "📖 OpenViking · 查询记忆"),
+    "openviking_recall": ("OpenViking · Querying memory", "OpenViking · 查询记忆"),
     "context_compressing": ("Compressing context...", "上下文压缩中..."),
     "model_thinking": ("Model is thinking...", "模型思考中..."),
     # ── Live tool status shown beside the loading spinner ──
