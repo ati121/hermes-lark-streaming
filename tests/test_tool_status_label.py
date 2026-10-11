@@ -349,6 +349,72 @@ class TestLastToolNames:
         assert t.last_tool_names == ("Read", "读取文件")
 
 
+class TestStatusRowKeepsGenerationLabel:
+    """状态行 ≠ 最近一步：生图运行期间不被同批次旁路工具顶掉.
+
+    CC ca (2026-10-11) batched ``tool_call(image_generate)`` with
+    ``read_file("/AI/00-归档规则.md")``. The side tool is recorded after the
+    generation step, so the spinner row read 📄 读取文件 for the whole 63 s
+    render while the panel already held the 🎨 GPT · 生成图片 row.
+    """
+
+    def test_batched_read_file_does_not_steal_the_label(self) -> None:
+        t = ToolUseTracker()
+        t.record_start("tool_call", '{"calls": [{"name": "image_generate"}]}')
+        t.record_start("image_generate", "a cat", {"model": "gpt-image-2.5"})
+        t.record_start("read_file", "/AI/00-归档规则.md")
+        assert t.status_tool_names == ("GPT · Generate image", "GPT · 生成图片")
+        assert t.status_tool_emoji == "🎨"
+        # The newest step still owns the panel/sticky view.
+        assert t.last_tool_names == ("Read", "读取文件")
+        # What the card row itself renders (EN SPACE pad, emoji, name).
+        row = _loading_status_text(t.status_tool_names, emoji=t.status_tool_emoji)
+        assert row["i18n_content"]["zh_cn"] == "\u2002\u2002🎨 GPT · 生成图片"
+
+    def test_terminal_image_script_keeps_the_label(self) -> None:
+        """A script row aliased to the GPT family counts as generation too."""
+        t = ToolUseTracker()
+        t.record_start("terminal", 'python3 /workspace/scripts/gpt_image_gen.py "a cat"')
+        t.record_start("read_file", "notes.md")
+        assert t.status_tool_names == ("GPT · Generate image", "GPT · 生成图片")
+        assert t.status_tool_emoji == "🎨"
+
+    def test_video_generation_keeps_the_label(self) -> None:
+        t = ToolUseTracker()
+        t.record_start("video_generate", "a clip")
+        t.record_start("read_file", "notes.md")
+        assert t.status_tool_names == ("Generate video", "生成视频")
+        assert t.status_tool_emoji == "🎬"
+
+    def test_label_released_once_the_generation_finishes(self) -> None:
+        """The row follows later work; it must not pin the card to the render."""
+        t = ToolUseTracker()
+        t.record_start("image_generate", "a cat", {"model": "gpt-image-2.5"})
+        t.record_start("read_file", "notes.md")
+        t.record_end("image_generate", output="ok")
+        assert t.status_tool_names == ("Read", "读取文件")
+        assert [s["name"] for s in t.build_display_steps()] == ["image_generate", "read_file"]
+
+    def test_without_generation_the_newest_step_still_wins(self) -> None:
+        t = ToolUseTracker()
+        t.record_start("terminal", "ls -la")
+        t.record_start("read_file", "notes.md")
+        assert t.status_tool_names == t.last_tool_names == ("Read", "读取文件")
+        assert t.status_tool_emoji == t.last_tool_emoji == "📄"
+
+    def test_none_when_no_tools(self) -> None:
+        t = ToolUseTracker()
+        assert t.status_tool_names is None
+        assert t.status_tool_emoji is None
+
+    def test_passive_records_never_own_the_row(self) -> None:
+        t = ToolUseTracker()
+        t.record_memory_retrieval(120.0, "completed")
+        assert t.status_tool_names is None
+        t.record_start("image_generate", "a cat", {"model": "gpt-image-2.5"})
+        assert t.status_tool_names == ("GPT · Generate image", "GPT · 生成图片")
+
+
 class TestLoadingStatusText:
     def test_blank_when_no_label(self) -> None:
         text = _loading_status_text(None)

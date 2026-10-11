@@ -4,6 +4,20 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.25 (2026-10-11, personal fork)
+
+### Fixed — a batched side tool no longer steals the generation label
+
+- The live status row keeps `GPT · 生成图片` / `生成视频` for as long as a
+  generation tool runs, even when the same model batch also calls a side tool
+  (`read_file`, `terminal`). The side tool is recorded after the generation
+  step, so the sticky "latest step" rule used to replace the label for the
+  whole render — observed on the CC `ca` profile, where the spinner read
+  `📄 读取文件` for 63 s while the panel already held the GPT image row.
+- Only the status row changes: panel rows, row order, panel collapse defaults
+  and tool arguments are untouched. Once the generation finishes, the row
+  follows the newest step again.
+
 ## v1.23 (2026-10-05, personal fork)
 
 ### Changed — OpenViking artwork and persistent retrieval records

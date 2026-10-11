@@ -801,6 +801,13 @@ _TOOL_EMOJI_BY_ICON: dict[str, str] = {
 
 _DEFAULT_TOOL_EMOJI = "🔧"
 
+# Media-generation rows own the live status line: Hermes can batch a
+# generation call with a side tool (``read_file`` / ``terminal``), and the
+# side tool is recorded *after* the generation step. The sticky "latest step"
+# rule then read 📄 读取文件 for the whole render while the card was really
+# waiting on 🎨 GPT · 生成图片 (老大 2026-10-11, CC ca profile).
+_GENERATION_EMOJI = frozenset({"🎨", "🎬"})
+
 def _tool_emoji(name: str | None, detail: str | None = None, args: dict[str, Any] | None = None) -> str:
     """Emoji for a raw tool name — never empty, so the row can't jump around.
 
@@ -968,6 +975,44 @@ class ToolUseTracker:
         if last is None:
             return None
         return _tool_emoji(last.name, last.detail, last.args)
+
+    def _status_step(self) -> ToolStep | None:
+        """Step the live spinner row reports.
+
+        A *running* generation step beats anything recorded later: one batch
+        can carry ``read_file`` or a shell command next to
+        ``image_generate``, and the side tool is appended after it, so the
+        sticky "latest step" rule used to replace 🎨 GPT · 生成图片 with
+        📄 读取文件 for the whole render. Every other case — including a
+        generation that already finished — keeps the sticky behaviour.
+        """
+        if self._session is None:
+            return None
+        steps = [s for s in self._session.steps if not s.passive]
+        if not steps:
+            return None
+        for step in reversed(steps):
+            if step.status != "running":
+                continue
+            if _tool_emoji(step.name, step.detail, step.args) in _GENERATION_EMOJI:
+                return step
+        return steps[-1]
+
+    @property
+    def status_tool_names(self) -> tuple[str, str] | None:
+        """``(en, zh)`` names for the spinner row — see :meth:`_status_step`."""
+        step = self._status_step()
+        if step is None:
+            return None
+        return _tool_display_names(step.name, step.detail, step.args)
+
+    @property
+    def status_tool_emoji(self) -> str | None:
+        """Emoji for whichever tool ``status_tool_names`` is reporting."""
+        step = self._status_step()
+        if step is None:
+            return None
+        return _tool_emoji(step.name, step.detail, step.args)
 
     def record_memory_retrieval(self, elapsed_ms: float, outcome: str = "completed") -> bool:
         if self._session is None:

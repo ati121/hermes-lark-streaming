@@ -861,10 +861,15 @@ class UnifiedControllerMixin:
             self._schedule_linear_flush(session)
 
     def _current_tool_label(self, session: CardSession) -> tuple[str, str] | None:
-        """Return the sticky tool label only while the model is in tool phase."""
+        """Return the status-row tool label only while the model is in tool phase.
+
+        Reads the status-row view of the tracker, not the newest step: a batch
+        that carries a side tool next to ``image_generate`` must not hide
+        🎨 GPT · 生成图片 while the image is still rendering.
+        """
         if session._response_phase in ("compression", "thinking", "answer"):
             return None
-        return session.tool_use.last_tool_names
+        return session.tool_use.status_tool_names
 
     def _loading_hint_status(self, session: CardSession) -> str:
         """Show preprocessing only until model/tool activity takes over."""
@@ -903,7 +908,7 @@ class UnifiedControllerMixin:
             return None, self._loading_hint_status(session), None
         label = self._current_tool_label(session)
         if label:
-            return label, None, session.tool_use.last_tool_emoji
+            return label, None, session.tool_use.status_tool_emoji
         if session._response_phase == "waiting":
             return None, None, None  # the hint element still says 等待上游模型响应
         return None, "model_thinking", _THINKING_EMOJI
