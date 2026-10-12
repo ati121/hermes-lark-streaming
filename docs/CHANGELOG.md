@@ -4,6 +4,15 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.27 (2026-10-12, personal fork)
+
+### Maintenance — clean controller lint findings
+
+- Remove stale imports and import-order violations in the controller.
+- Replace silent exception suppression with debug diagnostics while preserving
+  the existing best-effort fallback behavior.
+- Normalize timeout handling for interrupted flushes.
+
 ## v1.26 (2026-10-12, personal fork)
 
 ### Fixed — interrupted busy turns no longer create duplicate cards
