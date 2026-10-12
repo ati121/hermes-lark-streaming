@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.26 (2026-10-12, personal fork)
+
+### Fixed — interrupted busy turns no longer create duplicate cards
+
+- Coordinate Hermes' busy-supersede and recursive-interrupt paths when they
+  observe the same inbound message, so only one continuation card is created.
+- Reuse a card that is still being created instead of opening an orphan card
+  that remains stuck on `等待上游模型响应`.
+- Make concurrent session publication idempotent and clean continuation aliases
+  when the turn finishes.
+- Added regression coverage for both callback orderings. The full test suite
+  passes with 1,593 tests.
+
 ## v1.25 (2026-10-11, personal fork)
 
 ### Fixed — a batched side tool no longer steals the generation label

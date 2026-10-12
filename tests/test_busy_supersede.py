@@ -181,7 +181,10 @@ class TestBusySupersede:
 
         assert newer._was_aborted is True
         assert older._was_aborted is False
-        assert ctrl._continuation_map == {"om_newer": "om_inbound-cont-1"}
+        assert ctrl._continuation_map == {
+            "om_newer": "om_inbound-cont-1",
+            "om_inbound": "om_inbound-cont-1",
+        }
 
     @pytest.mark.asyncio
     async def test_seals_a_continuation_card_too(self) -> None:
@@ -231,6 +234,69 @@ class TestBusySupersede:
             mid for mid, s in ctrl._sess_items_snapshot() if s._is_continuation
         ]
         assert continuations == ["om_a-cont-1"]
+
+    @pytest.mark.asyncio
+    async def test_recursive_interrupt_reuses_busy_continuation(self) -> None:
+        """busy hook 与递归 interrupt hook 同时到达时只能保留一张新卡。
+
+        Hermes can notify the busy path first and then enter ``run_agent``'s
+        recursive interrupt path for the same inbound message.  The latter
+        still fires START with the platform id, so without the alias it would
+        create a second card that stays on ``等待上游模型响应``.
+        """
+        ctrl = StreamCardController()
+        _enable(ctrl)
+        old = _add_session(ctrl, "om_old", card_msg_id="om_card_old")
+
+        fire, create = _patch_side_effects(ctrl)
+        with fire, create:
+            ctrl.on_busy_superseded(message_id="om_new", chat_id="chat1")
+            continuation = ctrl._sess_get("om_new-cont-1")
+            assert continuation is not None
+
+            # The recursive run path reports the same interruption again.
+            ctrl.on_interrupted(
+                old_message_id="om_old",
+                new_message_id="om_new",
+                chat_id="chat1",
+                anchor_id="om_new",
+            )
+            ctrl.on_message_started(message_id="om_new", chat_id="chat1")
+
+        sessions = [
+            session for _mid, session in ctrl._sess_items_snapshot()
+            if session is not old
+        ]
+        assert sessions == [continuation]
+        assert ctrl._resolve_continuation_id("om_new") == continuation.message_id
+        assert ctrl._sess_get("om_new") is None
+
+    @pytest.mark.asyncio
+    async def test_busy_supersede_reuses_pending_recursive_card(self) -> None:
+        """A card published by the recursive path must not be orphaned.
+
+        If the busy notification arrives after ``on_interrupted`` but before
+        the new card receives its message id, the pending card has no
+        ``card_msg_id`` and would normally be skipped by the target picker.
+        Keep it as the continuation instead of opening a third card.
+        """
+        ctrl = StreamCardController()
+        _enable(ctrl)
+        old = _add_session(ctrl, "om_old", card_msg_id="om_card_old")
+        pending = _add_session(ctrl, "om_new", card_msg_id="", state="idle")
+
+        fire, create = _patch_side_effects(ctrl)
+        with fire, create:
+            ctrl.on_busy_superseded(message_id="om_new", chat_id="chat1")
+
+        assert old.state == "streaming"
+        assert ctrl._sess_get("om_new") is pending
+        assert pending._is_continuation is False
+        assert ctrl._continuation_map == {}
+        assert not [
+            mid for mid, session in ctrl._sess_items_snapshot()
+            if session._is_continuation and mid != "om_new"
+        ]
 
     @pytest.mark.asyncio
     async def test_chain_is_consumed_at_the_tail_when_the_turn_finishes(self) -> None:

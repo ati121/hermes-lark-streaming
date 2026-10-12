@@ -93,6 +93,14 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         with self._sessions_lock:
             self._sessions[key] = session
 
+    def _sess_put_if_absent(self, key: str, session: CardSession) -> CardSession | None:
+        """Store a session once and return a concurrently published winner."""
+        with self._sessions_lock:
+            existing = self._sessions.get(key)
+            if existing is None:
+                self._sessions[key] = session
+            return existing
+
     def _sess_pop(self, key: str) -> CardSession | None:
         """Thread-safe session removal (returns the removed session or None)."""
         with self._sessions_lock:
@@ -296,6 +304,23 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 current = nxt
             return current  # 环（理论上不会出现），停在这里
 
+    def _continuation_session_for(self, message_id: str) -> CardSession | None:
+        """Return a live continuation already claimed for ``message_id``.
+
+        The busy-message hook can create ``<message>-cont-1`` before Hermes'
+        recursive interrupt path reaches ``on_message_started``.  In that
+        race the platform id itself has no session, but the continuation map
+        does.  Treat a live mapped session as the existing turn so the normal
+        start/interrupt hooks do not create a second waiting card.
+        """
+        continuation_id = self._resolve_continuation_id(message_id)
+        if continuation_id is None:
+            return None
+        session = self._sess_get(continuation_id)
+        if session is None or session.is_terminal_phase:
+            return None
+        return session
+
     def _register_continuation(self, old_message_id: str, new_message_id: str) -> None:
         """记录 old_message_id -> new_message_id 的续写映射。线程安全。"""
         with self._continuation_map_lock:
@@ -315,7 +340,23 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 seen.add(current)
                 nxt = self._continuation_map.pop(current, None)
                 if nxt is None:
-                    return current
+                    # Busy-path aliases (the inbound platform id and the
+                    # interrupted id) can converge on this same tail.  Once
+                    # the tail is being completed, remove those aliases too
+                    # so the mapping remains a one-shot lifecycle record.
+                    tail = current
+                    for key in list(self._continuation_map):
+                        cursor = key
+                        visited: set[str] = set()
+                        while cursor not in visited:
+                            visited.add(cursor)
+                            nxt_alias = self._continuation_map.get(cursor)
+                            if nxt_alias is None:
+                                break
+                            cursor = nxt_alias
+                        if cursor == tail or cursor in seen:
+                            self._continuation_map.pop(key, None)
+                    return tail
                 current = nxt
             return current  # 环
 
@@ -513,6 +554,18 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             )
             return
 
+        # The recursive run may already have started this inbound turn while
+        # the busy handler was awaiting the interrupt acknowledgement send.
+        # Its card can still be CREATING, so the target picker would miss it
+        # and open an unused continuation.  The existing turn owns the card.
+        existing = self._sess_get(message_id) or self._continuation_session_for(message_id)
+        if existing is not None and existing.chat_id == chat_id:
+            _logger.info(
+                "HLS: busy supersede — turn already has a card msg=%s trace=%s",
+                message_id[:12], existing.card_trace_id,
+            )
+            return
+
         target = self._pick_supersede_target(chat_id)
         if target is None:
             # INFO 而非 debug：这条"什么都没做"的路径必须能从日志看出来，
@@ -529,6 +582,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         target._was_aborted = True
         if not target.error_message:
             target.error_message = "Superseded by a newer message"
+
         # 新卡锚到用户刚发的那条消息（stale 的锚点作为回退）
         continuation = self._reactivate_session_for_continuation(
             target, anchor_id=anchor_id or message_id or target.anchor_id,
@@ -536,6 +590,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if continuation is None:
             return
         self._register_continuation(target.message_id, continuation.message_id)
+        # Hermes may still enter the regular recursive interrupt path for the
+        # same inbound event.  Alias that platform id to the card we just
+        # opened so its START hook reuses this session instead of creating a
+        # second card that remains on the initial waiting hint.
+        if message_id and message_id != target.message_id:
+            self._register_continuation(message_id, continuation.message_id)
         _logger.info(
             "HLS: busy supersede — sealed old card msg=%s, continuing on new card msg=%s "
             "chat=%s triggered_by=%s",
@@ -586,6 +646,12 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
         if not message_id:
             _logger.warning("HLS: on_message_started missing message_id chat=%s", chat_id[:12])
+            return
+        if self._continuation_session_for(message_id) is not None:
+            _logger.info(
+                "HLS: continuation already claimed msg=%s; reusing busy card",
+                (message_id or "?")[:12],
+            )
             return
         if self._sess_get(message_id) is not None:
             return
@@ -647,7 +713,15 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
 
         session = CardSession(message_id, chat_id, loop)
-        self._sess_put(message_id, session)
+        winner = self._sess_put_if_absent(message_id, session)
+        if winner is not None:
+            _logger.info(
+                "HLS: session published concurrently, reusing msg=%s trace=%s",
+                (message_id or "?")[:12], winner.card_trace_id,
+            )
+            if not winner._card_ready.is_set():
+                self._fire_and_forget(self._do_create_linear_card(winner), loop)
+            return
         if anchor_id and anchor_id != message_id:
             session.anchor_id = anchor_id
             self._sess_put(anchor_id, session)
@@ -1352,8 +1426,14 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not self.enabled:
             return
 
+        # Prefer a busy continuation alias over a concurrently-created direct
+        # session; otherwise the old id would resolve to the continuation and
+        # this lifecycle callback could abort the fresh destination card.
+        new_session = self._continuation_session_for(new_message_id) or self._sess_get(new_message_id)
         old_session = self._get_active_session(old_message_id)
-        if old_session is not None:
+        # When busy won the race, both ids already route to the new card.
+        # That card is the destination of this interrupt, not its victim.
+        if old_session is not None and old_session is not new_session:
             # ── Hotfix: skip abort if session is in COMPLETING state ──
             if old_session.state == COMPLETING:
                 _logger.info(
@@ -1411,22 +1491,36 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     self._complete_session(old_session)
 
         if self._sess_get(new_message_id) is None:
-            loop = self._get_loop()
-            if loop is not None:
-                reply_anchor_id = anchor_id if anchor_id and anchor_id != new_message_id else None
-                session = CardSession(new_message_id, chat_id, loop)
-                session.anchor_id = reply_anchor_id
-                self._sess_put(new_message_id, session)
-                if reply_anchor_id:
-                    self._sess_put(reply_anchor_id, session)
+            existing_continuation = self._continuation_session_for(new_message_id)
+            if existing_continuation is not None:
                 _logger.info(
-                    "on_interrupted: create new msg=%s chat=%s anchor=%s",
-                    new_message_id[:12],
-                    chat_id[:12],
-                    (reply_anchor_id or new_message_id)[:12],
+                    "on_interrupted: continuation already exists msg=%s -> msg=%s",
+                    (new_message_id or "?")[:12],
+                    existing_continuation.message_id[:12],
                 )
-                # v1.1.0 (Task 1.1+1.2): linear is the only creation path now.
-                self._fire_and_forget(self._do_create_linear_card(session), loop)
+            else:
+                loop = self._get_loop()
+                if loop is not None:
+                    reply_anchor_id = anchor_id if anchor_id and anchor_id != new_message_id else None
+                    session = CardSession(new_message_id, chat_id, loop)
+                    session.anchor_id = reply_anchor_id
+                    winner = self._sess_put_if_absent(new_message_id, session)
+                    if winner is not None:
+                        _logger.info(
+                            "on_interrupted: session published concurrently, reusing msg=%s",
+                            new_message_id[:12],
+                        )
+                    else:
+                        if reply_anchor_id:
+                            self._sess_put(reply_anchor_id, session)
+                        _logger.info(
+                            "on_interrupted: create new msg=%s chat=%s anchor=%s",
+                            new_message_id[:12],
+                            chat_id[:12],
+                            (reply_anchor_id or new_message_id)[:12],
+                        )
+                        # v1.1.0 (Task 1.1+1.2): linear is the only creation path now.
+                        self._fire_and_forget(self._do_create_linear_card(session), loop)
 
         # v1.3.0: protect _interrupt_map with its own lock (separate from
         # _sessions_lock to avoid holding both locks simultaneously → deadlock risk)
