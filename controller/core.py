@@ -10,11 +10,19 @@ from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future as ConcurrentFuture
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from ..config import Config, hermes_home
 from ..cardkit.elements import _MIN_SPEED_WINDOW_SEC, _speed_window
+from ..config import Config, hermes_home
+from ..feishu import (
+    FeishuClient,
+    FeishuClientConfig,
+)
 from ..runtime_globals import shared_dict, shared_object
+from ..state.linear import UnifiedLinearState
+from ..state.session import CardSession
+from ..state.text import ReasoningStreamSplitter, TextState, strip_reasoning_tags
+from ..state.tooluse import ToolUseTracker
 from .linear_mixin import UnifiedControllerMixin
 from .mixin import (
     ABORTED,
@@ -24,14 +32,6 @@ from .mixin import (
     TERMINATED,
     ControllerMixin,
 )
-from ..feishu import (
-    FeishuClient,
-    FeishuClientConfig,
-)
-from ..state.text import ReasoningStreamSplitter, TextState, strip_reasoning_tags
-from ..state.tooluse import ToolUseTracker
-# v1.4.0 fix (问题3 根因1): _reactivate_session_for_continuation 预创建 unified_state
-from ..state.linear import UnifiedLinearState
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -43,8 +43,6 @@ _INTERRUPT_MAP_MAX = 200
 # phase, so they anchor the output-speed window even when the phase still reads
 # thinking/answer (a compaction that restored the previous phase, for example).
 _CALL_START_SOURCES = frozenset({"stream.first_chunk", "stream.first_delta"})
-
-from ..state.session import CardSession  # noqa: F401 — re-exported for backward compatibility
 
 class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     """流式卡片控制器 — 管理多条消息的卡片生命周期."""
@@ -440,7 +438,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                         stale_session._loop,
                     )
         except Exception:
-            pass
+            _logger.debug(
+                "HLS: stale session completion dispatch failed msg=%s",
+                (stale_session.message_id or "?")[:12],
+                exc_info=True,
+            )
 
         return new_session
 
@@ -1076,10 +1078,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         m = getattr(self, "_reasoning_snapshots", None)
         if m is None:
             m = {}
-            try:
-                self._reasoning_snapshots = m
-            except Exception:
-                pass
+            self._reasoning_snapshots = m
         return m
 
     def _trim_rsn_map(self, m: dict) -> None:
@@ -1454,8 +1453,17 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                                     old_session.flush.wait_for_flush(),
                                     timeout=3.0,
                                 )
-                            except (asyncio.TimeoutError, Exception):
-                                pass
+                            except TimeoutError:
+                                _logger.debug(
+                                    "on_interrupted: flush wait timed out for msg=%s",
+                                    old_message_id[:12],
+                                )
+                            except Exception:
+                                _logger.debug(
+                                    "on_interrupted: flush wait failed for msg=%s",
+                                    old_message_id[:12],
+                                    exc_info=True,
+                                )
                             # v1.3.2 fix (B3-01): re-check COMPLETING after the
                             if old_session.state == COMPLETING:
                                 _logger.info(
@@ -1914,7 +1922,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 len(content),
             )
         except Exception:
-            pass
+            _logger.debug("text fallback failed", exc_info=True)
 
     def _prune_stale_sessions(self) -> None:
         """v1.1.1: 只清理已终态的过期 session，保护活跃 session."""
