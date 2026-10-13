@@ -74,6 +74,16 @@ def _build_seal_summary(state: UnifiedLinearState | None) -> str:
         return summary_text[:120].replace("\n", " ").replace("```", "").strip()
     return ""
 
+
+def _footer_elapsed_ms(footer_data: dict | None) -> float:
+    """Return the upstream wall-clock duration used by the final footer."""
+    if not isinstance(footer_data, dict):
+        return 0.0
+    duration = footer_data.get("duration", 0)
+    if isinstance(duration, (int, float)) and duration > 0:
+        return float(duration) * 1000
+    return 0.0
+
 async def _fallback_write_answer(
     client: Any,
     card_id: str,
@@ -197,12 +207,18 @@ class UnifiedControllerMixin:
         # 标题也不再带「N 轮」；没有工具调用的回合面板整个不出现（否则只剩空壳）。
         # CardKit 实体卡路径没有顶部思考块，仍由面板承载推理，不受影响。
         _tool_steps = session.tool_use.build_display_steps() if state is not None else []
+        _total_elapsed_ms = 0.0
+        if final and isinstance(footer_data, dict):
+            _duration = footer_data.get("duration", 0)
+            if isinstance(_duration, (int, float)) and _duration > 0:
+                _total_elapsed_ms = _duration * 1000
         if state is not None and state.panel_visible and _tool_steps:
             elements.append(build_unified_panel(
                 reasoning_rounds=state.reasoning_rounds,
                 current_reasoning_text="" if final else state.current_reasoning_text,
                 tool_steps=_tool_steps,
                 tool_elapsed_ms=session.tool_use.elapsed_ms,
+                total_elapsed_ms=_total_elapsed_ms,
                 show_reasoning=False,
                 expanded=self._cfg.panel_expanded if final else self._cfg.streaming_panel_expanded,
                 panel_events=state.panel_events,
@@ -1127,6 +1143,7 @@ class UnifiedControllerMixin:
                         current_reasoning_text=state.current_reasoning_text,
                         tool_steps=all_tool_steps,
                         tool_elapsed_ms=session.tool_use.elapsed_ms,
+                        total_elapsed_ms=_footer_elapsed_ms(footer_data),
                         show_reasoning=self._cfg.show_reasoning,
                         expanded=self._cfg.streaming_panel_expanded,
                         panel_events=state.panel_events,
@@ -1209,6 +1226,7 @@ class UnifiedControllerMixin:
                         current_reasoning_text="",
                         tool_steps=all_tool_steps,
                         tool_elapsed_ms=session.tool_use.elapsed_ms,
+                        total_elapsed_ms=_footer_elapsed_ms(footer_data),
                         show_reasoning=self._cfg.show_reasoning,
                         expanded=self._cfg.panel_expanded,
                         panel_events=state.panel_events,
@@ -1418,6 +1436,7 @@ class UnifiedControllerMixin:
                                     current_reasoning_text="",
                                     tool_steps=all_tool_steps,
                                     tool_elapsed_ms=session.tool_use.elapsed_ms,
+                                    total_elapsed_ms=_footer_elapsed_ms(footer_data),
                                     show_reasoning=self._cfg.show_reasoning,
                                     expanded=self._cfg.panel_expanded,
                                     panel_events=state.panel_events,

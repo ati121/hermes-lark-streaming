@@ -615,6 +615,36 @@ class TestPanelHeaderFallback:
         )
         assert header["title"]["i18n_content"]["zh_cn"].endswith("正在调用 终端命令")
 
+    def test_panel_shows_compact_tool_total_without_reasoning(self) -> None:
+        """The panel shows tool/request minutes, not reasoning duration."""
+        from hermes_lark_streaming.state.linear import ReasoningRound
+
+        round_ = ReasoningRound(index=1, text="think")
+        round_.elapsed_ms = 33 * 60 * 1000 + 23 * 1000
+        header = build_panel_header(
+            reasoning_rounds=[round_],
+            tool_steps=[{"name": "terminal"}],
+            tool_elapsed_ms=46 * 60 * 1000 + 50 * 1000,
+        )
+
+        title = header["title"]["i18n_content"]["zh_cn"]
+        assert "46m 50s" in title
+        assert "1h" not in title
+
+    def test_authoritative_total_elapsed_wins_for_final_card(self) -> None:
+        from hermes_lark_streaming.state.linear import ReasoningRound
+
+        round_ = ReasoningRound(index=1, text="think")
+        round_.elapsed_ms = 33 * 60 * 1000
+        header = build_panel_header(
+            reasoning_rounds=[round_],
+            tool_steps=[{"name": "terminal"}],
+            tool_elapsed_ms=46 * 60 * 1000,
+            total_elapsed_ms=46 * 60 * 1000 + 50 * 1000,
+        )
+
+        assert "46m 50s" in header["title"]["i18n_content"]["zh_cn"]
+
 
 def _make_session(**kwargs):
     session = MagicMock()

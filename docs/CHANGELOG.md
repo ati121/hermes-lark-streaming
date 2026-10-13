@@ -4,6 +4,15 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.28 (2026-10-14, personal fork)
+
+### Fixed — process-panel duration no longer double-counts reasoning time
+
+- Keep the process-panel clock aligned with the request total shown in the
+  footer instead of adding reasoning-round durations a second time.
+- Preserve seconds in the compact display (`46m 50s`, or `13s` for short runs).
+- Apply the same authoritative duration to interactive and CardKit card paths.
+
 ## v1.27 (2026-10-12, personal fork)
 
 ### Maintenance — clean controller lint findings

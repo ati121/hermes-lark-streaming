@@ -293,7 +293,7 @@ def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
     panel["element_id"] = UNIFIED_PANEL_ELEMENT_ID
     return panel
 
-def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, show_reasoning: bool = True, active_tool: tuple[str, str] | None = None) -> dict:
+def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, total_elapsed_ms: float = 0, show_reasoning: bool = True, active_tool: tuple[str, str] | None = None) -> dict:
     """Build header dict for unified panel. Title computed from state (rounds/tools/elapsed)."""
     en_title, zh_title = _T["agent_process"]
     en_parts: list[str] = [en_title]
@@ -315,9 +315,12 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
         zh_parts.append(zh_tools.format(len(tool_steps)))
 
     reasoning_elapsed_ms = sum(r.elapsed_ms for r in reasoning_rounds)
-    total_elapsed_ms = reasoning_elapsed_ms + tool_elapsed_ms
+    # The process-panel clock is intentionally tool/request time only. Reasoning
+    # is shown as content, not added to the request duration.
+    if total_elapsed_ms <= 0:
+        total_elapsed_ms = tool_elapsed_ms if tool_steps else 0
     if total_elapsed_ms > 0 and (has_reasoning or tool_steps):
-        elapsed_str = _format_elapsed(total_elapsed_ms)
+        elapsed_str = _format_panel_elapsed(total_elapsed_ms)
         en_parts.append(elapsed_str)
         zh_parts.append(elapsed_str)
 
@@ -738,6 +741,7 @@ def build_unified_panel(
     current_reasoning_text: str = "",
     tool_steps: list[dict],
     tool_elapsed_ms: float = 0,
+    total_elapsed_ms: float = 0,
     show_reasoning: bool = True,
     expanded: bool = False,
     element_id: str | None = None,
@@ -753,6 +757,7 @@ def build_unified_panel(
         current_reasoning_text=current_reasoning_text,
         tool_steps=tool_steps,
         tool_elapsed_ms=tool_elapsed_ms,
+        total_elapsed_ms=total_elapsed_ms,
         show_reasoning=show_reasoning,
         active_tool=active_tool,
     )
@@ -1312,6 +1317,14 @@ def _compact(n: int) -> str:
 def _format_elapsed(ms: float) -> str:
     seconds = ms / 1000
     return f"{seconds:.1f}s" if seconds < 60 else f"{int(seconds // 60)}m {int(seconds % 60)}s"
+
+
+def _format_panel_elapsed(ms: float) -> str:
+    """Compact process-panel duration without adding reasoning time."""
+    seconds = max(0, int(ms / 1000))
+    if seconds < 60:
+        return f"{seconds}s"
+    return f"{seconds // 60}m {seconds % 60}s"
 
 # Measurement windows shorter than this make the tokens/s figure mostly noise.
 _MIN_SPEED_WINDOW_SEC = 0.3
