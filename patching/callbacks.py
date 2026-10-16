@@ -158,7 +158,8 @@ def _maybe_wrap_callbacks(agent) -> None:
 
     # Keep the first meaningful delta as a response-phase fallback for providers
     # that do not expose the earlier receiving-stream activity seam above.
-    # These callbacks update status only; speed uses API request boundaries.
+    # These callbacks update status only; speed observes provider chunks before
+    # Hermes buffers them, suppresses tool text, or invokes UI callbacks.
     # The wrapper is installed on the agent instance (not the
     # class), is marked for idempotence, and always chains Hermes' own callback
     # exactly once.

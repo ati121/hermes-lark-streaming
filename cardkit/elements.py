@@ -1251,7 +1251,8 @@ def _render_footer_field(
         return None, None
 
     if name == "api_calls":
-        v = data.get("api_calls", 0) or 0
+        # A queued continuation can return only its final run's count.
+        v = data.get("speed_total_requests", 0) or data.get("api_calls", 0) or 0
         if v:
             en_val, zh_val = _T["api_calls"]
             return f"{en_val} {v}", f"{zh_val} {v}"
@@ -1326,7 +1327,7 @@ def _format_panel_elapsed(ms: float) -> str:
     return f"{seconds // 60}m {seconds % 60}s"
 
 def _format_speed(output_tokens: int, request_seconds: float) -> str | None:
-    """Average request throughput, never inferred from visible text chunks."""
+    """Weighted provider decode speed, not card delivery throughput."""
     for value in (output_tokens, request_seconds):
         if (
             isinstance(value, bool) or not isinstance(value, (int, float))

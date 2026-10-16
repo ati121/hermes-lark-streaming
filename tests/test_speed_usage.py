@@ -1,11 +1,12 @@
-"""Request-boundary aggregation, turn isolation, and gateway footer delivery."""
+"""Provider decode aggregation, turn isolation, and gateway footer delivery."""
 
 from __future__ import annotations
 
 import asyncio
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -43,7 +44,14 @@ def _chat_usage(output=135, reasoning=678, total=839):
 
 
 @pytest.fixture
-def make_agent():
+def make_agent(monkeypatch):
+    relay = ModuleType("agent.relay_llm")
+
+    def stream(request, factory, **kwargs):
+        return factory(request)
+
+    relay.stream = stream
+    monkeypatch.setitem(sys.modules, "agent.relay_llm", relay)
     token = _msg_ctx.set({"message_id": "speed-message", "event_message_id": "speed-message"})
     previous = getattr(_thread_local_ctx, "data", None)
     _thread_local_ctx.data = None
@@ -62,6 +70,12 @@ def make_agent():
                 agent.during()
             if isinstance(agent.response, BaseException):
                 raise agent.response
+            # Both helpers can stream internally (Codex passthrough included).
+            if not getattr(agent, "nonstream", False):
+                list(relay.stream(api_kwargs, lambda _: iter([
+                    {"choices": [{"delta": {"content": "first"}}]},
+                    {"choices": [{"delta": {"content": "last"}}]},
+                ]), session_id=agent.session_id))
             if kwargs.get("on_first_delta"):
                 kwargs["on_first_delta"]()
             return agent.response
@@ -76,7 +90,7 @@ def make_agent():
 
 
 def _call(agent, start, end, method="_interruptible_streaming_api_call", **kwargs):
-    with patch("hermes_lark_streaming.patching.usage.monotonic", side_effect=[start, end]):
+    with patch("hermes_lark_streaming.patching.usage.monotonic", side_effect=[start, end, end]):
         return getattr(agent, method)({}, **kwargs)
 
 
@@ -118,7 +132,7 @@ def test_capture_preserves_response_and_provider_usage(make_agent, method):
     assert _call(agent, 1, 4, method) is agent.response
     assert agent.calls == [({}, {})]
     usage["completion_tokens"] = 1
-    assert totals.footer()["speed_output_tokens"] == 813
+    assert totals.footer()["speed_output_tokens"] == 135
     assert totals.footer()["speed_request_seconds"] == 3
     assert agent._last_turn_usage == {"output_tokens": 9999}
 
@@ -160,7 +174,7 @@ def test_cached_agent_resets_only_when_turn_changes(make_agent):
 
 @pytest.mark.parametrize("outcome", ["missing", "exception", "unreadable"])
 def test_incomplete_turn_never_presents_a_subset_as_all_requests(make_agent, outcome):
-    agent = make_agent(_chat_usage())
+    agent = make_agent(_chat_usage(reasoning=0, total=161))
     _maybe_wrap_callbacks(agent)
     _call(agent, 1, 3)
     if outcome == "exception":
@@ -237,6 +251,51 @@ def test_replacement_agent_keeps_previous_requests_in_same_turn(make_agent):
     footer = _speed_footer(_msg_ctx.get())
     assert footer["speed_requests"] == 2
     assert _speed(footer) == "91 t/s"
+
+
+def test_nonstream_request_does_not_use_full_request_latency(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    agent.nonstream = True
+    _call(agent, 10, 15, method="_interruptible_api_call")
+    footer = _speed_footer(_msg_ctx.get())
+    assert footer == {"speed_requests": 1, "speed_total_requests": 2}
+    assert _speed(footer) is None
+
+
+@pytest.mark.asyncio
+async def test_eventless_continuation_keeps_entire_card_totals(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+
+    async def run(self, message, *args, **kwargs):
+        _maybe_wrap_callbacks(agent)
+        if kwargs.get("_interrupt_depth", 0) == 0:
+            for n in range(3):
+                _call(agent, n * 10 + 1, n * 10 + 3)
+            return await wrapped(
+                self, "internal continuation", "", [], SimpleNamespace(), agent.session_id,
+                _interrupt_depth=1, event_message_id=None,
+            )
+        _call(agent, 50, 52)
+        return {"final_response": "done", "api_calls": 1}
+
+    wrapped = _wrap_run_agent(run)
+    with patch("hermes_lark_streaming.patching.hooks.on_message_completed", return_value=True) as completed:
+        result = await wrapped(
+            SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
+            event_message_id="speed-message",
+        )
+    assert result["api_calls"] == 1
+    assert len(completed.call_args_list) == 2
+    for call in completed.call_args_list:
+        footer = call.kwargs["tokens"]
+        assert footer["speed_total_requests"] == 4
+        assert footer["speed_output_tokens"] == 400
+        assert footer["speed_request_seconds"] == 8
+        assert _speed(footer) == "50 t/s"
+        data = {**footer, "api_calls": call.kwargs["api_calls"]}
+        assert _render_footer_field("api_calls", data, False, False, False)[0] == "API 4"
 
 
 def test_detached_fork_cannot_steal_usage_or_output(make_agent):
@@ -321,7 +380,7 @@ async def test_gateway_aggregates_all_tool_rounds_independent_of_text_delivery(m
             agent.stream_delta_callback("first last")
         # Hermes' mutated/session totals must never be used for this rate.
         agent._last_turn_usage = {"output_tokens": 90000}
-        return {"final_response": "first last", "model": "example", "output_tokens": 9000}
+        return {"final_response": "first last", "model": "example", "output_tokens": 9000, "api_calls": 1}
 
     result = await _wrap_run_agent(run_agent)(
         SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
@@ -332,6 +391,7 @@ async def test_gateway_aggregates_all_tool_rounds_independent_of_text_delivery(m
     assert session.footer["speed_output_tokens"] == 1000
     assert session.footer["speed_request_seconds"] == 11
     assert session.footer["speed_requests"] == 2
+    assert _render_footer_field("api_calls", session.footer, False, False, False)[0] == "API 2"
     assert _speed(session.footer) == "91 t/s"
     assert usage == _chat_usage(output=100, reasoning=0, total=126)
 
@@ -390,7 +450,7 @@ async def test_recursive_interrupt_has_independent_request_totals(make_agent):
     assert _msg_ctx.get()["_speed_totals"] is parent_totals
 
 
-def test_zero_output_request_still_contributes_time(make_agent):
+def test_zero_output_request_has_no_decode_window(make_agent):
     agent = make_agent(_chat_usage(output=0, reasoning=0, total=26))
     _maybe_wrap_callbacks(agent)
     _call(agent, 1, 3)
@@ -398,8 +458,8 @@ def test_zero_output_request_still_contributes_time(make_agent):
     _call(agent, 10, 13)
     footer = _speed_footer(_msg_ctx.get())
     assert footer["speed_total_requests"] == 2
-    assert footer["speed_request_seconds"] == 5
-    assert _speed(footer) == "20 t/s"
+    assert "speed_request_seconds" not in footer
+    assert _speed(footer) is None  # Zero-output requests have no decode window.
 
 
 @pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])

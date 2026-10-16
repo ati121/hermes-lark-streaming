@@ -4,6 +4,28 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.32 (2026-10-16, personal fork)
+
+### Fixed — measure decode speed instead of request latency
+
+- Replace the v1.29 request-throughput denominator with provider-stream decode
+  windows, excluding first-token waiting/prefill and host teardown. Observe raw
+  chunks before Relay buffering and UI callbacks; ignore empty/role/usage events.
+- Keep the weighted aggregate across every main-model request in the current
+  card turn, including same-card continuations and tool-only streamed requests.
+  Make the API-count footer use the same accumulator rather than a terminal
+  continuation's local request count.
+- Follow magpie's reasoning/window rules: time non-reasoning output from first
+  answer text, or paced visible reasoning when no answer text exists. Reject
+  short, implausible, or buffered-burst windows rather than inflating speed.
+- Hide the whole-turn rate when any request lacks reliable usage or stream
+  timing, including non-streamed responses and ambiguous internal retries. Do
+  not substitute full request latency or silently average only a measurable subset.
+- Add numeric-only diagnostics and regression coverage for executor context
+  propagation, provider-side timing, reasoning, buffering, and API-count parity.
+- Preserve one-second interactive refreshes and the existing rate-limit recovery
+  and device-specific text-size behavior.
+
 ## v1.31 (2026-10-16, personal fork)
 
 ### Changed — faster interactive card refreshes
