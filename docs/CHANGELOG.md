@@ -4,6 +4,23 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.29 (2026-10-16, personal fork)
+
+### Changed — rebuild card speed as per-turn request throughput
+
+- Replace final-answer chunk timing with request-boundary measurements. The
+  card reports the sum of generated tokens divided by the sum of model-request
+  durations across the current user turn, including all tool-call rounds.
+- Include reasoning tokens exactly once and include request waiting/prefill
+  time. Tool execution, card delivery, and idle gaps between requests do not
+  enter the denominator. This is average request throughput, not decode speed.
+- Streaming, buffered, and non-streaming replies use the same calculation;
+  short replies no longer depend on an observable text-chunk window.
+- Keep totals isolated across cached-agent turns, recursive interruptions, and
+  detached review forks; share the accumulator across executor context copies.
+- Hide incomplete measurements rather than presenting the final request or a
+  subset as the average of all requests. Preserve normal usage/cost accounting.
+
 ## v1.28 (2026-10-14, personal fork)
 
 ### Fixed — process-panel duration no longer double-counts reasoning time

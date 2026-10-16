@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import math
 import time
 import uuid
 from typing import Any, Callable
@@ -19,38 +18,9 @@ from . import (
     _session_contexts,
     _session_contexts_lock,
 )
-from .usage import _speed_usage_for_agent
+from .usage import _speed_footer, _totals_for_context
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
-
-def _visible_output_tokens(usage: Any) -> int:
-    """Return visible output tokens using the provider's accounting convention."""
-    if not isinstance(usage, dict):
-        return 0
-    output_tokens = usage.get("output_tokens", 0)
-    reasoning_tokens = usage.get("reasoning_tokens", 0)
-    if (
-        not isinstance(output_tokens, (int, float))
-        or not math.isfinite(output_tokens) or output_tokens <= 0
-    ):
-        return 0
-    if (
-        not isinstance(reasoning_tokens, (int, float))
-        or not math.isfinite(reasoning_tokens) or reasoning_tokens < 0
-    ):
-        reasoning_tokens = 0
-    prompt_tokens = usage.get("prompt_tokens")
-    total_tokens = usage.get("total_tokens")
-    if (
-        reasoning_tokens > 0
-        and isinstance(prompt_tokens, (int, float)) and prompt_tokens >= 0
-        and isinstance(total_tokens, (int, float)) and math.isfinite(total_tokens)
-        and total_tokens == prompt_tokens + output_tokens + reasoning_tokens
-    ):
-        # Some Gemini proxies report visible completion tokens and reasoning
-        # separately. OpenAI totals already include reasoning in output_tokens.
-        return int(output_tokens)
-    return max(0, int(output_tokens - reasoning_tokens))
 
 def _wrap_enrich_inbound_images(orig: Callable) -> Callable:
     """Observe newly attached native pixels; never resolve or change routing."""
@@ -458,6 +428,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     _logger.warning("HLS: suppressed exception", exc_info=True)
             else:
                 ctx["event_message_id"] = effective_event_message_id
+            _totals_for_context(ctx)
             # Copy to thread-local for thread-pool workers
             _thread_local_ctx.data = dict(ctx)
 
@@ -527,7 +498,6 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     _agent_ref_child = ctx.get("_agent_ref")
                     cache_read_child = getattr(_agent_ref_child, "session_cache_read_tokens", 0) if _agent_ref_child else 0
                     cache_write_child = getattr(_agent_ref_child, "session_cache_write_tokens", 0) if _agent_ref_child else 0
-                    last_turn_usage_child = _speed_usage_for_agent(_agent_ref_child)
                     reasoning_tokens = getattr(_agent_ref_child, "session_reasoning_tokens", 0) if _agent_ref_child else 0
                     estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
                     cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
@@ -540,7 +510,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                         tokens={
                             "input_tokens": result.get("input_tokens", 0),
                             "output_tokens": result.get("output_tokens", 0),
-                            "speed_output_tokens": _visible_output_tokens(last_turn_usage_child),
+                            **_speed_footer(ctx),
                             "cache_read_tokens": cache_read_child,
                             "cache_write_tokens": cache_write_child,
                         },
@@ -616,7 +586,6 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 _agent_ref = ctx.get("_agent_ref")
                 cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
                 cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
-                last_turn_usage = _speed_usage_for_agent(_agent_ref)
                 reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                 estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                 cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
@@ -629,7 +598,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                     tokens={
                         "input_tokens": result.get("input_tokens", 0),
                         "output_tokens": result.get("output_tokens", 0),
-                        "speed_output_tokens": _visible_output_tokens(last_turn_usage),
+                        **_speed_footer(ctx),
                         "cache_read_tokens": cache_read,
                         "cache_write_tokens": cache_write,
                     },
@@ -734,6 +703,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
             "_msg_start_time": time.monotonic(),
             "_agent_ref": None,  # Will be filled by _maybe_wrap_callbacks
         })
+        _totals_for_context(_msg_ctx.get())
         _thread_local_ctx.data = dict(_msg_ctx.get())
 
         # ── Fire START hook ──
@@ -786,7 +756,6 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                     _agent_ref = ctx.get("_agent_ref")
                     cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
                     cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
-                    last_turn_usage = _speed_usage_for_agent(_agent_ref)
                     reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
                     estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
                     cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
@@ -799,7 +768,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                         tokens={
                             "input_tokens": (result or {}).get("input_tokens", 0),
                             "output_tokens": (result or {}).get("output_tokens", 0),
-                            "speed_output_tokens": _visible_output_tokens(last_turn_usage),
+                            **_speed_footer(ctx),
                             "cache_read_tokens": cache_read,
                             "cache_write_tokens": cache_write,
                         },

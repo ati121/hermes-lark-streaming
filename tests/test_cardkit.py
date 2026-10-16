@@ -15,7 +15,6 @@ from hermes_lark_streaming.cardkit import (
     _loading_hint_element,
     _longest_backtick_run,
     _render_footer_field,
-    _speed_window,
     _streaming_element,
     build_interactive_card_v2,
     build_preservative_seal_actions,
@@ -764,46 +763,46 @@ def _speed(data: dict, *, show_label: bool = False) -> tuple[str | None, str | N
 class TestSpeedFooterField:
     """_render_footer_field("speed", ...) 输出速度字段渲染测试."""
 
-    def test_uses_gen_seconds_window(self) -> None:
-        """速度分母是 gen_seconds（首字到完成），不是整条消息耗时."""
-        en, zh = _speed({"speed_output_tokens": 500, "gen_seconds": 10.0})
+    def test_uses_speed_request_seconds_window(self) -> None:
+        """Use aggregate request seconds, not card wall time."""
+        en, zh = _speed({"speed_output_tokens": 500, "speed_request_seconds": 10.0})
         assert en == "50 t/s"
         assert zh == "50 t/s"
 
-    def test_uses_last_call_tokens_instead_of_cumulative_total(self) -> None:
-        """Do not divide cumulative session tokens by final-answer time."""
+    def test_uses_matched_request_totals_instead_of_session_total(self) -> None:
+        """Only matched per-turn request counters belong in the rate."""
         en, _ = _speed(
             {
                 "output_tokens": 2000,
                 "speed_output_tokens": 100,
-                "gen_seconds": 2.0,
+                "speed_request_seconds": 2.0,
             },
         )
         assert en == "50 t/s"
 
     def test_does_not_fall_back_to_cumulative_tokens(self) -> None:
-        """Missing last-call usage must hide speed instead of mixing windows."""
-        en, _ = _speed({"output_tokens": 500, "gen_seconds": 10.0})
+        """Missing request usage must hide speed instead of mixing scopes."""
+        en, _ = _speed({"output_tokens": 500, "speed_request_seconds": 10.0})
         assert en is None
 
     def test_does_not_fall_back_to_duration(self) -> None:
-        """A one-piece answer has no observable generation window."""
+        """Tool and card wall time is not model-request time."""
         en, _ = _speed({"speed_output_tokens": 500, "duration": 10.0})
         assert en is None
 
     def test_slow_speed_keeps_one_decimal(self) -> None:
         """低于 10 t/s 保留一位小数，避免都显示成 0 或 9."""
-        en, _ = _speed({"speed_output_tokens": 42, "gen_seconds": 10.0})
+        en, _ = _speed({"speed_output_tokens": 42, "speed_request_seconds": 10.0})
         assert en == "4.2 t/s"
 
     def test_fast_speed_rounds_to_integer(self) -> None:
         """10 t/s 及以上取整，小数位在这个量级没有意义."""
-        en, _ = _speed({"speed_output_tokens": 1234, "gen_seconds": 10.0})
+        en, _ = _speed({"speed_output_tokens": 1234, "speed_request_seconds": 10.0})
         assert en == "123 t/s"
 
     def test_zero_output_tokens_returns_none(self) -> None:
         """没有输出 token 时不显示速度."""
-        en, zh = _speed({"speed_output_tokens": 0, "gen_seconds": 10.0})
+        en, zh = _speed({"speed_output_tokens": 0, "speed_request_seconds": 10.0})
         assert en is None
         assert zh is None
 
@@ -812,20 +811,26 @@ class TestSpeedFooterField:
         en, _ = _speed({})
         assert en is None
 
-    def test_window_too_short_returns_none(self) -> None:
-        """窗口过短时算出的数字是测量噪声，不显示."""
-        en, _ = _speed({"speed_output_tokens": 5, "gen_seconds": 0.01})
-        assert en is None
+    def test_fast_request_is_not_hidden_by_old_chunk_threshold(self) -> None:
+        assert _speed({"speed_output_tokens": 5, "speed_request_seconds": 0.01}) == (
+            "500 t/s", "500 t/s",
+        )
+
+    @pytest.mark.parametrize("bad", [None, "2", True, -1, 0, float("nan"), float("inf")])
+    @pytest.mark.parametrize("key", ["speed_output_tokens", "speed_request_seconds"])
+    def test_invalid_measurement_is_hidden(self, bad, key) -> None:
+        data = {"speed_output_tokens": 100, "speed_request_seconds": 2.0, key: bad}
+        assert _speed(data) == (None, None)
 
     def test_no_window_at_all_returns_none(self) -> None:
-        """gen_seconds 和 duration 都缺失时不显示速度."""
+        """speed_request_seconds 和 duration 都缺失时不显示速度."""
         en, _ = _speed({"speed_output_tokens": 500})
         assert en is None
 
     def test_show_label_bilingual(self) -> None:
         """show_label=True 时中英文各自加前缀."""
         en, zh = _speed(
-            {"speed_output_tokens": 500, "gen_seconds": 10.0}, show_label=True,
+            {"speed_output_tokens": 500, "speed_request_seconds": 10.0}, show_label=True,
         )
         assert en == "Speed 50 t/s"
         assert zh == "速度 50 t/s"
@@ -833,7 +838,7 @@ class TestSpeedFooterField:
     def test_speed_in_build_footer_elements(self) -> None:
         """speed 字段在 _build_footer_elements 中正常渲染."""
         result = _build_footer_elements(
-            {"speed_output_tokens": 500, "gen_seconds": 10.0},
+            {"speed_output_tokens": 500, "speed_request_seconds": 10.0},
             fields=[["speed"]],
         )
         assert len(result) >= 2
@@ -846,43 +851,6 @@ class TestSpeedFooterField:
             is_error=False, is_aborted=False, show_label=False,
         )
         assert en is None
-
-# --- 速度测量窗口选择 ---
-
-
-class TestSpeedWindowSelection:
-    """_speed_window() 选择测量窗口：优先可见正文首末块，突发下发时退回整次调用."""
-
-    def test_prefers_visible_delta_span(self) -> None:
-        """可见首末块跨度足够时用它，不被更宽的调用跨度污染."""
-        assert _speed_window(2.0, 9.0) == (2.0, "delta")
-
-    def test_falls_back_to_call_span_for_burst(self) -> None:
-        """答案被上游一次性整段下发时，用调用首个活动到末个可见块兜底."""
-        window, source = _speed_window(0.05, 1.8)
-        assert window == 1.8
-        assert source == "call"
-
-    def test_short_spans_keep_delta_value_and_stay_hidden(self) -> None:
-        """两个窗口都短于噪声下限时保留原始短窗口，渲染层据此继续隐藏."""
-        assert _speed_window(0.05, 0.1) == (0.05, "delta")
-        en, _ = _speed({"speed_output_tokens": 5, "gen_seconds": 0.05})
-        assert en is None
-
-    def test_stays_hidden_without_any_span(self) -> None:
-        """完全没有可见流式窗口时不显示速度."""
-        assert _speed_window(0.0, 0.0) == (0.0, "delta")
-        assert _speed_window(None, None) == (0.0, "delta")
-
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), "2.0", True])
-    def test_ignores_unusable_spans(self, bad) -> None:
-        """非有限值/非数值/布尔值都不算有效窗口，避免渲染出 nan t/s."""
-        assert _speed_window(bad, bad) == (0.0, "delta")
-
-    def test_threshold_is_inclusive(self) -> None:
-        """窗口正好等于噪声下限时仍然显示."""
-        assert _speed_window(0.3, 0.0) == (0.3, "delta")
-
 
 # --- 图片提取 ---
 

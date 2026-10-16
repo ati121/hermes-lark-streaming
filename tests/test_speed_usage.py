@@ -1,8 +1,10 @@
-"""Provider usage survives normalization and reaches the final card footer."""
+"""Request-boundary aggregation, turn isolation, and gateway footer delivery."""
 
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,26 +14,29 @@ from hermes_lark_streaming.controller import CardSession, StreamCardController
 from hermes_lark_streaming.patching import (
     _maybe_wrap_callbacks,
     _msg_ctx,
+    _session_contexts,
+    _session_contexts_lock,
     _thread_local_ctx,
 )
 from hermes_lark_streaming.patching.gateway import (
-    _visible_output_tokens,
     _wrap_run_agent,
+    _wrap_run_background_task,
 )
 from hermes_lark_streaming.patching.usage import (
+    RequestTotals,
     _maybe_wrap_api_usage,
+    _output_tokens,
     _snapshot_usage,
-    _speed_usage_for_agent,
+    _speed_footer,
+    _totals_for_context,
 )
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 from hermes_lark_streaming.state.phase import CardPhase
 
 
 def _chat_usage(output=135, reasoning=678, total=839):
-    # This provider counts completion and reasoning separately: 26 + 135 + 678.
     return {
-        "prompt_tokens": 26,
-        "completion_tokens": output,
+        "prompt_tokens": 26, "completion_tokens": output,
         "completion_tokens_details": {"reasoning_tokens": reasoning},
         "total_tokens": total,
     }
@@ -40,26 +45,25 @@ def _chat_usage(output=135, reasoning=678, total=839):
 @pytest.fixture
 def make_agent():
     token = _msg_ctx.set({"message_id": "speed-message", "event_message_id": "speed-message"})
-    previous_thread_context = getattr(_thread_local_ctx, "data", None)
+    previous = getattr(_thread_local_ctx, "data", None)
     _thread_local_ctx.data = None
 
     def make(usage=None):
         agent = SimpleNamespace(
-            session_id="speed-session",
-            response=SimpleNamespace(usage=usage),
-            _last_turn_usage={"output_tokens": 999, "reasoning_tokens": 100},
+            session_id="speed-session", response=SimpleNamespace(usage=usage),
+            _last_turn_usage={"output_tokens": 9999}, calls=[], during=None,
             stream_delta_callback=lambda text: None,
             interim_assistant_callback=lambda text: None,
-            calls=[],
         )
 
         def api_call(api_kwargs, **kwargs):
             agent.calls.append((api_kwargs, kwargs))
+            if agent.during:
+                agent.during()
             if isinstance(agent.response, BaseException):
                 raise agent.response
-            first_delta = kwargs.get("on_first_delta")
-            if first_delta:
-                first_delta()
+            if kwargs.get("on_first_delta"):
+                kwargs["on_first_delta"]()
             return agent.response
 
         agent._interruptible_api_call = api_call
@@ -68,125 +72,220 @@ def make_agent():
 
     yield make
     _msg_ctx.reset(token)
-    _thread_local_ctx.data = previous_thread_context
+    _thread_local_ctx.data = previous
+
+
+def _call(agent, start, end, method="_interruptible_streaming_api_call", **kwargs):
+    with patch("hermes_lark_streaming.patching.usage.monotonic", side_effect=[start, end]):
+        return getattr(agent, method)({}, **kwargs)
+
+
+def _speed(data):
+    return _render_footer_field(
+        "speed", data, is_error=False, is_aborted=False, show_label=False,
+    )[0]
 
 
 @pytest.mark.parametrize(("output", "reasoning", "total", "expected"), [
-    (135, 678, 839, 135),       # Observed Gemini-compatible usage.
-    (1000, 200, 1226, 1000),   # Output > reasoning must not be undercounted either.
-    (135, 135, 296, 135),      # Equal counters with reasoning billed separately.
-    (500, 320, 526, 180),      # Standard OpenAI: reasoning is inside completion.
-    (135, 135, 161, 0),        # Standard reasoning-only output stays hidden.
-    (135, 0, 161, 135),
-    (135, 678, None, 0),       # Missing/inconsistent totals cannot prove exclusion.
-    (135, 678, 999, 0),
+    (135, 678, 839, 813), (1000, 200, 1226, 1200), (135, 135, 296, 270),
+    (500, 320, 526, 500), (135, 135, 161, 135), (135, 0, 161, 135),
+    (135, 678, None, 135), (135, 678, 999, 135),
 ])
-def test_token_accounting_uses_provider_total(output, reasoning, total, expected):
-    assert _visible_output_tokens(_snapshot_usage(_chat_usage(output, reasoning, total))) == expected
+def test_output_includes_reasoning_once(output, reasoning, total, expected):
+    assert _output_tokens(_snapshot_usage(_chat_usage(output, reasoning, total))) == expected
 
 
-def test_responses_sdk_shape_uses_full_input_including_cached_tokens():
+@pytest.mark.parametrize("bad", [None, "135", True, float("nan"), float("inf"), -1, 1.5])
+def test_invalid_output_is_not_guessed(bad):
+    assert _output_tokens(_snapshot_usage(_chat_usage(output=bad))) is None
+
+
+def test_responses_and_anthropic_usage_shapes():
     usage = SimpleNamespace(
         input_tokens=1026, output_tokens=500, total_tokens=1526,
-        input_tokens_details=SimpleNamespace(cached_tokens=1000),
         output_tokens_details=SimpleNamespace(reasoning_tokens=320),
     )
-    assert _visible_output_tokens(_snapshot_usage(usage)) == 180
-
-
-def test_anthropic_usage_without_reasoning_breakdown_keeps_output():
-    usage = SimpleNamespace(input_tokens=26, output_tokens=135, cache_read_input_tokens=1000)
-    assert _visible_output_tokens(_snapshot_usage(usage)) == 135
-
-
-@pytest.mark.parametrize("output", [None, "135", float("nan"), float("inf"), -1])
-def test_invalid_output_cannot_break_card_completion(output):
-    assert _visible_output_tokens(_snapshot_usage(_chat_usage(output=output))) == 0
+    assert _output_tokens(_snapshot_usage(usage)) == 500
+    assert _output_tokens(_snapshot_usage(SimpleNamespace(output_tokens=135))) == 135
 
 
 @pytest.mark.parametrize("method", ["_interruptible_api_call", "_interruptible_streaming_api_call"])
-def test_capture_preserves_call_and_copies_only_usage_counters(make_agent, method):
+def test_capture_preserves_response_and_provider_usage(make_agent, method):
     usage = _chat_usage()
-    usage["provider_extra"] = "not needed by cards"
     agent = make_agent(usage)
-    response = agent.response
-    request = {"model": "example"}
-    _maybe_wrap_api_usage(agent)
-
-    assert getattr(agent, method)(request) is response
-    assert agent.calls == [(request, {})]
-    assert response.usage is usage
-    captured = _speed_usage_for_agent(agent)
-    assert captured == {
-        "prompt_tokens": 26, "output_tokens": 135,
-        "reasoning_tokens": 678, "total_tokens": 839,
-    }
+    totals = _totals_for_context(_msg_ctx.get())
+    _maybe_wrap_api_usage(agent, totals)
+    assert _call(agent, 1, 4, method) is agent.response
+    assert agent.calls == [({}, {})]
     usage["completion_tokens"] = 1
-    assert captured["output_tokens"] == 135
-    assert agent._last_turn_usage == {"output_tokens": 999, "reasoning_tokens": 100}
+    assert totals.footer()["speed_output_tokens"] == 813
+    assert totals.footer()["speed_request_seconds"] == 3
+    assert agent._last_turn_usage == {"output_tokens": 9999}
 
 
-def test_cached_callbacks_keep_one_wrapper_and_refresh_turn_ownership(make_agent):
-    agent = make_agent(_chat_usage())
+def test_weighted_average_includes_all_requests_not_tool_wait(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
     _maybe_wrap_callbacks(agent)
-    wrapped_call = agent._interruptible_streaming_api_call
-    first_delta = Mock()
+    _call(agent, 10, 12)
+    # Repeated callback setup, tools, and idle time cannot clear the accumulator.
+    _maybe_wrap_callbacks(agent)
+    agent.response = SimpleNamespace(usage=_chat_usage(output=900, reasoning=0, total=926))
+    _call(agent, 100, 109, method="_interruptible_api_call")
+    footer = _speed_footer(_msg_ctx.get())
+    assert footer == {
+        "speed_output_tokens": 1000, "speed_request_seconds": 11,
+        "speed_requests": 2, "speed_total_requests": 2,
+    }
+    assert _speed(footer) == "91 t/s"  # Not mean(50, 100) = 75.
+
+
+def test_cached_agent_resets_only_when_turn_changes(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    _maybe_wrap_callbacks(agent)
+    wrapped = agent._interruptible_streaming_api_call
+    first = Mock()
     with patch("hermes_lark_streaming.patching.hooks.on_model_activity") as activity:
-        wrapped_call({}, on_first_delta=first_delta)
-    first_delta.assert_called_once_with()
+        _call(agent, 1, 3, on_first_delta=first)
+    first.assert_called_once_with()
     activity.assert_called_once()
-    assert _visible_output_tokens(_speed_usage_for_agent(agent)) == 135
-
-    _msg_ctx.set({"message_id": "next-message", "event_message_id": "next-message"})
+    old_ctx = _msg_ctx.get()
+    _msg_ctx.set({"message_id": "next", "event_message_id": "next"})
     _maybe_wrap_callbacks(agent)
-    assert agent._interruptible_streaming_api_call is wrapped_call
-    assert _msg_ctx.get()["_agent_ref"] is agent
-    assert _speed_usage_for_agent(agent) is None
+    assert agent._interruptible_streaming_api_call is wrapped
+    assert _speed(_speed_footer(_msg_ctx.get())) is None
+    _call(agent, 20, 25)
+    assert _speed(_speed_footer(old_ctx)) == "50 t/s"
+    assert _speed(_speed_footer(_msg_ctx.get())) == "20 t/s"
 
 
-@pytest.mark.parametrize("final_call", ["usage_missing", "failure", "nonstream_usage_missing"])
-def test_final_call_cannot_reuse_previous_usage(make_agent, final_call):
+@pytest.mark.parametrize("outcome", ["missing", "exception", "unreadable"])
+def test_incomplete_turn_never_presents_a_subset_as_all_requests(make_agent, outcome):
     agent = make_agent(_chat_usage())
-    _maybe_wrap_api_usage(agent)
-    agent._interruptible_streaming_api_call({})
-    assert _visible_output_tokens(_speed_usage_for_agent(agent)) == 135
-
-    if final_call == "failure":
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    if outcome == "exception":
         failure = RuntimeError("provider failed")
         agent.response = failure
         with pytest.raises(RuntimeError) as raised:
-            agent._interruptible_streaming_api_call({})
+            _call(agent, 4, 6)
         assert raised.value is failure
     else:
-        agent.response = SimpleNamespace(usage=None)
-        method = (agent._interruptible_api_call if final_call.startswith("nonstream")
-                  else agent._interruptible_streaming_api_call)
-        method({})
-    assert _speed_usage_for_agent(agent) is None
-    assert _visible_output_tokens(_speed_usage_for_agent(agent)) == 0
+        class Unreadable:
+            @property
+            def usage(self):
+                raise ValueError("unreadable usage")
+        agent.response = Unreadable() if outcome == "unreadable" else SimpleNamespace(usage=None)
+        assert _call(agent, 4, 6) is agent.response
+    footer = _speed_footer(_msg_ctx.get())
+    assert footer == {"speed_requests": 1, "speed_total_requests": 2}
+    assert _speed(footer) is None
 
 
-def test_usage_capture_error_preserves_the_response(make_agent):
-    class Response:
-        @property
-        def usage(self):
-            raise ValueError("unreadable usage")
-
-    agent = make_agent()
-    agent.response = Response()
-    _maybe_wrap_api_usage(agent)
-    assert agent._interruptible_api_call({}) is agent.response
-    assert _speed_usage_for_agent(agent) is None
+def test_old_canonical_usage_is_not_a_current_turn_measurement(make_agent):
+    agent = SimpleNamespace(_last_turn_usage={"output_tokens": 500})
+    _maybe_wrap_callbacks(agent)
+    assert _speed(_speed_footer(_msg_ctx.get())) is None
 
 
-def test_older_agent_without_api_capture_uses_canonical_usage():
-    agent = SimpleNamespace(_last_turn_usage={"output_tokens": 500, "reasoning_tokens": 320})
-    _maybe_wrap_api_usage(agent)
-    assert _visible_output_tokens(_speed_usage_for_agent(agent)) == 180
+def test_nested_stream_to_nonstream_fallback_is_not_double_counted(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    agent._interruptible_streaming_api_call = lambda *a, **kw: agent._interruptible_api_call(*a, **kw)
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    assert _speed_footer(_msg_ctx.get())["speed_total_requests"] == 1
+    assert _speed(_speed_footer(_msg_ctx.get())) == "50 t/s"
+
+
+def test_inflight_request_keeps_old_owner_when_agent_is_rebound(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    _maybe_wrap_callbacks(agent)
+    old_ctx = _msg_ctx.get()
+    new_ctx = {"message_id": "new", "event_message_id": "new"}
+
+    def change_turn():
+        _msg_ctx.set(new_ctx)
+        _maybe_wrap_callbacks(agent)
+        assert _speed(_speed_footer(old_ctx)) is None  # In-flight is incomplete.
+
+    agent.during = change_turn
+    _call(agent, 1, 3)
+    assert _speed(_speed_footer(old_ctx)) == "50 t/s"
+    assert _speed(_speed_footer(new_ctx)) is None
+
+
+def test_live_context_wins_over_rebound_agent_totals(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    _maybe_wrap_callbacks(agent)
+    old_turn = _msg_ctx.get()
+    new_turn = {"message_id": "other-turn", "event_message_id": "other-turn"}
+    _msg_ctx.set(new_turn)
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 6)
+    _msg_ctx.set(old_turn)
+    _call(agent, 10, 12)
+    assert _speed(_speed_footer(old_turn)) == "50 t/s"
+    assert _speed(_speed_footer(new_turn)) == "20 t/s"
+
+
+def test_replacement_agent_keeps_previous_requests_in_same_turn(make_agent):
+    first = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    _maybe_wrap_callbacks(first)
+    _call(first, 1, 3)
+    replacement = make_agent(_chat_usage(output=900, reasoning=0, total=926))
+    _maybe_wrap_callbacks(replacement)
+    _call(replacement, 10, 19)
+    footer = _speed_footer(_msg_ctx.get())
+    assert footer["speed_requests"] == 2
+    assert _speed(footer) == "91 t/s"
+
+
+def test_detached_fork_cannot_steal_usage_or_output(make_agent):
+    agent = make_agent(_chat_usage())
+    fork = make_agent(_chat_usage())
+    fork._persist_disabled = True
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    _maybe_wrap_callbacks(fork)
+    assert _msg_ctx.get()["_agent_ref"] is agent
+    assert not getattr(fork._interruptible_api_call, "_hls_usage_wrapper", False)
+    assert _speed_footer(_msg_ctx.get())["speed_total_requests"] == 1
+
+
+def test_worker_registry_context_shares_totals_with_gateway(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    ctx = _msg_ctx.get()
+    totals = _totals_for_context(ctx)
+    with _session_contexts_lock:
+        _session_contexts[agent.session_id] = dict(ctx)
+    try:
+        _msg_ctx.set(None)
+        _maybe_wrap_callbacks(agent)
+        _call(agent, 1, 3)
+        assert agent._hls_speed_totals is totals
+        assert _speed(_speed_footer(ctx)) == "50 t/s"
+    finally:
+        with _session_contexts_lock:
+            _session_contexts.pop(agent.session_id, None)
+
+
+def test_parallel_requests_have_matched_sums(make_agent):
+    totals = RequestTotals()
+
+    def measure(_):
+        totals.start()
+        totals.record(100, 2)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(measure, range(20)))
+    assert totals.footer() == {
+        "speed_requests": 20, "speed_total_requests": 20,
+        "speed_output_tokens": 2000, "speed_request_seconds": 40,
+    }
 
 
 @pytest.mark.asyncio
-async def test_gateway_completion_uses_original_total_after_hermes_normalizes_it(make_agent, monkeypatch):
+@pytest.mark.parametrize("transport", ["stream", "burst", "nonstream"])
+async def test_gateway_aggregates_all_tool_rounds_independent_of_text_delivery(make_agent, monkeypatch, transport):
     ctrl = StreamCardController()
     ctrl._cfg._raw = {
         "hermes_lark_streaming": {"enabled": True},
@@ -200,141 +299,114 @@ async def test_gateway_completion_uses_original_total_after_hermes_normalizes_it
     session.linear = True
     session.unified_state = UnifiedLinearState()
     ctrl._sessions[session.message_id] = session
-    usage = _chat_usage()
+    usage = _chat_usage(output=100, reasoning=0, total=126)
     agent = make_agent(usage)
 
     async def run_agent(*args, **kwargs):
-        _maybe_wrap_callbacks(agent)
-        response = agent._interruptible_streaming_api_call({})
-        assert response.usage is usage
-        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.0):
+        # Mirrors Hermes' executor hop: context copies share the accumulator.
+        copy_context().run(_maybe_wrap_callbacks, agent)
+        _call(agent, 1, 3)
+        agent.tool_gen_callback("read")
+        ctrl.on_tool_update(message_id=session.message_id, tool_name="read", status="started")
+        ctrl.on_tool_update(message_id=session.message_id, tool_name="read", status="completed")
+        ctrl.on_compression_started(message_id=session.message_id)
+        ctrl.on_compression_completed(message_id=session.message_id)
+        agent.response = SimpleNamespace(usage=_chat_usage(output=900, reasoning=0, total=926))
+        method = "_interruptible_api_call" if transport == "nonstream" else "_interruptible_streaming_api_call"
+        _call(agent, 100, 109, method=method)
+        if transport == "stream":
             agent.stream_delta_callback("first ")
-        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.3884):
             agent.stream_delta_callback("last")
-        # Hermes recomputes total from prompt + output, losing the provider's
-        # separate reasoning contribution. This must not change card speed.
-        agent._last_turn_usage = {
-            "prompt_tokens": 26, "output_tokens": 135,
-            "reasoning_tokens": 678, "total_tokens": 161,
-        }
+        elif transport == "burst":
+            agent.stream_delta_callback("first last")
+        # Hermes' mutated/session totals must never be used for this rate.
+        agent._last_turn_usage = {"output_tokens": 90000}
         return {"final_response": "first last", "model": "example", "output_tokens": 9000}
 
     result = await _wrap_run_agent(run_agent)(
         SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
         event_message_id=session.message_id,
     )
-
     assert result["already_sent"] is True
     assert session.footer["output_tokens"] == 9000
-    assert session.footer["speed_output_tokens"] == 135
-    assert session.footer["gen_seconds"] == pytest.approx(0.3884)
-    assert _render_footer_field(
-        "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
-    ) == ("348 t/s", "348 t/s")
-    assert usage == _chat_usage()
+    assert session.footer["speed_output_tokens"] == 1000
+    assert session.footer["speed_request_seconds"] == 11
+    assert session.footer["speed_requests"] == 2
+    assert _speed(session.footer) == "91 t/s"
+    assert usage == _chat_usage(output=100, reasoning=0, total=126)
 
 
 @pytest.mark.asyncio
-async def test_gateway_burst_answer_still_reports_speed(make_agent, monkeypatch):
-    """线上截图 2 的场景：短答案被上游整段下发时，速度仍必须显示."""
-    ctrl = StreamCardController()
-    ctrl._cfg._raw = {
-        "hermes_lark_streaming": {"enabled": True},
-        "feishu": {"app_id": "test-app", "app_secret": "test-secret"},
-    }
-    monkeypatch.setattr(ctrl, "_schedule_linear_flush", Mock())
-    monkeypatch.setattr(ctrl, "_complete_session", Mock())
-    monkeypatch.setattr("hermes_lark_streaming.patching.hooks.get_controller", lambda: ctrl)
-    session = CardSession("speed-message", "chat", asyncio.get_running_loop())
-    session.state = CardPhase.STREAMING
-    session.linear = True
-    session.unified_state = UnifiedLinearState()
-    # This model call started two seconds before its single visible chunk.
-    session._speed_call_start = 100.0
-    ctrl._sessions[session.message_id] = session
-    agent = make_agent(_chat_usage(output=118, reasoning=0, total=144))
+async def test_background_completion_receives_aggregate(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
 
-    async def run_agent(*args, **kwargs):
+    async def run(*args, **kwargs):
         _maybe_wrap_callbacks(agent)
-        agent._interruptible_streaming_api_call({})
-        # The whole visible answer arrives as one chunk: no in-stream span.
-        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=102.0):
-            agent.stream_delta_callback("整段答案")
-        return {
-            "final_response": "整段答案",
-            "model": "deepseek-v4.1-flash",
-            "output_tokens": 118,
-        }
+        _call(agent, 1, 3)
+        _call(agent, 5, 7)
+        return {"final_response": "done"}
 
-    result = await _wrap_run_agent(run_agent)(
-        SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
-        event_message_id=session.message_id,
-    )
-
-    assert result["already_sent"] is True
-    assert session.footer["speed_output_tokens"] == 118
-    assert session.footer["speed_window"] == "call"
-    assert session.footer["gen_seconds"] == pytest.approx(2.0)
-    assert _render_footer_field(
-        "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
-    ) == ("59 t/s", "59 t/s")
-
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="test-chat")
+    with patch("hermes_lark_streaming.patching.hooks.on_message_started"), patch(
+        "hermes_lark_streaming.patching.hooks.on_message_completed", return_value=True,
+    ) as completed:
+        result = await _wrap_run_background_task(run)(SimpleNamespace(), "question", source, "test-task")
+    assert result["_hls_card_sent"] is True
+    assert _speed(completed.call_args.kwargs["tokens"]) == "50 t/s"
+    assert completed.call_args.kwargs["tokens"]["speed_requests"] == 2
 
 
 @pytest.mark.asyncio
-async def test_background_review_fork_cannot_steal_the_live_turn_usage(make_agent, monkeypatch):
-    """Hermes 的后台复审 fork 共用父回合上下文，不得抢走本回合的用量归属.
+async def test_recursive_interrupt_has_independent_request_totals(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    parent = _msg_ctx.get()
+    parent_totals = _totals_for_context(parent)
 
-    线上表现（2026-09-19 02:49:10、02:31:55、02:10:28）：复审线程创建 agent 后
-    约 50ms，卡片收尾就记 ``speed hidden reason=no_visible_output visible=0``，
-    而时间窗完全正常。fork 从未调用模型，用量仍是 ``None``。
-    """
-    ctrl = StreamCardController()
-    ctrl._cfg._raw = {
-        "hermes_lark_streaming": {"enabled": True},
-        "feishu": {"app_id": "test-app", "app_secret": "test-secret"},
-    }
-    monkeypatch.setattr(ctrl, "_schedule_linear_flush", Mock())
-    monkeypatch.setattr(ctrl, "_complete_session", Mock())
-    monkeypatch.setattr("hermes_lark_streaming.patching.hooks.get_controller", lambda: ctrl)
-    session = CardSession("speed-message", "chat", asyncio.get_running_loop())
-    session.state = CardPhase.STREAMING
-    session.linear = True
-    session.unified_state = UnifiedLinearState()
-    ctrl._sessions[session.message_id] = session
-    agent = make_agent(_chat_usage())
-    # The review fork Hermes builds for background memory/skill review: same
-    # session id, inherited ContextVars, persistence disabled, no API call yet.
-    fork = SimpleNamespace(
-        session_id=agent.session_id,
-        _persist_disabled=True,
-        stream_delta_callback=lambda text: None,
-        interim_assistant_callback=lambda text: None,
-    )
-
-    async def run_agent(*args, **kwargs):
+    async def child(*args, **kwargs):
         _maybe_wrap_callbacks(agent)
-        agent._interruptible_streaming_api_call({})
-        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.0):
-            agent.stream_delta_callback("first ")
-        # The review fork starts while the live answer is still streaming.
-        _maybe_wrap_callbacks(fork)
-        with patch("hermes_lark_streaming.controller.core.time.monotonic", return_value=10.5):
-            agent.stream_delta_callback("last")
-        return {"final_response": "first last", "model": "example", "output_tokens": 135}
+        assert _totals_for_context(_msg_ctx.get()) is not parent_totals
+        _call(agent, 10, 15)
+        _call(agent, 20, 25)
+        return {"final_response": "child answer"}
 
-    await _wrap_run_agent(run_agent)(
-        SimpleNamespace(), "question", "", [], SimpleNamespace(), agent.session_id,
-        event_message_id=session.message_id,
-    )
+    with patch("hermes_lark_streaming.patching.hooks.on_message_started"), patch(
+        "hermes_lark_streaming.patching.hooks.on_message_interrupted",
+    ), patch(
+        "hermes_lark_streaming.patching.hooks.on_message_completed", return_value=True,
+    ) as completed:
+        await _wrap_run_agent(child)(
+            SimpleNamespace(), "follow-up", "", [], SimpleNamespace(), agent.session_id,
+            event_message_id="child-message", _interrupt_depth=1,
+        )
 
-    assert _msg_ctx.get()["_agent_ref"] is agent
-    assert not getattr(fork, "stream_delta_callback", None) or not getattr(
-        fork.stream_delta_callback, "_hls_wrapper", False
-    )
-    # The fork must not have replaced the live turn's captured usage.
-    assert session.footer["speed_output_tokens"] == 135
-    assert session.footer["speed_window"] == "delta"
-    assert _render_footer_field(
-        "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
-    ) == ("270 t/s", "270 t/s")
+    child_completion, parent_completion = completed.call_args_list
+    assert child_completion.kwargs["message_id"] == "child-message"
+    assert _speed(child_completion.kwargs["tokens"]) == "20 t/s"
+    assert child_completion.kwargs["tokens"]["speed_total_requests"] == 2
+    assert parent_completion.kwargs["aborted"] is True
+    assert _speed(_speed_footer(parent)) == "50 t/s"
+    assert _msg_ctx.get()["_speed_totals"] is parent_totals
+
+
+def test_zero_output_request_still_contributes_time(make_agent):
+    agent = make_agent(_chat_usage(output=0, reasoning=0, total=26))
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    agent.response = SimpleNamespace(usage=_chat_usage(output=100, reasoning=0, total=126))
+    _call(agent, 10, 13)
+    footer = _speed_footer(_msg_ctx.get())
+    assert footer["speed_total_requests"] == 2
+    assert footer["speed_request_seconds"] == 5
+    assert _speed(footer) == "20 t/s"
+
+
+@pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
+def test_unusable_request_clock_never_displays_partial_average(seconds):
+    totals = RequestTotals()
+    totals.start()
+    totals.record(100, 2)
+    totals.start()
+    totals.record(100, seconds)
+    assert _speed(totals.footer()) is None

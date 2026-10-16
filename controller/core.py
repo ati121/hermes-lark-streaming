@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from ..cardkit.elements import _MIN_SPEED_WINDOW_SEC, _speed_window
 from ..config import Config, hermes_home
 from ..feishu import (
     FeishuClient,
@@ -37,12 +36,6 @@ _logger = logging.getLogger("hermes_lark_streaming")
 
 # v1.3.2: module-level constant (was previously re-defined on every on_interrupted call)
 _INTERRUPT_MAP_MAX = 200
-
-# ``on_model_activity`` sources that mark the wire-level start of a new upstream
-# model call.  Hermes fires them once per call regardless of the card's current
-# phase, so they anchor the output-speed window even when the phase still reads
-# thinking/answer (a compaction that restored the previous phase, for example).
-_CALL_START_SOURCES = frozenset({"stream.first_chunk", "stream.first_delta"})
 
 class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     """流式卡片控制器 — 管理多条消息的卡片生命周期."""
@@ -847,12 +840,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             if session._response_phase == "compression":
                 return
 
-            # Compaction runs between two model calls, so the next visible answer
-            # belongs to a call that has not started yet.  Forget the timestamps
-            # here, exactly as a tool start does, so no window spans the earlier
-            # call plus the compaction.
-            self._reset_speed_window(session)
-
             session._compression_previous_phase = session._response_phase
             session._response_phase = "compression"
             _logger.info(
@@ -907,78 +894,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             )
             self._schedule_linear_flush(session, force=True)
 
-    def _note_answer_time(self, session: CardSession, now: float) -> None:
-        """Record one visible-answer moment for the output-speed window."""
-        if session._first_answer_time == 0.0:
-            session._first_answer_time = now
-        session._last_answer_time = now
-
-    def _note_upstream_activity_time(self, session: CardSession, now: float) -> None:
-        """Anchor the speed window at this model call's first upstream activity.
-
-        Reasoning, a tool-call name, or the first visible chunk all count. Only
-        the first one per call is stored, and the anchor is dropped at every
-        model-call boundary (a tool start, or the compaction between two calls),
-        so it never reaches across a tool or a compression.
-        """
-        if session._speed_call_start == 0.0:
-            session._speed_call_start = now
-
-    def _reset_speed_window(self, session: CardSession) -> None:
-        """Forget every speed timestamp because a new model call is starting.
-
-        Called at both model-call boundaries: a tool start, and the compaction
-        that runs between two calls.  The next visible answer belongs to a later
-        call, so reusing these timestamps would report a window spanning the tool
-        or the compaction — and after a compaction restored the pre-compression
-        phase, the following call would even reuse the earlier call's anchor.
-        """
-        session._first_answer_time = 0.0
-        session._last_answer_time = 0.0
-        session._speed_call_start = 0.0
-
-    def _log_hidden_speed(
-        self,
-        session: CardSession,
-        *,
-        tokens: dict | None,
-        window: float,
-        delta_seconds: float,
-        call_seconds: float,
-    ) -> None:
-        """Log once per completed turn why the speed field will be missing.
-
-        The field is silently skipped whenever it cannot be measured, which
-        made "sometimes shown, sometimes not" hard to diagnose in the field.
-        """
-        try:
-            shows_speed = any("speed" in row for row in self._cfg.footer_fields)
-        except TypeError:
-            # Malformed ``footer.fields`` (not a list of strings).  The renderer
-            # reports that bad config separately; this diagnostic must never
-            # break completion, so a damaged config still gets logged.
-            shows_speed = True
-        if not shows_speed:
-            return
-        if not tokens:
-            reason = "no_usage"
-        else:
-            visible = tokens.get("speed_output_tokens")
-            if not isinstance(visible, (int, float)) or isinstance(visible, bool) or visible <= 0:
-                reason = "no_visible_output"
-            elif window < _MIN_SPEED_WINDOW_SEC:
-                reason = "window_too_short"
-            else:
-                return
-        _logger.info(
-            "HLS: speed hidden msg=%s reason=%s visible=%s delta_span=%.3f call_span=%.3f",
-            (session.message_id or "?")[:12],
-            reason,
-            (tokens or {}).get("speed_output_tokens"),
-            delta_seconds,
-            call_seconds,
-        )
-
     def on_model_activity(self, *, message_id: str, source: str = "stream") -> None:
         """Mark upstream activity that has no user-visible text yet.
 
@@ -1005,16 +920,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return
 
             previous_phase = session._response_phase
-
-            # This model call's first upstream byte anchors the fallback speed
-            # window; reasoning and tool-call names both count.  A wire-level call
-            # start anchors regardless of the current phase, because it is a
-            # genuine new-call boundary even when the phase still reads thinking
-            # or answer — after a compaction restored the previous phase, for
-            # example.  Compression on its own is bookkeeping between calls and
-            # must not anchor.
-            if source in _CALL_START_SOURCES or previous_phase in ("waiting", "tool"):
-                self._note_upstream_activity_time(session, time.monotonic())
 
             if previous_phase not in ("waiting", "tool", "compression"):
                 return
@@ -1050,9 +955,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             # Detecting model activity is independent from exposing chain-of-thought.
             # Even with show_reasoning=false, the placeholder must stop claiming that
             # Hermes is still waiting for the upstream model.
-            # Any reasoning chunk is upstream activity for this model call, even
-            # when chain-of-thought is hidden from the card.
-            self._note_upstream_activity_time(session, time.monotonic())
             phase_changed = session._response_phase != "thinking"
             session._compression_previous_phase = None
             session._response_phase = "thinking"
@@ -1281,10 +1183,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
             is_new_tool = status in ("running", "started", "tool.started")
             if is_new_tool:
-                # The next visible answer belongs to a later model call. Reset the
-                # The next visible answer belongs to a later model call. Reset the
-                # whole speed window so tool execution time cannot dilute it.
-                self._reset_speed_window(session)
                 session._compression_previous_phase = None
                 session._response_phase = "tool"
                 session.tool_use.record_start(tool_name, detail, args=tool_args)
@@ -1353,8 +1251,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 # state immediately instead of waiting for a renderable delta.
                 if answer_text.strip():
                     # The spinner row carries 模型思考中 for visible answer deltas
-                    # too; ``answer`` is retained here for timing and tool-phase
-                    # bookkeeping.
+                    # too; ``answer`` is retained here for tool-phase bookkeeping.
                     session._compression_previous_phase = None
                     session._response_phase = "answer"
                 else:
@@ -1368,9 +1265,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
                 # The spinner row picks up 模型思考中 from this phase on the flush
                 # scheduled below, and keeps showing it for the rest of the stream.
-                now = time.monotonic()
-                self._note_upstream_activity_time(session, now)
-                self._note_answer_time(session, now)
                 if session.unified_state is None:
                     _logger.warning("HLS: on_answer but unified_state is None, skipping msg=%s", (message_id or "?")[:12])
                     return
@@ -1702,41 +1596,19 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if aborted:
             session._was_aborted = True
 
-        # ── 输出速度窗口 ──
-        # Preferred denominator: the span between the first and last visible
-        # answer chunk of the final call. Tool start resets the timestamps and
-        # the endpoint is the last visible delta rather than on_completed, so
-        # tool time and completion bookkeeping stay outside. Some providers
-        # flush a short answer in one burst, collapsing that span below the
-        # noise floor; the wider span from this call's first upstream activity
-        # is then used instead, so a real measurement can still be shown.
-        delta_seconds = 0.0
-        if session._last_answer_time > session._first_answer_time > 0.0:
-            delta_seconds = session._last_answer_time - session._first_answer_time
-        call_seconds = 0.0
-        if session._last_answer_time > session._speed_call_start > 0.0:
-            call_seconds = session._last_answer_time - session._speed_call_start
-        gen_seconds, speed_window = _speed_window(delta_seconds, call_seconds)
-        self._log_hidden_speed(
-            session,
-            tokens=tokens,
-            window=gen_seconds,
-            delta_seconds=delta_seconds,
-            call_seconds=call_seconds,
-        )
-
         session.footer = {
             "duration": duration,
             "model": model,
-            **({"gen_seconds": gen_seconds} if gen_seconds > 0 else {}),
-            **({"speed_window": speed_window} if gen_seconds > 0 else {}),
             **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
-            **(
-                {"speed_output_tokens": tokens.get("speed_output_tokens")}
-                if tokens
-                else {}
-            ),
+            **{
+                key: tokens[key]
+                for key in (
+                    "speed_output_tokens", "speed_request_seconds",
+                    "speed_requests", "speed_total_requests",
+                )
+                if tokens and key in tokens
+            },
             **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),
             **({"cache_write_tokens": tokens.get("cache_write_tokens")} if tokens and tokens.get("cache_write_tokens") else {}),
             **({"context_used": context.get("used_tokens")} if context else {}),

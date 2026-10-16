@@ -127,27 +127,24 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 `cache`、`cost`、`api_calls`、`history_offset`、`compression_exhausted`。未知字段名
 会被静默跳过。
 
-`speed` 默认开启，显示最后一次模型调用的可见输出速度（如 `50 t/s`）。不想要可以从
-`fields` 里去掉。计算规则：
+`speed` 默认开启，显示**当前这一轮对话中所有模型请求的平均吞吐量**（如
+`50 t/s`），不再只取最后一次请求或最后一段正文。不想要可以从 `fields` 里去掉。
 
-- 分子是该次调用的可见输出 token。标准 OpenAI 用量的输出数包含 reasoning token，
-  需要扣除；部分 Gemini 兼容接口的输出数已排除推理，插件按接口原始的输入、输出、
-  推理和总数识别口径，避免重复扣除。原始计数在 Hermes 归一化前单独保存，不影响
-  其用量和费用统计。
-- 分母优先用最终可见正文的首个到末个流式块间隔。
-- 上游把短答案整段一次性下发时，这个间隔会塌缩到测量下限以下，改用同一次调用内
-  「首个上游活动（推理、工具名或首个可见块）→ 末个可见块」的间隔兜底。兜底窗口
-  计入该次调用先前的推理/预填时间，衡量的是整个上游窗口吞吐：先长推理再整段下发
-  答案的调用数值会明显偏低，所以可见正文间隔可测时始终优先用它。
-- 两个窗口都在每次模型调用边界清零（工具开始执行，或两次调用之间的上下文压缩），
-  不会把工具耗时、压缩耗时算进去，也不会跨调用拼接正文。
-- Hermes 经 interim 回调交付答案（verify_on_stop、截断续写等）时，正文与计时同步
-  更新，该次调用起点已知就能算出速度；整段答案只经一次 interim 回调下发（非流式
-  重放）时没有任何窗口可测，仍隐藏。
-- 无法取得可靠 usage、没有可见输出，或两个窗口都短于 0.3 秒时不显示。完成时若
-  速度为空，日志会打印一行 `HLS: speed hidden …`，含 `reason`
-  （`no_usage`/`no_visible_output`/`window_too_short`）、`delta_span` 与
-  `call_span` 便于排查。
+- 公式：`本轮各请求生成 token 的合计 / 本轮各请求耗时的合计`。不是各次 t/s 的
+  算术平均值；多次工具调用前后的模型请求都会累计，新用户回合重新统计。
+- 生成 token 包括正文、工具参数和推理。标准 OpenAI 输出数已包含推理，不重复
+  相加；若提供方原始总数证明推理被单独计数，则只补加一次。原始计数在 Hermes
+  归一化前读取，不修改 Hermes 的用量、费用或缓存统计。
+- 请求耗时从 API 方法进入到返回，包含首字等待、预填和推理；不包含请求之外的
+  工具执行、卡片推送或空闲间隔。此字段是**请求平均吞吐量**，不是纯解码速度。
+- 流式、整段下发、非流式响应均用同一公式，不再根据正文分块间隔猜测速度，
+  也不再有旧的 0.3 秒正文窗口限制。
+- 同一轮重复安装回调不会清零；复用 agent 的新回合、打断后的新回合独立统计。
+  后台复审等 detached fork 不计入用户卡片，嵌套的 API 包装也不会重复计数。
+- 任一请求失败、缺少可靠输出 usage、计时无效或仍未结束时，本轮速度隐藏，避免
+  把只有部分请求的数据误当作全量平均值。日志 `HLS: speed hidden` 中的
+  `reason=incomplete_requests`、`measured`、`requests` 可用于定位。没有请求或
+  所有请求都没有生成 token 时也不显示；不会回退到上一轮用量或整张卡片耗时。
 
 基础示例：
 
@@ -487,7 +484,7 @@ grep -oE "capability_check plugin=[^ ]+" "$HERMES_HOME/logs/agent.log" | sort -u
 | Schema 错误（300315） | 检查 CardKit v2 卡片结构和字号值是否合法 |
 | 流式卡片卡住 | 增大 `card_ttl_sec`，确认卡片未被删除/撤回 |
 | 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
-| 速度时有时无 | `grep "HLS: speed hidden" "$HERMES_HOME/logs/agent.log"`；`window_too_short` 表示该次上游整段下发，`no_visible_output` 表示该次收尾没拿到用量——先看这行前面约 50ms 内是否有 `thread=bg-review` 创建 agent（后台复审 fork 曾抢走本回合用量归属，v1.6.28 已修） |
+| 速度时有时无 | 检查 `HLS: speed hidden`：`incomplete_requests` 表示本轮有失败、缺失 usage、计时无效或未结束的请求，`measured/requests` 是已完整测量/全部请求数；整段下发本身不会隐藏速度 |
 | 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |
 | 改了但没效果 | 先看上面「陷阱：`hermes plugins install` 的中断残留」：`ls -a` 每个 home 的 `plugins/`，有 `.install-*` 就隔离掉再重启 |
 | Profile 用错 bot | 核对 `FeishuClient initialized` 的 `app_id`/`home` 对应该 Profile |

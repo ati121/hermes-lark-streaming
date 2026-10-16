@@ -12,7 +12,7 @@ from . import (
     _session_contexts_lock,
 )
 from .memory import _maybe_wrap_memory_prefetch
-from .usage import _maybe_wrap_api_usage
+from .usage import _maybe_wrap_api_usage, _totals_for_context
 
 def _eid_from_context(ctx: Any) -> str | None:
     if not isinstance(ctx, dict):
@@ -59,13 +59,9 @@ def _maybe_wrap_callbacks(agent) -> None:
     # questions) run Hermes' conversation loop on a throwaway agent that
     # deliberately shares the parent's session id and inherits the parent's
     # ContextVars, so the operator's live turn looks "current" to them too.
-    # Wrapping their callbacks would (a) overwrite ``ctx["_agent_ref"]``, which
-    # the completion hook reads for the output-speed numerator — the fork has
-    # not answered anything yet, so its captured usage is still ``None`` and a
-    # perfectly measurable turn turns into ``no_visible_output`` — and (b) route
-    # the fork's own reasoning/answer text into the user's card while it is
-    # still open.  ``_persist_disabled`` is Hermes' own marker for exactly these
-    # forks (see ``agent.background_review.build_cache_parity_fork``).
+    # Wrapping them would mix auxiliary requests and reasoning/answer text into
+    # the live card and replace its agent reference for cost/cache accounting.
+    # ``_persist_disabled`` is Hermes' marker for these detached forks.
     if getattr(agent, "_persist_disabled", False):
         _logger.debug(
             "HLS: skip detached fork (persist disabled) session=%s",
@@ -88,9 +84,15 @@ def _maybe_wrap_callbacks(agent) -> None:
     # Recheck before the callback guard so late/replaced managers are covered.
     _maybe_wrap_memory_prefetch(agent, lambda: _resolve_eid(None, agent))
 
-    # Refresh per-turn usage ownership even when cached callbacks are wrapped.
+    # Keep one accumulator in the turn context, not on the cached agent.
     ctx = _msg_ctx.get()
+    if ctx is None:
+        with _session_contexts_lock:
+            ctx = _session_contexts.get(str(getattr(agent, "session_id", None) or ""))
+        if ctx is None:
+            ctx = getattr(_thread_local_ctx, "data", None)
     if ctx is not None:
+        totals = _totals_for_context(ctx)
         ctx["_agent_ref"] = agent
         _thread_local_ctx.data = dict(ctx)
 
@@ -154,10 +156,10 @@ def _maybe_wrap_callbacks(agent) -> None:
         agent._touch_activity = _touch_activity_wrapper
         setattr(agent._touch_activity, "_hls_wrapper", True)
 
-    # Hermes fires ``on_first_delta`` at the wire-level boundary before it
-    # dispatches text, reasoning, or a tool name.  It remains a useful fallback
-    # for providers that do not expose the earlier response-open/raw-chunk
-    # seams above.  The wrapper is installed on the agent instance (not the
+    # Keep the first meaningful delta as a response-phase fallback for providers
+    # that do not expose the earlier receiving-stream activity seam above.
+    # These callbacks update status only; speed uses API request boundaries.
+    # The wrapper is installed on the agent instance (not the
     # class), is marked for idempotence, and always chains Hermes' own callback
     # exactly once.
     _current_streaming_call = getattr(agent, "_interruptible_streaming_api_call", None)
@@ -189,9 +191,8 @@ def _maybe_wrap_callbacks(agent) -> None:
         agent._interruptible_streaming_api_call = _streaming_call_wrapper
         setattr(agent._interruptible_streaming_api_call, "_hls_wrapper", True)
 
-    # Install outside the first-delta wrapper so its marker is preserved on
-    # cached agents, and capture usage before Hermes recomputes total_tokens.
-    _maybe_wrap_api_usage(agent)
+    if ctx is not None:
+        _maybe_wrap_api_usage(agent, totals)
 
     # Hermes emits the first meaningful event of a tool-only model response
     # through tool_gen_callback as soon as the function name is available.
