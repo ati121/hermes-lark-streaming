@@ -144,7 +144,7 @@ def _restore_answer_flush_snapshot(
 
 # NOTE: This is the *server-side flush interval* (how often we send
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
-_INTERACTIVE_INTERVAL_SEC = 1.5
+_INTERACTIVE_INTERVAL_SEC = 1.0
 _INTERACTIVE_COOLDOWN_SEC = 12.0
 _INTERACTIVE_RECOVERY_DELAYS = (20.0, 30.0, 60.0)
 

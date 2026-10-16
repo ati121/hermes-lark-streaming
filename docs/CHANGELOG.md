@@ -4,6 +4,15 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.31 (2026-10-16, personal fork)
+
+### Changed — faster interactive card refreshes
+
+- Reduce the minimum whole-card streaming PATCH interval from 1.5 seconds to
+  1 second. A larger configured interval still takes precedence.
+- Keep the rate-limit cooldown, terminal backoff, delayed repair, static-card
+  fallback, and interruption/deletion protections introduced in v1.30.
+
 ## v1.30 (2026-10-16, personal fork)
 
 ### Fixed — interactive cards recover after prolonged IM rate limits

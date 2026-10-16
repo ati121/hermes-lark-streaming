@@ -114,7 +114,7 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 | `streaming_panel_expanded` | `false` | bool | 流式态统一面板是否展开 |
 | `print_strategy` | `delay` | `fast`/`delay` | 打字机效果策略 |
 | `print_step` | `4` | 1–10 | 每次渲染字符数，需飞书 7.23+ |
-| `flush_interval_ms` | `500` | 70–2000 | 面板刷新间隔（毫秒）；普通 interactive 整卡更新另有至少 1500ms 的间隔，CardKit 正文使用独立流式节流 |
+| `flush_interval_ms` | `500` | 70–2000 | 面板刷新间隔（毫秒）；普通 interactive 整卡更新另有至少 1000ms 的间隔，CardKit 正文使用独立流式节流 |
 | `card_ttl_sec` | `600` | >0 | 卡片存活检测超时（秒） |
 | `max_tool_steps` | `20` | 1–100 | 面板显示的工具步骤上限 |
 | `max_reasoning_rounds` | `20` | 1–100 | 面板显示的推理轮次上限 |
@@ -217,7 +217,7 @@ hermes_lark_streaming:
 interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。字号配置在卡片创建时
 快照，同一张卡片整个流式生命周期固定不变；`/aowen config reload` 只影响新卡片。
 
-v1.30 起，普通 interactive 整卡更新采用独立保护：至少间隔 1.5 秒；收到飞书
+普通 interactive 整卡更新采用独立保护：v1.31 起至少间隔 1 秒（v1.30 为 1.5 秒）；收到飞书
 `230020` 后冷却 12 秒，期间合并内容而不反复 PATCH。完成态使用
 1/2/4/8/16 秒退避重试；仍受限时优先发送保留排版和字号的静态结果卡，并在
 后台间隔 20/30/60 秒有限次修复原卡。删除、会话清理或快照失效后停止修复；

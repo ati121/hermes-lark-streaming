@@ -78,13 +78,15 @@ async def drain_recovery(session):
 
 
 @pytest.mark.asyncio
-async def test_interactive_throttle_has_independent_floor(card_session):
+@pytest.mark.parametrize("configured_ms, expected_sec", [(500, 1.0), (1000, 1.0), (2000, 2.0)])
+async def test_interactive_throttle_has_independent_floor(card_session, configured_ms, expected_sec):
     ctrl, session = card_session
+    ctrl._cfg._raw["hermes_lark_streaming"]["flush_interval_ms"] = configured_ms
     session.state = STREAMING
     session._first_flush_done = True
     with patch.object(session.flush, "schedule_update") as schedule:
         ctrl._schedule_linear_flush(session)
-    assert session.flush.throttle_ms >= 1.5
+    assert session.flush.throttle_ms == expected_sec
     schedule.assert_called_once()
 
 
