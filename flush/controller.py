@@ -27,6 +27,7 @@ class FlushController:
         self._needs_reflush = False
         self._pending_timer: asyncio.TimerHandle | None = None
         self._last_update_time = 0.0
+        self._cooldown_until = 0.0
         self._completed = False
         self._card_message_ready = False
         self._flush_resolvers: list[asyncio.Future[None]] = []
@@ -60,6 +61,20 @@ class FlushController:
     def last_update_time(self) -> float:
         return self._last_update_time
 
+    @property
+    def cooldown_until(self) -> float:
+        return self._cooldown_until
+
+    def set_cooldown(self, seconds: float) -> None:
+        """Pause scheduling after a remote rate-limit response.
+
+        Dirty state remains owned by the caller, so the next scheduled flush
+        sends the latest complete card instead of replaying every rejected
+        intermediate frame.
+        """
+        until = time.monotonic() + max(0.0, seconds)
+        self._cooldown_until = max(self._cooldown_until, until)
+
     def schedule_update(self, do_flush: Callable[[], Awaitable[None]]) -> None:
         """do_flush: async callable，执行实际 API 调用."""
         if self._completed or not self._card_message_ready:
@@ -74,6 +89,10 @@ class FlushController:
         if self._completed or not self._card_message_ready:
             return
         now = time.monotonic()
+        if now < self._cooldown_until:
+            if self._pending_timer is None:
+                self._schedule(delay=self._cooldown_until - now, do_flush=do_flush)
+            return
         elapsed = now - self._last_update_time
 
         if elapsed >= self._throttle_ms:
@@ -142,8 +161,16 @@ class FlushController:
         task.add_done_callback(self._pending_flush_tasks.discard)
 
     async def _do_flush(self, do_flush: Callable[[], Awaitable[None]]) -> None:
-        if self._completed or self._flush_in_progress:
+        if self._completed:
+            return
+        if self._flush_in_progress:
             self._needs_reflush = True
+            return
+        # Applies to timers, forced first-frame flushes and in-flight reflushes.
+        # A queued timer may predate a newly extended cooldown.
+        if time.monotonic() < self._cooldown_until:
+            self._cancel_timer()
+            self._schedule_update_on_loop(do_flush)
             return
 
         self._flush_in_progress = True

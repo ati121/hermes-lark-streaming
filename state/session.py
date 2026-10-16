@@ -10,21 +10,21 @@ from typing import TYPE_CHECKING, Any
 
 # Phase constants — single source of truth in state.phase
 from .phase import (
+    _TERMINAL,
+    TERMINAL_PHASES,
     CardPhase,
     TerminalReason,
-    TERMINAL_PHASES,
-    _TERMINAL,
     is_legal_transition,
 )
 
 # Backward-compatible alias — old code imports IDLE from this module
 IDLE = CardPhase.IDLE
 
+from ..feishu import UnavailableGuard
 from ..flush import FlushController
 from .linear import UnifiedLinearState
 from .text import ReasoningStreamSplitter, TextState
 from .tooluse import ToolUseTracker
-from ..feishu import UnavailableGuard
 
 if TYPE_CHECKING:
     pass
@@ -40,8 +40,11 @@ class CardSession:
         "_continuation_reactivation_count",
         "_create_epoch_snap",
         "_creation_stages",
+        "_completion_started",
+        "_disposed",
         "_first_flush_done",
         "_is_continuation",
+        "_interactive_seal_started",
         "_loading_label",
         "_loading_label_supported",
         "_loading_status_key",
@@ -72,11 +75,13 @@ class CardSession:
         "existing_elements",
         "flush",
         "footer",
+        "fallback_card",
         "guard",
         "linear",
         "interactive_mode",
         "message_id",
         "sequence",
+        "seal_task",
         "state",
         "terminal_reason",
         "terminal_source",
@@ -108,6 +113,11 @@ class CardSession:
         self._loop = loop
         self.flush = FlushController(loop=loop)
         self.footer: dict[str, Any] = {}
+        self.fallback_card: dict[str, Any] | None = None
+        self.seal_task: asyncio.Task[None] | None = None
+        self._completion_started = False
+        self._interactive_seal_started = False
+        self._disposed = False
         self.text_sizes: dict[str, str | dict[str, str]] = {}
         self.sequence = 1
         self.created_at = time.time()

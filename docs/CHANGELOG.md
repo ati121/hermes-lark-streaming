@@ -4,6 +4,28 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.30 (2026-10-16, personal fork)
+
+### Fixed — interactive cards recover after prolonged IM rate limits
+
+- Preserve PC/mobile text sizes while limiting whole-card streaming PATCHes to
+  at most one every 1.5 seconds (or the configured interval, if larger).
+- On IM frequency-limit code `230020`, pause streaming updates for 12 seconds
+  and coalesce new content into the next snapshot. Forced and first-frame
+  flushes cannot bypass the cooldown; a rejected update no longer resets the
+  first-visible-content fast path.
+- Give terminal PATCHes five retries with 1/2/4/8/16-second backoff. Other
+  transient errors keep their short retry budget, including mixed failures.
+- If terminal rate limiting persists, retain the final card and try repairing
+  the original message after another 20, 30, and 60 seconds. Retries are bounded,
+  target only the original card, and stop on cleanup, deletion, replacement,
+  or invalidated snapshots.
+- Deliver a static result card before resorting to plain text. Preserve the
+  final layout and device-size snapshot; reasoning buttons on a replacement
+  reply target that reply rather than the original message.
+- Make completion idempotent, drain in-flight streaming updates before sealing,
+  and preserve stopped status if an interruption arrives during terminal retry.
+
 ## v1.29 (2026-10-16, personal fork)
 
 ### Changed — rebuild card speed as per-turn request throughput

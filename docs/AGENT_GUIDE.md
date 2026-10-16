@@ -114,7 +114,7 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 | `streaming_panel_expanded` | `false` | bool | 流式态统一面板是否展开 |
 | `print_strategy` | `delay` | `fast`/`delay` | 打字机效果策略 |
 | `print_step` | `4` | 1–10 | 每次渲染字符数，需飞书 7.23+ |
-| `flush_interval_ms` | `500` | 70–2000 | 流式刷新间隔（毫秒）。默认 2 次/秒，给飞书 IM 接口的 5 QPS 上限留余量 |
+| `flush_interval_ms` | `500` | 70–2000 | 面板刷新间隔（毫秒）；普通 interactive 整卡更新另有至少 1500ms 的间隔，CardKit 正文使用独立流式节流 |
 | `card_ttl_sec` | `600` | >0 | 卡片存活检测超时（秒） |
 | `max_tool_steps` | `20` | 1–100 | 面板显示的工具步骤上限 |
 | `max_reasoning_rounds` | `20` | 1–100 | 面板显示的推理轮次上限 |
@@ -216,6 +216,12 @@ hermes_lark_streaming:
 未配置 `text_sizes` 时，Card JSON 必须保持原样。配置启用后，飞书使用普通
 interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。字号配置在卡片创建时
 快照，同一张卡片整个流式生命周期固定不变；`/aowen config reload` 只影响新卡片。
+
+v1.30 起，普通 interactive 整卡更新采用独立保护：至少间隔 1.5 秒；收到飞书
+`230020` 后冷却 12 秒，期间合并内容而不反复 PATCH。完成态使用
+1/2/4/8/16 秒退避重试；仍受限时优先发送保留排版和字号的静态结果卡，并在
+后台间隔 20/30/60 秒有限次修复原卡。删除、会话清理或快照失效后停止修复；
+只有静态卡发送也失败时才退回纯文本。后台修复只在当前进程内生效，不跨重启恢复。
 
 ### 思考过程块
 
@@ -482,7 +488,7 @@ grep -oE "capability_check plugin=[^ ]+" "$HERMES_HOME/logs/agent.log" | sort -u
 | 没有卡片 | `hermes plugins list` 是否启用、凭据是否存在、日志是否有 `HLS:` |
 | 元素超限（300305） | 降低 `max_tool_steps`/`max_reasoning_rounds`；代码有最终安全网 |
 | Schema 错误（300315） | 检查 CardKit v2 卡片结构和字号值是否合法 |
-| 流式卡片卡住 | 增大 `card_ttl_sec`，确认卡片未被删除/撤回 |
+| 流式卡片卡住 / 230020 | 确认使用 v1.30 或更新版本；限流时会合并刷新并尝试封口修复，仍失败则先发静态结果卡；确认消息未被删除/撤回，增大 TTL 不能解除飞书限流 |
 | 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
 | 速度时有时无 | 检查 `HLS: speed hidden`：`incomplete_requests` 表示本轮有失败、缺失 usage、计时无效或未结束的请求，`measured/requests` 是已完整测量/全部请求数；整段下发本身不会隐藏速度 |
 | 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |

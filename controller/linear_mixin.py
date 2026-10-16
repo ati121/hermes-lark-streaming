@@ -9,52 +9,57 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from ..cardkit import (
-    ANSWER_ELEMENT_ID,
-    UNIFIED_PANEL_ELEMENT_ID,
     _LOADING_ELEMENT_ID,
     _LOADING_HINT_ELEMENT_ID,
+    ANSWER_ELEMENT_ID,
+    UNIFIED_PANEL_ELEMENT_ID,
+    _count_tag_objects,
+    _enforce_card_element_limit,
     _loading_element,
     _loading_hint_element,
     _loading_status_text,
     _role_text_size,
     _streaming_element,
-    build_streaming_card_v2,
     build_interactive_card_v2,
-    build_unified_panel,
     build_preservative_seal_actions,
-    _count_tag_objects,
-    _enforce_card_element_limit,
+    build_streaming_card_v2,
+    build_unified_panel,
 )
-from ..cardkit.md import _downgrade_tables, escape_markdown_asterisks, optimize_markdown_style
-from ..state.linear import UnifiedLinearState
-from ..state.text import split_reasoning_text
+from ..cardkit.md import (
+    _downgrade_tables,
+    escape_markdown_asterisks,
+    optimize_markdown_style,
+)
 from ..feishu import (
     CARDKIT_SCHEMA_ERROR,
     CARDKIT_SEQUENCE_CONFLICT,
     CARDKIT_STREAMING_CLOSED,
+    IM_FREQUENCY_LIMIT,
     FeishuAPIError,
     is_element_not_found_error,
     is_schema_error,
     is_terminal_api_code,
+    is_unavailable,
 )
-
+from ..state.linear import UnifiedLinearState
+from ..state.phase import TerminalReason
+from ..state.text import split_reasoning_text
 from .mixin import (
     _TERMINAL,
     ABORTED,
     COMPLETED,
     COMPLETING,
-    CREATION_FAILED,
     CREATING,
+    CREATION_FAILED,
     IDLE,
     STREAMING,
     TERMINATED,
 )
-from ..state.phase import TerminalReason
 
 if TYPE_CHECKING:
     from ..config import Config
-    from ..state.session import CardSession
     from ..feishu import FeishuClient
+    from ..state.session import CardSession
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -139,6 +144,9 @@ def _restore_answer_flush_snapshot(
 
 # NOTE: This is the *server-side flush interval* (how often we send
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
+_INTERACTIVE_INTERVAL_SEC = 1.5
+_INTERACTIVE_COOLDOWN_SEC = 12.0
+_INTERACTIVE_RECOVERY_DELAYS = (20.0, 30.0, 60.0)
 
 # Spinner-row emoji for the no-tool state. Tools bring their own (see
 # ``_tool_emoji``); this keeps the row's shape when the turn switches between
@@ -443,6 +451,12 @@ class UnifiedControllerMixin:
             session._pending_flush = True
             return
 
+        if session.interactive_mode:
+            session.flush.set_throttle(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
+            if session.flush.cooldown_until > _time.monotonic():
+                session.flush.schedule_update(lambda: self._do_unified_flush(session))
+                return
+
         if force and not state.has_dirty:
             # Status-only transition (waiting -> thinking). Do not consume the
             # first-visible-content fast path and do not flush every reasoning
@@ -475,8 +489,7 @@ class UnifiedControllerMixin:
 
         _answer_only = state.answer_dirty and not state.panel_dirty and not state.tool_steps_dirty
         if session.interactive_mode:
-            # 普通消息整卡 PATCH 的最小间隔与 Bailey 原实现保持一致。
-            session.flush.set_throttle(max(self._cfg.flush_interval_sec, 0.2))
+            session.flush.set_throttle(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
         elif _answer_only:
             session.flush.set_throttle(_ANSWER_FAST_STREAM_MS)
         else:
@@ -498,31 +511,41 @@ class UnifiedControllerMixin:
         if session.interactive_mode:
             if not session.card_msg_id:
                 return
-            pending_panel = state.panel_dirty
-            pending_answer = state.answer_dirty
-            pending_tools = state.tool_steps_dirty
+            session.flush.set_cooldown(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
             try:
-                card = self._build_interactive_linear_card(session)
-                # 先消费本轮标记；等待 PATCH 时到达的新事件会重新置脏，不能被覆盖。
-                state.panel_dirty = False
-                state.answer_dirty = False
-                state.tool_steps_dirty = False
+                with session._stream_lock:
+                    pending_panel = state.panel_dirty
+                    pending_answer = state.answer_dirty
+                    pending_tools = state.tool_steps_dirty
+                    card = self._build_interactive_linear_card(session)
+                    state.panel_dirty = False
+                    state.answer_dirty = False
+                    state.tool_steps_dirty = False
                 await self._client.update_card(session.card_msg_id, card)
             except asyncio.CancelledError:
-                state.panel_dirty = state.panel_dirty or pending_panel
-                state.answer_dirty = state.answer_dirty or pending_answer
-                state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
-                session._first_flush_done = False
+                with session._stream_lock:
+                    state.panel_dirty = state.panel_dirty or pending_panel
+                    state.answer_dirty = state.answer_dirty or pending_answer
+                    state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
                 raise
             except Exception as e:
-                state.panel_dirty = state.panel_dirty or pending_panel
-                state.answer_dirty = state.answer_dirty or pending_answer
-                state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
+                with session._stream_lock:
+                    state.panel_dirty = state.panel_dirty or pending_panel
+                    state.answer_dirty = state.answer_dirty or pending_answer
+                    state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
                 _logger.warning(
                     "interactive card update failed: %s msg=%s",
                     e, (session.card_msg_id or "?")[:12],
                 )
-                session._first_flush_done = False
+                if isinstance(e, FeishuAPIError) and e.code == IM_FREQUENCY_LIMIT:
+                    # Coalesce all updates rejected by IM frequency limits and
+                    # retry only after the provider's rejection window cools.
+                    session.flush.set_cooldown(_INTERACTIVE_COOLDOWN_SEC)
+                elif isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
+                    session.guard.terminate("interactive_flush", err=e)
+                    session.flush.mark_completed()
+                    return
+                self._schedule_linear_flush(session, force=True)
                 return
             if state.panel_visible:
                 session._creation_stages.add("panel")
@@ -1737,7 +1760,12 @@ class UnifiedControllerMixin:
 
     async def _do_interactive_linear_complete(self, session: CardSession) -> bool:
         """通过整卡替换完成使用设备差异字号的普通 IM 卡片。"""
+        with session._stream_lock:
+            if session._interactive_seal_started or session._disposed:
+                return True
+            session._interactive_seal_started = True
         session.flush.mark_completed()
+        await session.flush.wait_for_flush()
         try:
             await asyncio.wait_for(session._card_ready.wait(), timeout=30.0)
         except asyncio.TimeoutError:
@@ -1770,37 +1798,151 @@ class UnifiedControllerMixin:
             or (bool(error_message) and not is_aborted)
         )
 
+        message_id = session.card_msg_id
+        epoch = session.create_epoch
+        card = None
         try:
-            card = self._build_interactive_linear_card(
-                session,
-                final=True,
-                footer_data=footer_data,
-                is_error=is_error,
-                is_aborted=is_aborted,
-                error_message=error_message,
-                footer_fields=self._cfg.footer_fields,
-                footer_show_label=self._cfg.footer_show_label,
-            )
-            # 终态封口只有这一次机会：拿不到它，卡片就永远停在「思考中」，
-            # 而且上层会退化成裸文本回复（见 _do_linear_complete_with_fallback）。
-            # 所以只有这里为 IM 频控（230020）开退避重试（1/2/4s）；流式刷新
-            # 那条热路径不开，撞上限流就放弃本轮、等下一轮覆盖。
-            await self._client.update_card(
-                session.card_msg_id, card, retry_frequency_limit=True,
-            )
+            while self._interactive_seal_is_current(session, message_id, epoch):
+                is_aborted = session._was_aborted or session.state == ABORTED
+                card = self._build_interactive_linear_card(
+                    session,
+                    final=True,
+                    footer_data=footer_data,
+                    is_error=is_error,
+                    is_aborted=is_aborted,
+                    error_message=error_message,
+                    footer_fields=self._cfg.footer_fields,
+                    footer_show_label=self._cfg.footer_show_label,
+                )
+                session.fallback_card = card
+                await self._client.update_card(
+                    message_id, card, retry_frequency_limit=True,
+                    should_update=lambda is_aborted=is_aborted: (
+                        self._interactive_seal_is_current(session, message_id, epoch)
+                        and (session._was_aborted or session.state == ABORTED) == is_aborted
+                    ),
+                )
+                if (session._was_aborted or session.state == ABORTED) == is_aborted:
+                    break
+                # /stop during a backoff invalidates the normal-completion
+                # snapshot. Rebuild once with the now-stopped terminal status.
+            if not self._interactive_seal_is_current(session, message_id, epoch):
+                session.fallback_card = None
+                return True
         except Exception as e:
             _logger.warning(
                 "interactive card seal failed: %s msg=%s",
-                e, session.card_msg_id[:12],
+                e, message_id[:12],
             )
+            if isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
+                session.guard.terminate("interactive_seal", err=e)
+                session.fallback_card = None
+                return True
+            if not self._interactive_seal_is_current(session, message_id, epoch):
+                session.fallback_card = None
+                return True
+            if card is not None and (session._was_aborted or session.state == ABORTED) != is_aborted:
+                # A stop can arrive during the last rejected HTTP request,
+                # not only during backoff. Fallback/repair must carry it too.
+                card = self._build_interactive_linear_card(
+                    session, final=True, footer_data=footer_data,
+                    is_error=is_error, is_aborted=True,
+                    error_message=error_message,
+                    footer_fields=self._cfg.footer_fields,
+                    footer_show_label=self._cfg.footer_show_label,
+                )
+                session.fallback_card = card
             session.state = CREATION_FAILED
             session.enter_terminal(
                 reason=TerminalReason.CREATION_FAILED,
                 source="_do_interactive_linear_complete_seal_failed",
             )
+            if isinstance(e, FeishuAPIError) and e.code == IM_FREQUENCY_LIMIT and card:
+                self._schedule_interactive_seal_recovery(session, message_id, card)
+            self._release_session_data(session)
             return False
 
+        session.fallback_card = None
+        self._finish_interactive_seal(session)
+        return True
+
+    def _interactive_seal_is_current(
+        self, session: CardSession, message_id: str, epoch: int,
+    ) -> bool:
+        """Never redirect a saved final card to a replacement message/session."""
+        current = self._sess_get(session.message_id)
+        return (
+            not session._disposed
+            and session.state != TERMINATED
+            and session.card_msg_id == message_id
+            and session.create_epoch == epoch
+            and (current is None or current is session)
+            and not is_unavailable(message_id)
+            and not session.guard.should_skip("interactive_seal")
+        )
+
+    def _schedule_interactive_seal_recovery(
+        self, session: CardSession, message_id: str, card: dict[str, Any],
+    ) -> None:
+        if session.seal_task is not None or session._disposed:
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._recover_interactive_seal(
+                session, message_id, card,
+                epoch=session.create_epoch, was_aborted=session._was_aborted,
+            ),
+        )
+        session.seal_task = task
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def _recover_interactive_seal(
+        self, session: CardSession, message_id: str, card: dict[str, Any],
+        *, epoch: int, was_aborted: bool,
+    ) -> None:
+        """Bounded repair of the original frozen card; never sends more replies."""
+
+        def still_current() -> bool:
+            return (
+                self._sess_get(session.message_id) is session
+                and self._interactive_seal_is_current(session, message_id, epoch)
+                and session.state == CREATION_FAILED
+                and session._was_aborted == was_aborted
+            )
+
+        try:
+            for delay in _INTERACTIVE_RECOVERY_DELAYS:
+                await asyncio.sleep(delay)
+                if not still_current() or self._client is None:
+                    return
+                try:
+                    await self._client.update_card(
+                        message_id, card, should_update=still_current,
+                    )
+                except FeishuAPIError as e:
+                    if is_terminal_api_code(e.code):
+                        session.guard.terminate("interactive_seal_recovery", err=e)
+                        return
+                    if e.code != IM_FREQUENCY_LIMIT:
+                        _logger.warning("interactive seal recovery rejected", exc_info=True)
+                        return
+                    continue
+                except Exception:
+                    _logger.warning("interactive seal recovery failed", exc_info=True)
+                    return
+                if still_current():
+                    self._finish_interactive_seal(session)
+                    _logger.info("interactive seal recovered: msg=%s", message_id[:12])
+                return
+            _logger.warning("interactive seal recovery exhausted: msg=%s", message_id[:12])
+        finally:
+            session.seal_task = None
+
+    def _finish_interactive_seal(self, session: CardSession) -> None:
+        session.fallback_card = None
         session.state = ABORTED if session._was_aborted else COMPLETED
+        session.terminal_reason = TerminalReason.ABORT if session._was_aborted else TerminalReason.NORMAL
+        session.terminal_source = "interactive_seal"
         try:
             self._release_session_data(session)
         except Exception:
@@ -1810,7 +1952,6 @@ class UnifiedControllerMixin:
             record_card_completed()
         except Exception:
             _logger.debug("metrics: record_card_completed failed", exc_info=True)
-        return True
 
 __all__ = [
     "UnifiedControllerMixin",

@@ -2890,6 +2890,8 @@ class TestReasoningToggle:
         ctrl._cfg._reload_cached = lambda: {"display": {"platforms": {"feishu": {"show_reasoning": True}}}}  # type: ignore[assignment]
         session = _make_session("msg_toggle_live", linear=True)
         session.card_msg_id = "msg_toggle_live"
+        session.card_id = "im:msg_toggle_live"
+        session.flush.set_card_message_ready(True)
         session.interactive_mode = True
         session.state = STREAMING
         session.unified_state.on_reasoning_delta("想一想")

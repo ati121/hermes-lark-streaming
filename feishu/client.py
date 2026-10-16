@@ -109,7 +109,7 @@ CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
 CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
-# IM 通道频控（im.v1.message.apatch 返回）：单聊/群维度 QPS ≤ 5。
+# IM 通道频控（含单条消息更新过于频繁）。
 # 与 CardKit 那组码不同源，故不放进 CARDKIT_TRANSIENT_CODES —— 详见
 # _retry_transient 的 frequency_limit_delays 参数。
 IM_FREQUENCY_LIMIT = 230020
@@ -130,9 +130,9 @@ CARDKIT_TRANSIENT_CODES = {
 _TRANSIENT_RETRY_DELAYS = (0.1, 0.3, 0.6)  # 3 次重试，递增延迟
 _TRANSIENT_MAX_RETRIES = len(_TRANSIENT_RETRY_DELAYS)
 
-# 频控退避要长得多：飞书的限流窗口是秒级，0.1/0.3/0.6 这条序列根本跨不出去，
-# 只会把三个请求全撞在同一个窗口里。1/2/4 秒才够一个窗口翻篇。
-_FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0)
+# IM rejection windows can last tens of seconds. Keep this budget separate
+# from short network/CardKit retries so streaming updates never block on it.
+_FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 _ELEMENT_NOT_FOUND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 _ELEMENT_NOT_FOUND_MAX_RETRIES = len(_ELEMENT_NOT_FOUND_RETRY_DELAYS)
@@ -177,7 +177,7 @@ class FeishuClientConfig:
             raise ValueError("app_secret is required")
 
 def _is_frequency_limit(e: FeishuAPIError) -> bool:
-    """230020: 飞书 IM 接口频控（单聊/群维度 QPS ≤ 5）.
+    """230020: 飞书 IM 接口频控（也可能是单条消息更新过于频繁）.
 
     这个码默认不重试 —— 它的成因是"这一秒发太多了"，而插件最密集的调用
     恰恰是流式刷新：那些渲染下一轮就会被更新的内容覆盖，为它们退避等待
@@ -221,7 +221,7 @@ class FeishuClient:
         operation: str,
         coro_factory: Callable[[], Any],
         *,
-        max_retries: int = _TRANSIENT_MAX_RETRIES,
+        max_retries: int | None = None,
         frequency_limit_delays: tuple[float, ...] | None = None,
     ) -> Any:
         """执行协程，遇到 CardKit 瞬态错误时自动重试.
@@ -231,8 +231,14 @@ class FeishuClient:
         的 —— 流式刷新撞上限流时应该放弃本轮，让下一轮渲染覆盖掉，而不是在
         热路径上阻塞几秒把刷新越堆越多（见 _is_frequency_limit 的注释）。
         """
+        transient_limit = _TRANSIENT_MAX_RETRIES if max_retries is None else max_retries
+        frequency_limit = (
+            len(frequency_limit_delays)
+            if max_retries is None and frequency_limit_delays
+            else transient_limit
+        )
         last_error: FeishuAPIError | None = None
-        for attempt in range(max_retries + 1):
+        for attempt in range(max(transient_limit, frequency_limit) + 1):
             try:
                 result = await coro_factory()
                 # v1.1.0: Record successful API call
@@ -244,19 +250,21 @@ class FeishuClient:
                 return result
             except FeishuAPIError as e:
                 last_error = e
-                if _is_frequency_limit(e) and frequency_limit_delays is not None:
+                if _is_frequency_limit(e) and frequency_limit_delays:
                     delays: tuple[float, ...] = frequency_limit_delays
+                    retry_limit = frequency_limit
                     note = " (frequency limit)"
                 elif _is_transient_error(e):
                     delays = _TRANSIENT_RETRY_DELAYS
+                    retry_limit = transient_limit
                     note = ""
                 else:
                     raise
-                if attempt < max_retries:
+                if attempt < retry_limit:
                     delay = delays[min(attempt, len(delays) - 1)]
                     _logger.info(
                         "transient retry%s: %s attempt=%d/%d code=%s delay=%.2fs",
-                        note, operation, attempt + 1, max_retries, e.code, delay,
+                        note, operation, attempt + 1, retry_limit, e.code, delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -266,22 +274,22 @@ class FeishuClient:
                 raise
             except _NETWORK_ERROR_BASES as e:
                 # v1.3.4 fix (P1): 网络错误（httpx ConnectError/ReadTimeout 等）
-                if attempt < max_retries:
-                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                if attempt < transient_limit:
+                    delay = _TRANSIENT_RETRY_DELAYS[min(attempt, len(_TRANSIENT_RETRY_DELAYS) - 1)]
                     _logger.info(
                         "transient retry (network): %s attempt=%d/%d error=%s delay=%.2fs",
-                        operation, attempt + 1, max_retries, type(e).__name__, delay,
+                        operation, attempt + 1, transient_limit, type(e).__name__, delay,
                     )
                     await asyncio.sleep(delay)
                     continue
                 raise
             except _TOKEN_ERROR_BASES as e:
                 # v1.3.4 fix (P1): token 刷新失败（ObtainAccessTokenException）
-                if attempt < max_retries:
-                    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+                if attempt < transient_limit:
+                    delay = _TRANSIENT_RETRY_DELAYS[min(attempt, len(_TRANSIENT_RETRY_DELAYS) - 1)]
                     _logger.info(
                         "transient retry (token): %s attempt=%d/%d error=%s delay=%.2fs",
-                        operation, attempt + 1, max_retries, type(e).__name__, delay,
+                        operation, attempt + 1, transient_limit, type(e).__name__, delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -428,6 +436,7 @@ class FeishuClient:
         card: dict[str, Any],
         *,
         retry_frequency_limit: bool = False,
+        should_update: Callable[[], bool] | None = None,
     ) -> None:
         """PATCH 更新已发送的卡片（IM PATCH 通道）.
 
@@ -436,10 +445,17 @@ class FeishuClient:
         的调用才传 True。
         """
         async def _do() -> None:
+            # Recheck after every backoff; the original session/card may have
+            # been disposed, replaced, or stopped while this request slept.
+            if should_update is not None and not should_update():
+                return
+            content = await self._card_json(card)
+            if should_update is not None and not should_update():
+                return
             request = (
                 PatchMessageRequest.builder()
                 .message_id(message_id)
-                .request_body(PatchMessageRequestBody.builder().content(await self._card_json(card)).build())
+                .request_body(PatchMessageRequestBody.builder().content(content).build())
                 .build()
             )
             resp = await self._client.im.v1.message.apatch(request)

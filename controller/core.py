@@ -115,7 +115,26 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     def _sess_clear(self) -> None:
         """Thread-safe clear of all sessions (used by unregister)."""
         with self._sessions_lock:
+            sessions = list(self._sessions.values())
             self._sessions.clear()
+        for session in sessions:
+            self._dispose_session(session)
+
+    @staticmethod
+    def _dispose_session(session: CardSession) -> None:
+        """Invalidate snapshots before cancelling work on its owning loop."""
+        session.flush.mark_completed()
+        if not isinstance(session, CardSession):
+            return
+        session._disposed = True
+        session.fallback_card = None
+        task = session.seal_task
+        session.seal_task = None
+        if task is not None and not task.done():
+            try:
+                task.get_loop().call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                _logger.debug("seal recovery loop already closed")
 
     @property
     def enabled(self) -> bool:
@@ -1096,6 +1115,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 if (x.card_msg_id or "") == card_msg_id:
                     session = x
                     break
+        if session is not None and session.seal_task is not None:
+            # Repair owns the final snapshot until it lands. A button PATCH
+            # racing it would consume the cooldown or restore an older frame.
+            return
         if session is not None and session.unified_state is not None:
             await self._toggle_reasoning_live_session(session, expanded)
             return
@@ -1138,19 +1161,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             # "Processing..."。封口卡自己会按 reasoning_expanded 渲染，这里只改标志。
             return
         if getattr(session, "interactive_mode", False) and session.card_msg_id and self._client is not None:
-            try:
-                card = self._build_interactive_linear_card(
-                    session,
-                    final=bool(session.is_terminal_phase),
-                    footer_data=session.footer,
-                    is_aborted=getattr(session, "_was_aborted", False),
-                    error_message=getattr(session, "error_message", "") or "",
-                    footer_fields=self._cfg.footer_fields,
-                    footer_show_label=self._cfg.footer_show_label,
-                )
-                await self._client.update_card(session.card_msg_id, card)
-            except Exception:
-                _logger.warning("HLS: reasoning toggle card update failed", exc_info=True)
+            # Buttons share the stream queue: they must respect its cooldown
+            # and be drained before sealing, rather than PATCHing an old frame
+            # after the final card has already landed.
+            state.panel_dirty = True
+            await session.flush.flush_now(lambda: self._do_unified_flush(session))
             return
         # CardKit 实体卡路径目前不渲染思考块按钮；保守起见仍调度一次
         # 元素级刷新，让状态变化在下一轮 flush 里生效。
@@ -1724,7 +1739,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             stale_cont_keys = [k for k, v in self._continuation_map.items() if v == message_id]
             for k in stale_cont_keys:
                 del self._continuation_map[k]
-        session.flush.mark_completed()
+        self._dispose_session(session)
 
     def _release_session_data(self, session: CardSession) -> None:
         """完成后释放重数据，仅保留最小元数据供 TTL 追踪."""
@@ -1749,7 +1764,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._fire_and_forget(self._do_linear_complete_with_fallback(session), session._loop)
 
     async def _do_linear_complete_with_fallback(self, session: CardSession) -> None:
-        """线性模式完成，卡片不可用时回退为文本回复."""
+        """Complete once, preferring a static result card over plain text."""
+        with session._stream_lock:
+            if session._completion_started or session._disposed:
+                return
+            session._completion_started = True
         # Snapshot fallback text before _do_linear_complete potentially releases it
         _fallback_text = ""
         if session.error_message:
@@ -1760,16 +1779,68 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _fallback_text = session.text.display_text
 
         try:
+            if _fallback_text.strip():
+                from ..cardkit import _streaming_element, build_interactive_card_v2
+                from ..cardkit.md import optimize_markdown_style
+                session.fallback_card = build_interactive_card_v2(
+                    elements=[_streaming_element(
+                        content=optimize_markdown_style(_fallback_text) or _fallback_text,
+                        text_sizes=session.text_sizes,
+                    )],
+                    summary=_fallback_text[:120],
+                    text_sizes=session.text_sizes,
+                )
             result = await self._do_linear_complete(session)
             if not result:
-                await self._send_text_fallback(session, fallback_text=_fallback_text)
+                await self._send_card_or_text_fallback(
+                    session, fallback_text=_fallback_text,
+                )
+            else:
+                session.fallback_card = None
         except Exception:
             _logger.warning(
                 "linear complete with fallback failed: msg=%s",
                 (session.message_id or "?")[:12],
                 exc_info=True,
             )
-            await self._send_text_fallback(session, fallback_text=_fallback_text)
+            await self._send_card_or_text_fallback(
+                session, fallback_text=_fallback_text,
+            )
+
+    async def _send_card_or_text_fallback(
+        self, session: CardSession, *, fallback_text: str = "",
+    ) -> None:
+        """Reply with the final static card before falling back to plain text."""
+        if session._disposed or session.state == TERMINATED or session.guard.should_skip("fallback"):
+            session.fallback_card = None
+            return
+        card = session.fallback_card
+        session.fallback_card = None
+        if self._client and card:
+            try:
+                reply_id = session.anchor_id or session.message_id
+                fallback_id = await self._client.reply_card(reply_id, card)
+                original = self._rsn_map().get(session.card_msg_id)
+                if isinstance(fallback_id, str) and fallback_id and isinstance(original, dict):
+                    # The replacement reply has its own reasoning buttons and
+                    # must not redirect them to the original, still-frozen card.
+                    self._rsn_map()[fallback_id] = {
+                        **original, "card": card, "card_msg_id": fallback_id,
+                        "card_id": "im:" + fallback_id,
+                    }
+                    self._trim_rsn_map(self._rsn_map())
+                _logger.info(
+                    "static card fallback sent: msg=%s",
+                    (session.message_id or "?")[:12],
+                )
+                return
+            except Exception:
+                _logger.warning(
+                    "static card fallback failed: msg=%s",
+                    (session.message_id or "?")[:12],
+                    exc_info=True,
+                )
+        await self._send_text_fallback(session, fallback_text=fallback_text)
 
     async def _send_text_fallback(self, session: CardSession, *, fallback_text: str = "") -> None:
         """卡片不可用时，通过飞书 API 发送文本回复作为兜底."""
