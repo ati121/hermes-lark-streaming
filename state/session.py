@@ -43,10 +43,11 @@ class CardSession:
         "_first_flush_done",
         "_is_continuation",
         "_interactive_seal_started",
+        "_loading_brand",
+        "_loading_hint_state",
         "_loading_label",
         "_loading_label_supported",
         "_loading_status_key",
-        "_loading_hint_state",
         "_loop",
         "_memory_prefetch_requests",
         "_image_analysis_requests",
@@ -166,6 +167,9 @@ class CardSession:
         self._loading_label_supported: bool = True
         # Status text on that same row when no tool is running (model_thinking).
         self._loading_status_key: str | None = None
+        # Artwork name pushed on that row (``github``), so a tool switch that
+        # only changes the brand is not skipped as "same label".
+        self._loading_brand: str | None = None
         self._loading_hint_state: str = "loading_context"
 
     @property

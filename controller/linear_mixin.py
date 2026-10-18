@@ -466,18 +466,19 @@ class UnifiedControllerMixin:
                 if action.get("action") == "add_elements":
                     elements.extend(action.get("params", {}).get("elements", []))
         else:
-            label, status_key, emoji = self._current_loading_status(session)
+            label, status_key, emoji, brand = self._current_loading_status(session)
             if (not elements or _only_preparation_records(session)) and session._response_phase in ("waiting", "compression"):
                 # Before the first model byte, the reversible context row owns
                 # waiting, memory retrieval and compression. The spinner takes over after
                 # model activity starts (or when content already exists).
                 hint_status = self._loading_hint_status(session)
                 elements.append(_loading_hint_element(hint_status))
-                label, status_key, emoji = None, None, None
+                label, status_key, emoji, brand = None, None, None, None
             elements.append(_loading_element(
                 label,
                 status_key=status_key,
                 emoji=emoji,
+                brand=brand,
                 text_sizes=session.text_sizes,
             ))
 
@@ -548,11 +549,11 @@ class UnifiedControllerMixin:
                     # Creation races the stream: if upstream already spoke, skip
                     # the waiting hint entirely and let the spinner row open on
                     # 模型思考中 rather than flashing a stale 等待上游模型响应.
-                    label, status_key, emoji = self._current_loading_status(session)
+                    label, status_key, emoji, brand = self._current_loading_status(session)
                     loading_hint_status = self._loading_hint_status(session)
                     include_hint = session._response_phase in ("waiting", "compression")
                     if include_hint:
-                        label, status_key, emoji = None, None, None
+                        label, status_key, emoji, brand = None, None, None, None
                     card = build_streaming_card_v2(
                         include_unified_panel=False,   # Panel added on first token
                         include_answer_element=False,   # Answer element added with panel
@@ -560,6 +561,7 @@ class UnifiedControllerMixin:
                         loading_hint_status=loading_hint_status,
                         loading_status_key=status_key,
                         loading_status_emoji=emoji,
+                        loading_status_brand=brand,
                         streaming_panel_expanded=self._cfg.streaming_panel_expanded,
                         print_strategy=self._cfg.print_strategy,
                         print_step=self._cfg.print_step,
@@ -1042,8 +1044,8 @@ class UnifiedControllerMixin:
 
     def _current_loading_status(
         self, session: CardSession,
-    ) -> tuple[tuple[str, str] | None, str | None, str | None]:
-        """Spinner-row content as ``(tool_label, status_key, emoji)``.
+    ) -> tuple[tuple[str, str] | None, str | None, str | None, str | None]:
+        """Spinner-row content as ``(tool_label, status_key, emoji, brand)``.
 
         The spinner row lives for the whole stream, so it — not the loading
         hint — is what can actually show 模型思考中 to a user: the hint is
@@ -1052,23 +1054,29 @@ class UnifiedControllerMixin:
         A running tool's name still wins; 模型思考中 fills the row whenever the
         upstream has spoken but no tool is holding it. Both states carry an
         emoji so the text doesn't shift sideways when one replaces the other.
+
+        ``brand`` is the artwork name for tools whose emoji is a stand-in (see
+        ``_tool_brand``). It has to travel with the emoji: passing only the
+        emoji left the spinner showing 🐙 for a `gh` call while the tool row
+        below it already carried the GitHub mark.
         """
         if session._response_phase == "compression":
             if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
                 # The hint row is the visible compression status until the
                 # spinner is the only remaining placeholder.
-                return None, None, None
-            return None, "context_compressing", _COMPRESSION_EMOJI
+                return None, None, None, None
+            return None, "context_compressing", _COMPRESSION_EMOJI, None
         if session._response_phase == "waiting" and session._memory_prefetch_requests:
             if _LOADING_HINT_ELEMENT_ID in session.existing_elements:
-                return None, None, None
-            return None, self._loading_hint_status(session), None
+                return None, None, None, None
+            return None, self._loading_hint_status(session), None, None
         label = self._current_tool_label(session)
         if label:
-            return label, None, session.tool_use.status_tool_emoji
+            return label, None, session.tool_use.status_tool_emoji, session.tool_use.status_tool_brand
         if session._response_phase == "waiting":
-            return None, None, None  # the hint element still says 等待上游模型响应
-        return None, "model_thinking", _THINKING_EMOJI
+            # the hint element still says 等待上游模型响应
+            return None, None, None, None
+        return None, "model_thinking", _THINKING_EMOJI, None
 
     def _active_tool_for_header(self, session: CardSession) -> tuple[str, str] | None:
         """Active tool for the panel title — only when the spinner label can't carry it."""
@@ -1138,8 +1146,9 @@ class UnifiedControllerMixin:
         if not session.card_id or _LOADING_ELEMENT_ID not in session.existing_elements:
             return
 
-        label, status_key, emoji = self._current_loading_status(session)
-        if label == session._loading_label and status_key == session._loading_status_key:
+        label, status_key, emoji, brand = self._current_loading_status(session)
+        if (label == session._loading_label and status_key == session._loading_status_key
+                and brand == session._loading_brand):
             return
 
         actions = [{
@@ -1147,9 +1156,12 @@ class UnifiedControllerMixin:
             "params": {
                 "element_id": _LOADING_ELEMENT_ID,
                 "partial_element": {
-                    "icon": _loading_element(label, status_key=status_key, emoji=emoji)["icon"],
+                    "icon": _loading_element(
+                        label, status_key=status_key, emoji=emoji, brand=brand,
+                    )["icon"],
                     "text": _loading_status_text(
                         label, status_key=status_key, emoji=emoji,
+                        branded=bool(brand),
                         text_sizes=session.text_sizes,
                     ),
                 },
@@ -1162,6 +1174,7 @@ class UnifiedControllerMixin:
             )
             session._loading_label = label
             session._loading_status_key = status_key
+            session._loading_brand = brand
         except FeishuAPIError as e:
             if e.code == CARDKIT_STREAMING_CLOSED:
                 session._streaming_closed = True

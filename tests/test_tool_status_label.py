@@ -655,6 +655,7 @@ def _make_session(**kwargs):
     session._loading_label = None
     session._loading_label_supported = True
     session._loading_status_key = None
+    session._loading_brand = None
     session.sequence = 1
     session.text_sizes = {}
     session.tool_use = ToolUseTracker()
@@ -727,6 +728,46 @@ class TestSyncLoadingLabel:
 
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
         assert "读取文件" in partial["text"]["i18n_content"]["zh_cn"]
+
+    def test_github_spinner_uses_the_mark_not_the_emoji(self) -> None:
+        """Regression: the row showed 🐙 while the tool row below had the mark.
+
+        The emoji travels with a ``brand`` key, and only the fully rendered
+        card was passing it. The spinner update — the path that actually runs
+        during a tool call — sent the emoji alone, so the stand-in stayed
+        visible for the whole GitHub request.
+        """
+        client = MagicMock()
+        client.cardkit_batch_update = AsyncMock()
+        session = _make_session()
+        session.tool_use.record_start("terminal", "gh pr list")
+
+        asyncio.run(self._ctrl(client)._sync_loading_label(session))
+
+        partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
+        assert partial["icon"]["img_key"] == "hls-asset:github"
+        assert "🐙" not in partial["text"]["i18n_content"]["zh_cn"]
+        assert session._loading_brand == "github"
+
+    def test_github_brand_change_is_pushed_even_with_the_same_label(self) -> None:
+        """A tool switch that only changes the brand is still a visible change."""
+        client = MagicMock()
+        client.cardkit_batch_update = AsyncMock()
+        session = _make_session()
+        session.tool_use.record_start("terminal", "gh pr list")
+        asyncio.run(self._ctrl(client)._sync_loading_label(session))
+
+        client.cardkit_batch_update.reset_mock()
+        session.tool_use.record_end("terminal", output="ok")
+        session.tool_use.record_start("terminal", "ls")
+
+        asyncio.run(self._ctrl(client)._sync_loading_label(session))
+
+        client.cardkit_batch_update.assert_awaited_once()
+        partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
+        assert partial["icon"]["tag"] == "custom_icon"
+        assert partial["icon"]["img_key"] != "hls-asset:github"
+        assert session._loading_brand is None
 
     def test_skips_after_loading_element_deleted(self) -> None:
         client = MagicMock()

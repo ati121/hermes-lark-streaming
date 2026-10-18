@@ -24,6 +24,16 @@ filesystem paths.
   div's `icon` slot on both the tool row and the spinner, uploaded once per
   bot and cached by the same `BrandAssets` path as OpenViking; a failed
   upload falls back to `setting_outlined`.
+- The spinner still showed 🐙 in practice, because only the fully rendered
+  card passed `brand` to `_loading_element`; the `partial_update_element` path
+  that runs during every tool call sent the emoji alone. `brand` now travels
+  with the emoji through `_current_loading_status`, on the spinner update, the
+  streaming card created mid-turn, and the interactive card. A tool switch
+  that only changes the brand is also no longer skipped as "same label".
+- `feishu/assets/github.png` was a grey rounded badge with a reversed-out cat,
+  which at 16px read as a grey square rather than GitHub's mark. It is now the
+  official Octocat silhouette on a transparent background, cropped to the ink
+  and padded optically.
 - Rename the internal segment walker `_command_programs` to
   `_command_invocations` so it also returns each segment's trailing arguments,
   which is what separates a local call from a GitHub one.
