@@ -152,7 +152,12 @@ class FlushController:
         )
 
     def _do_flush_task(self, do_flush: Callable[[], Awaitable[None]]) -> None:
-        self._pending_timer = None
+        # This runs both from an armed timer and directly from the immediate
+        # branch of ``_schedule_update_on_loop``. In the second case a timer
+        # may still be pending; dropping the reference without cancelling it
+        # left an orphan handle that fired later and produced a duplicate
+        # API write.
+        self._cancel_timer()
         self._get_loop().call_soon(self._create_flush_task, do_flush)
 
     def _create_flush_task(self, do_flush: Callable[[], Awaitable[None]]) -> None:

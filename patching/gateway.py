@@ -18,6 +18,7 @@ from . import (
     _session_contexts,
     _session_contexts_lock,
 )
+from .adapter import _send_result
 from .usage import _speed_footer, _totals_for_context
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
@@ -729,11 +730,7 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
                 """Suppress plain text delivery when our card was sent."""
                 ctx = _msg_ctx.get()
                 if ctx and ctx.get("card_sent"):
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True)
-                    except (ImportError, AttributeError):
-                        return None
+                    return _send_result(success=True)
                 return await original_send(chat_id, content, **send_kwargs)
 
             adapter.send = _intercepting_send
@@ -868,11 +865,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                     )
                     # Return a success result so the original _deliver_result
                     # thinks the send succeeded
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True)
-                    except (ImportError, AttributeError):
-                        return None
+                    return _send_result(success=True)
             except Exception:
                 pass
 

@@ -20,6 +20,19 @@ from . import (
 
 # ── FeishuAdapter interception layer (Phase 1: gateway message cards) ─
 
+def _send_result(**kwargs: Any) -> Any:
+    """Delayed ``SendResult``, or ``None`` when Hermes's gateway is absent.
+
+    Eleven nested call sites repeated the same try/except pair. The import has
+    to stay lazy: the host module only exists at runtime.
+    """
+    try:
+        from gateway.platforms.base import SendResult
+    except (ImportError, AttributeError):
+        return None
+    return SendResult(**kwargs)
+
+
 def _classify_gateway_message(content: str) -> str:
     """Classify a gateway-internal message by its content for card category."""
     if not isinstance(content, str):
@@ -77,11 +90,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                 # We're inside an agent message pipeline.
                 # If card was already sent, suppress the gateway's text reply.
                 if ctx.get("card_sent"):
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True)
-                    except (ImportError, AttributeError):
-                        return None
+                    return _send_result(success=True)
                 else:
                     try:
                         from ..controller import get_controller
@@ -95,11 +104,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                                     eid[:12], _sess.state, ctx.get("card_sent"),
                                 )
                                 ctx["card_sent"] = True
-                                try:
-                                    from gateway.platforms.base import SendResult
-                                    return SendResult(success=True)
-                                except (ImportError, AttributeError):
-                                    return None
+                                return _send_result(success=True)
                     except Exception:
                         _logger.debug("HLS: suppressed exception", exc_info=True)
                     # Agent still running, card not yet sent — don't interfere
@@ -137,11 +142,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                                 _logger.debug("HLS: suppressed exception", exc_info=True)
                             # Suppress the "⚡ 已停止" gateway card —
                             # the streaming card will show the stopped state.
-                            try:
-                                from gateway.platforms.base import SendResult
-                                return SendResult(success=True)
-                            except (ImportError, AttributeError):
-                                return None
+                            return _send_result(success=True)
             except Exception:
                 _logger.debug("HLS: suppressed exception", exc_info=True)
         _logger.info(
@@ -187,11 +188,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                         len(content),
                         (card_id or "?")[:12],
                     )
-                    try:
-                        from gateway.platforms.base import SendResult
-                        return SendResult(success=True, message_id=card_msg_id)
-                    except (ImportError, AttributeError):
-                        return None
+                    return _send_result(success=True, message_id=card_msg_id)
             else:
                 _logger.info(
                     "gateway_send: controller not enabled (ctrl=%s), falling back to plain text",
@@ -278,11 +275,7 @@ def _wrap_feishu_adapter_edit(orig_edit: Callable) -> Callable:
                             with _gateway_cards_lock:
                                 if message_id in _gateway_cards:
                                     _gateway_cards[message_id]["category"] = category
-                            try:
-                                from gateway.platforms.base import SendResult
-                                return SendResult(success=True)
-                            except (ImportError, AttributeError):
-                                return None
+                            return _send_result(success=True)
             except Exception:
                 pass
 
@@ -341,11 +334,7 @@ def _wrap_feishu_adapter_add_reaction(orig_add_reaction: Callable) -> Callable:
                             )
                             if updated:
                                 # Suppress the actual reaction — card shows status instead
-                                try:
-                                    from gateway.platforms.base import SendResult
-                                    return SendResult(success=True)
-                                except (ImportError, AttributeError):
-                                    return None
+                                return _send_result(success=True)
                 except Exception:
                     pass
 
@@ -384,11 +373,7 @@ def _wrap_feishu_adapter_delete_reaction(orig_delete_reaction: Callable) -> Call
                                 category=card_info.get("category", "system"),
                             )
                             if updated:
-                                try:
-                                    from gateway.platforms.base import SendResult
-                                    return SendResult(success=True)
-                                except (ImportError, AttributeError):
-                                    return None
+                                return _send_result(success=True)
                 except Exception:
                     pass
 
@@ -526,11 +511,7 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
                 _logger.debug("clarify card: mark_awaiting_text failed (%s), card callback will handle resolution", e)
 
             # Return success to suppress the original text-based send_clarify
-            try:
-                from gateway.platforms.base import SendResult
-                return SendResult(success=True, message_id=card_msg_id)
-            except (ImportError, AttributeError):
-                return None
+            return _send_result(success=True, message_id=card_msg_id)
 
         except Exception as e:
             _logger.warning(

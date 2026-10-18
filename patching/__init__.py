@@ -6,7 +6,6 @@ import contextvars
 import logging
 import threading
 import time
-from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
 from .. import __version__
@@ -851,47 +850,11 @@ def _apply_direct_agent_patch(compat: Any | None = None) -> bool:
             _logger.debug("hermes-lark-streaming: AIAgent.run_conversation already directly patched, skip")
             return True
 
-        # v1.3.4 fix (P1): inspect.signature 可能对 C 扩展/wrapped callable 抛异常
-        import inspect
-        try:
-            _has_persist_ts = "persist_user_timestamp" in inspect.signature(_orig_method).parameters
-        except (ValueError, TypeError):
-            _has_persist_ts = False
-
-        def _patched_run_conversation(
-            self,
-            user_message,
-            system_message=None,
-            conversation_history=None,
-            task_id=None,
-            stream_callback=None,
-            persist_user_message=None,
-            persist_user_timestamp=None,
-            **kwargs,
-        ):
-            # v1.3.0: inject_time removed — Hermes v0.17.0+ has built-in
-            # gateway.message_timestamps.enabled for this purpose.
-
-            _maybe_wrap_callbacks(self)
-            try:
-                # 用关键字参数传递，兼容有/无 persist_user_timestamp 的 Hermes 版本
-                # 如果原方法不支持 persist_user_timestamp，它会被 **kwargs 吞掉
-                call_kwargs = {
-                    "system_message": system_message,
-                    "conversation_history": conversation_history,
-                    "task_id": task_id,
-                    "stream_callback": stream_callback,
-                    "persist_user_message": persist_user_message,
-                }
-                # v1.3.0 perf: cache inspect.signature result at wrap time
-                # (the signature never changes at runtime — was ~10-50μs/message wasted)
-                if _has_persist_ts:
-                    call_kwargs["persist_user_timestamp"] = persist_user_timestamp
-                call_kwargs.update(kwargs)
-                return _orig_method(self, user_message, **call_kwargs)
-            finally:
-                pass  # v1.3.0: inject_time guard removed
-
+        # Same wrapper the module-level conversation_loop patch installs. This
+        # path only exists for Hermes versions where that module cannot be
+        # patched, and the two used to carry separate copies of the argument
+        # forwarding, which could drift independently.
+        _patched_run_conversation = _wrap_run_conversation(_orig_method)
         _patched_run_conversation._hls_direct_patched = True
         AIAgent.run_conversation = _patched_run_conversation
         _aiagent_patched = True

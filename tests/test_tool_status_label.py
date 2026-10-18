@@ -917,6 +917,50 @@ class TestTerminalProgramAliases:
         assert _tool_display_names("terminal", "ghost run") == ("Terminal", "终端命令")
 
     @pytest.mark.parametrize("command", [
+        "gh",
+        "gh --version",
+        "gh -h",
+        "gh --help",
+        "gh pr list --help",
+        "gh help",
+        "gh help exit-codes",
+        "gh completion -s bash",
+        "gh config list",
+        "gh config get editor",
+        "gh alias list",
+        "gh alias set co 'pr checkout'",
+        "gh licenses",
+        "gh extension",
+        "gh extension list",
+        "cd repo && gh --version",
+        "GH=/usr/bin/gh; $GH --version",
+    ])
+    def test_gh_local_calls_stay_terminal(self, command: str) -> None:
+        """只有真正访问 GitHub 的 gh 调用才显示 🐙 (老大 2026-10-18)."""
+        assert _tool_display_names("terminal", command) == ("Terminal", "终端命令")
+        assert _tool_emoji("terminal", command) == "🖥️"
+
+    @pytest.mark.parametrize("command", [
+        "gh auth status",
+        "gh extension install owner/repo",
+        "gh search repos foo",
+        "gh status",
+        "gh repo view",
+        "GH=/usr/bin/gh; $GH pr list",
+    ])
+    def test_gh_network_calls_still_show_github(self, command: str) -> None:
+        assert _tool_display_names("terminal", command) == ("GitHub", "GitHub")
+        assert _tool_emoji("terminal", command) == "🐙"
+
+    def test_local_gh_keeps_its_command_as_detail(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "gh --version")
+        step = tracker.build_display_steps()[0]
+        assert step["title_zh"].startswith("终端命令")
+        assert step["emoji"] == "🖥️"
+        assert step["detail"] == "gh --version"
+
+    @pytest.mark.parametrize("command", [
         "GH=/opt/data/.local/bin/gh; $GH api repos/x/y",
         "export GH=/opt/data/.local/bin/gh\ncd /tmp && $GH api repos/x/y",
         'GH="/opt/data/.local/bin/gh"; $GH pr list',

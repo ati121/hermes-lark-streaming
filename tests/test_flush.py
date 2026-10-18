@@ -457,3 +457,39 @@ class TestThreadSafeScheduleUpdate:
         # Should trigger immediately since elapsed > throttle_ms
         await asyncio.sleep(0.3)
         assert flushed.is_set(), "Flush should have been triggered from event loop thread"
+
+
+class TestNoOrphanTimer:
+    """A pending timer must not survive the immediate-flush branch.
+
+    ``_schedule_update_on_loop`` calls ``_do_flush_task`` directly when the
+    throttle window has elapsed. That used to drop the ``_pending_timer``
+    reference without cancelling it, so a handle armed a moment earlier still
+    fired — one duplicate API write per occurrence.
+    """
+
+    @pytest.mark.asyncio
+    async def test_immediate_flush_cancels_armed_timer(self) -> None:
+        ctrl = _make_async(throttle_ms=5.0)
+        ctrl.set_card_message_ready(True)
+        calls = 0
+
+        async def do_flush() -> None:
+            nonlocal calls
+            calls += 1
+
+        ctrl.schedule_update(do_flush)
+        await asyncio.sleep(0.01)
+        assert ctrl._pending_timer is not None, "throttle window should have armed a timer"
+
+        # Switch to an already-elapsed window so the next call takes the
+        # immediate branch while the timer is still armed. ``elapsed`` must
+        # stay below ``LONG_GAP_MS`` or the long-idle branch runs instead.
+        ctrl.set_throttle(0.0)
+        ctrl._last_update_time = time.monotonic() - 0.5
+        ctrl.schedule_update(do_flush)
+        await asyncio.sleep(0.01)
+        assert ctrl._pending_timer is None
+
+        await asyncio.sleep(5.2)
+        assert calls == 1, f"orphaned timer produced a duplicate flush (calls={calls})"

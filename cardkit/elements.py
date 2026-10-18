@@ -6,19 +6,15 @@ import math
 import re
 import unicodedata
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from .i18n import _LOCALES, _T, _i18n, _t
-from .md import (
-    _downgrade_tables,
-    _split_long_text,
-    optimize_markdown_style,
-)
+from .i18n import _T, _i18n, _t
 
 __all__ = [
     'STREAMING_ELEMENT_ID',
     'ANSWER_ELEMENT_ID',
     'UNIFIED_PANEL_ELEMENT_ID',
+    'COLLAPSE_HINT_ELEMENT_ID',
     '_LOADING_ELEMENT_ID',
     '_LOADING_HINT_ELEMENT_ID',
     '_LOADING_IMG_KEY',
@@ -51,6 +47,10 @@ __all__ = [
     'build_panel_header',
     'build_panel_children',
     '_count_tag_objects',
+    '_collapse_hint',
+    '_collapse_hint_counts',
+    '_collapse_hint_text',
+    'enforce_element_limit',
     '_role_text_size',
     'build_card_text_size_style',
 ]
@@ -59,6 +59,12 @@ _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_BACKTICK_RUN = re.compile(r"`+")
 _RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
+# Folded-count rows. The panel builder writes the first two forms, the
+# element-limit safety net used to write only the third.
+_RE_FOLDED_ROUNDS = re.compile(r"(\d+)\s*轮早期推理")
+_RE_FOLDED_TOOLS = re.compile(r"(\d+)\s*步早期操作")
+_RE_FOLDED_OTHER = re.compile(r"(\d+)\s*项早期内容")
+_RE_FOLDED_TOTAL = re.compile(r"(\d+)\s*项已折叠")
 
 def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
     """提取飞书图片为独立 Card 2.0 img 元素，返回 (清理后的文本, img元素列表)."""
@@ -81,15 +87,20 @@ def _extract_images_from_markdown(text: str) -> tuple[str, list[dict]]:
     cleaned = _RE_MULTI_NEWLINE.sub("\n\n", cleaned).strip()
     return cleaned, images
 
-if TYPE_CHECKING:
-    from ..state.linear import ReasoningRound
-
 STREAMING_ELEMENT_ID = "streaming_content"
 ANSWER_ELEMENT_ID = "answer_content"
 UNIFIED_PANEL_ELEMENT_ID = "agent_process_panel"
+COLLAPSE_HINT_ELEMENT_ID = "panel_collapse_hint"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_HINT_ELEMENT_ID = "context_loading_hint"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+
+# Feishu Card 2.0 caps every JSON object carrying a ``tag`` key, at every
+# nesting level, at 200. The margin absorbs elements the surrounding card
+# assembler adds after the panel (answer, footer, error block).
+_FEISHU_ELEMENT_LIMIT = 200
+_ELEMENT_LIMIT_MARGIN = 5
+_ELEMENT_LIMIT_THRESHOLD = _FEISHU_ELEMENT_LIMIT - _ELEMENT_LIMIT_MARGIN
 
 _TEXT_SIZE_ROLE_ORDER = ("body", "reasoning", "tool", "notice", "footer")
 
@@ -139,6 +150,140 @@ def _count_tag_objects(obj: Any) -> int:
         for item in obj:
             count += _count_tag_objects(item)
     return count
+
+
+def _collapse_hint(content: str, text_sizes: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The panel's "N items folded" row.
+
+    Carries a stable ``element_id`` so enforcement can find it again without
+    matching text — a tool result or answer that happens to contain "已折叠"
+    used to be mistaken for the hint and overwritten.
+    """
+    return {
+        "tag": "markdown",
+        "element_id": COLLAPSE_HINT_ELEMENT_ID,
+        "content": content,
+        "text_size": _role_text_size(text_sizes, "notice", default="notation"),
+    }
+
+
+def _collapse_hint_counts(hint: dict[str, Any]) -> tuple[int, int, int]:
+    """``(rounds, tools, other)`` folded counts from a hint row.
+
+    Accepts both hint formats: the panel builder's
+    ``"⚡ 还有 3 轮早期推理、2 步早期操作已折叠"`` and the enforcement row's
+    ``"⚡ 还有 5 项已折叠"``. Parsing only the second one meant every later
+    enforcement pass reset the counts to zero.
+
+    ``other`` is the composition-unknown bucket: rows dropped by enforcement
+    itself, which cannot tell a reasoning block from a tool step.
+    """
+    content = hint.get("content") if isinstance(hint, dict) else None
+    if not isinstance(content, str):
+        return 0, 0, 0
+    rounds = _RE_FOLDED_ROUNDS.search(content)
+    tools = _RE_FOLDED_TOOLS.search(content)
+    other = _RE_FOLDED_OTHER.search(content)
+    if rounds or tools or other:
+        return (
+            int(rounds.group(1)) if rounds else 0,
+            int(tools.group(1)) if tools else 0,
+            int(other.group(1)) if other else 0,
+        )
+    generic = _RE_FOLDED_TOTAL.search(content)
+    return (0, 0, int(generic.group(1))) if generic else (0, 0, 0)
+
+
+def _collapse_hint_text(rounds: int, tools: int, other: int = 0) -> str:
+    """Render folded counts back into the panel hint's wording."""
+    parts: list[str] = []
+    if rounds > 0:
+        parts.append(f"{rounds} 轮早期推理")
+    if tools > 0:
+        parts.append(f"{tools} 步早期操作")
+    if other > 0:
+        parts.append(f"{other} 项早期内容")
+    if not parts:
+        return "⚡ 还有 0 项已折叠"
+    return "⚡ 还有 " + "、".join(parts) + "已折叠"
+
+
+def enforce_element_limit(
+    card: dict[str, Any],
+    *,
+    panel_element_id: str = UNIFIED_PANEL_ELEMENT_ID,
+    text_sizes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Trim a finished card down to Feishu's tag-object budget.
+
+    Only the unified panel is trimmed: the answer and footer carry user-visible
+    content that must never be dropped silently. When the card is over budget
+    and no panel exists, the card is returned unchanged — the caller decides
+    whether to accept the risk or truncate content elsewhere.
+
+    This is the single implementation; ``build_interactive_card_v2`` and the
+    CardKit seal/flush paths all route through it so a card cannot be trimmed
+    on one path and rejected on another.
+    """
+    total = _count_tag_objects(card)
+    if total <= _ELEMENT_LIMIT_THRESHOLD:
+        return card
+
+    body = card.get("body", {})
+    elements = body.get("elements", [])
+    panel = None
+    for elem in elements:
+        if elem.get("element_id") == panel_element_id and elem.get("tag") == "collapsible_panel":
+            panel = elem
+            break
+    if panel is None:
+        return card
+
+    children: list[dict] = panel.get("elements", [])
+    if len(children) <= 1:
+        return card
+
+    hint_idx = next(
+        (i for i, c in enumerate(children) if c.get("element_id") == COLLAPSE_HINT_ELEMENT_ID),
+        None,
+    )
+    if hint_idx is None:
+        total += _count_tag_objects([_collapse_hint("", text_sizes)])
+
+    rounds_folded = 0
+    tools_folded = 0
+    other_folded = 0
+    if hint_idx is not None:
+        rounds_folded, tools_folded, other_folded = _collapse_hint_counts(children[hint_idx])
+
+    trimmed = 0
+    while total > _ELEMENT_LIMIT_THRESHOLD and len(children) > 1:
+        # Never drop the hint row itself; it is the record of what is missing.
+        remove_idx = 1 if hint_idx == 0 and len(children) > 1 else 0
+        if remove_idx == hint_idx:
+            remove_idx = 1
+        removed = children.pop(remove_idx)
+        total -= _count_tag_objects([removed])
+        trimmed += 1
+        if hint_idx is not None and remove_idx < hint_idx:
+            hint_idx -= 1
+
+    if trimmed == 0:
+        return card
+
+    # Composition of the trimmed rows is unknown here, so they go into the
+    # "other" bucket instead of being added to the tool count.
+    hint = _collapse_hint(
+        _collapse_hint_text(rounds_folded, tools_folded, other_folded + trimmed),
+        text_sizes,
+    )
+    if hint_idx is not None:
+        children[hint_idx] = hint
+    else:
+        children.insert(0, hint)
+
+    panel["elements"] = children
+    return card
 
 def _collapsible_panel(
     *,
@@ -191,6 +336,7 @@ def _loading_status_text(
     *,
     status_key: str | None = None,
     emoji: str | None = None,
+    branded: bool = False,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
     """Text object beside the spinner.
@@ -202,7 +348,8 @@ def _loading_status_text(
     The tool name carries no verb prefix: the spinner already reads as "in
     progress" and every tool title is itself a verb phrase (读取文件,
     写入文件), so a prefix would be the third thing saying the same word.
-    ``emoji`` and the leading space are what give the row its shape.
+    ``emoji`` and the leading space are what give the row its shape; a
+    ``branded`` row drops it because its real artwork sits in the icon slot.
 
     Stays ``plain_text`` in every state — Feishu rejects a changed ``tag`` on a
     partial update, so the blank and labelled forms must share one tag. That
@@ -215,7 +362,7 @@ def _loading_status_text(
     else:
         return {"tag": "plain_text", "content": " "}
     is_openviking = status_key == "openviking_recall" or bool(label and label[0].startswith("OpenViking · "))
-    mark = f"{emoji} " if emoji and not is_openviking else ""
+    mark = f"{emoji} " if emoji and not is_openviking and not branded else ""
     # EN SPACEs, not ASCII: a leading ASCII run is the kind of thing a renderer
     # feels free to collapse, and this gap is doing layout work.
     pad = "  "
@@ -232,21 +379,29 @@ def _loading_element(
     *,
     status_key: str | None = None,
     emoji: str | None = None,
+    brand: str | None = None,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
     """Loading spinner element (div with icon — div natively supports icon, markdown varies)."""
-    from ..feishu.branding import openviking_icon
+    from ..feishu.branding import brand_icon, openviking_icon
 
     is_openviking = status_key == "openviking_recall" or bool(label and label[0].startswith("OpenViking · "))
-    return {
-        "tag": "div",
-        "icon": openviking_icon() if is_openviking else {
+    if is_openviking:
+        icon = openviking_icon()
+    elif brand:
+        icon = brand_icon(brand)
+    else:
+        icon = {
             "tag": "custom_icon",
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
-        },
+        }
+    return {
+        "tag": "div",
+        "icon": icon,
         "text": _loading_status_text(
-            label, status_key=status_key, emoji=emoji, text_sizes=text_sizes,
+            label, status_key=status_key, emoji=emoji, branded=bool(brand),
+            text_sizes=text_sizes,
         ),
         "element_id": _LOADING_ELEMENT_ID,
     }
@@ -313,7 +468,6 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
         en_parts.append(en_tools.format(len(tool_steps)))
         zh_parts.append(zh_tools.format(len(tool_steps)))
 
-    reasoning_elapsed_ms = sum(r.elapsed_ms for r in reasoning_rounds)
     # The process-panel clock is intentionally tool/request time only. Reasoning
     # is shown as content, not added to the request duration.
     if total_elapsed_ms <= 0:
@@ -611,19 +765,10 @@ def build_panel_children(
     children: list[dict] = []
 
     if trimmed_rounds > 0 or trimmed_tools > 0:
-        collapse_parts: list[str] = []
-        if trimmed_rounds > 0:
-            collapse_parts.append(f"{trimmed_rounds} 轮早期推理")
-        if trimmed_tools > 0:
-            collapse_parts.append(f"{trimmed_tools} 步早期操作")
-        collapse_text = "⚡ 还有 " + "、".join(collapse_parts) + "已折叠"
-        children.append({
-            "tag": "markdown",
-            "content": collapse_text,
-            "text_size": _role_text_size(
-                text_sizes, "notice", default="notation",
-            ),
-        })
+        children.append(_collapse_hint(
+            _collapse_hint_text(trimmed_rounds, trimmed_tools),
+            text_sizes,
+        ))
 
     if panel_events:
         rendered_tools: set[int] = set()
@@ -811,10 +956,11 @@ def _build_tool_step_title(
     # built from one is grey whatever token is chosen. Emoji carry their own
     # colour. It sits *outside* the bold run on purpose — Feishu drops a bold
     # span that mixes emoji or punctuation into it.
-    from ..feishu.branding import openviking_icon
+    from ..feishu.branding import brand_icon, openviking_icon
 
     is_openviking = str(step.get("name", "")).startswith("viking_")
-    mark = "" if is_openviking else step.get("emoji") or ""
+    brand = None if is_openviking else step.get("brand")
+    mark = "" if is_openviking or brand else step.get("emoji") or ""
     prefix = f"{mark} " if mark else ""
     content = f"{prefix}<font color='{color}'>**{_escape_md(title)}**</font>"
     text: dict[str, Any] = {
@@ -825,10 +971,11 @@ def _build_tool_step_title(
     if title_zh != title:
         zh_content = f"{prefix}<font color='{color}'>**{_escape_md(title_zh)}**</font>"
         text["i18n_content"] = _i18n(content, zh_content)
+    icon = openviking_icon() if is_openviking else (brand_icon(brand) if brand else None)
     return {
         "tag": "div",
         "text": text,
-        **({"icon": openviking_icon()} if is_openviking else {}),
+        **({"icon": icon} if icon else {}),
     }
 
 def _build_reasoning_round_title(

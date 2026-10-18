@@ -357,3 +357,44 @@ class TestToolUseTracker:
         tracker.record_end("read", output="ok")
         steps = tracker.build_display_steps()
         assert steps[0]["elapsed_ms"] == pytest.approx(2500.0)
+
+
+class TestToolStepBudget:
+    """Tool steps must stay bounded in both count and payload size.
+
+    ``record_end`` bypassed the ``max_steps`` cap that ``record_start``
+    enforced, and stored tool output verbatim. A single ``terminal`` call can
+    return megabytes, and the whole string is embedded into the card and
+    re-serialized on every flush.
+    """
+
+    def test_record_end_respects_max_steps(self) -> None:
+        tracker = ToolUseTracker(max_steps=2)
+        tracker.record_start("a")
+        tracker.record_end("a")
+        for i in range(5):
+            tracker.record_end(f"unmatched{i}")
+        assert len(tracker._session.steps) <= 2
+
+    def test_large_output_is_truncated(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "cat big")
+        tracker.record_end("terminal", output="x" * 50_000)
+        step = tracker._session.steps[0]
+        assert len(step.output) < 5_000
+        assert "已截断" in step.output
+
+    def test_large_error_is_truncated(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "false")
+        tracker.record_end("terminal", error="e" * 50_000)
+        assert len(tracker._session.steps[0].error) < 5_000
+
+    def test_end_matches_start_case_insensitively(self) -> None:
+        """A casing mismatch used to leave the started row running forever."""
+        tracker = ToolUseTracker()
+        tracker.record_start("Terminal", "ls")
+        tracker.record_end("terminal", output="ok")
+        steps = tracker._session.steps
+        assert len(steps) == 1
+        assert steps[0].status == "success"

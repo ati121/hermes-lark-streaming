@@ -166,22 +166,21 @@ class ReasoningStreamSplitter:
         return (pending, "") if self._in_think else ("", pending)
 
 class TextState:
-    """— dead code. The dirty-tracking mechanism was replaced by UnifiedLinearState's"""
+    """Plain-text fallback for a turn whose card never rendered.
+
+    Reads only from :meth:`on_deliver`; live streaming text lives in
+    ``UnifiedLinearState.answer_text``. The previous ``accumulated`` buffer was
+    written once on the first delivery and never updated, so ``display_text``
+    returned the first block and silently dropped every later one — exactly the
+    case a fallback exists to cover.
+    """
 
     def __init__(self) -> None:
         self.completed_text = ""
-        self.accumulated = ""
 
     @property
     def display_text(self) -> str:
-        if self.accumulated:
-            return self.accumulated
         return self.completed_text or ""
-
-    def on_partial(self, text: str) -> None:
-        if not text:
-            return
-        self.accumulated += text
 
     def on_deliver(self, text: str) -> None:
         text = strip_reasoning_tags(text)
@@ -189,5 +188,3 @@ class TextState:
             self.completed_text += "\n\n" + text
         else:
             self.completed_text = text
-        if not self.accumulated:
-            self.accumulated = text

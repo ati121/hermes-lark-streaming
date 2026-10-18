@@ -3,22 +3,20 @@
 覆盖:
 - CardPhase / TerminalReason 常量
 - PHASE_TRANSITIONS 合法转换表
-- is_legal_transition()
-- CardSession.transition() 验证转换
 - CardSession.should_proceed() 统一守卫
 - CardSession.is_terminal_phase 属性
 - CardSession.enter_terminal() / terminal_reason / terminal_source
 - CardSession.is_stale_create() epoch 机制
 - CardSession._on_guard_terminate() → TERMINATED
 - 向后兼容: FAILED == CREATION_FAILED
+
+v1.33: CardSession.transition() 与 is_legal_transition() 已删除（生产代码从未
+调用，仅测试覆盖）。PHASE_TRANSITIONS 保留为生命周期文档。
 """
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from hermes_lark_streaming.state.phase import (
     CardPhase,
@@ -26,7 +24,6 @@ from hermes_lark_streaming.state.phase import (
     _TERMINAL,
     PHASE_TRANSITIONS,
     TerminalReason,
-    is_legal_transition,
 )
 from hermes_lark_streaming.state.session import CardSession
 
@@ -90,49 +87,7 @@ class TestTerminalReason:
 
 
 class TestPhaseTransitions:
-    """Legal phase transition map."""
-
-    def test_idle_to_creating(self) -> None:
-        assert is_legal_transition("idle", "creating")
-
-    def test_idle_to_aborted(self) -> None:
-        assert is_legal_transition("idle", "aborted")
-
-    def test_idle_to_terminated(self) -> None:
-        assert is_legal_transition("idle", "terminated")
-
-    def test_idle_to_streaming_illegal(self) -> None:
-        assert not is_legal_transition("idle", "streaming")
-
-    def test_creating_to_streaming(self) -> None:
-        assert is_legal_transition("creating", "streaming")
-
-    def test_creating_to_creation_failed(self) -> None:
-        assert is_legal_transition("creating", "creation_failed")
-
-    def test_creating_to_terminated(self) -> None:
-        assert is_legal_transition("creating", "terminated")
-
-    def test_streaming_to_completing(self) -> None:
-        assert is_legal_transition("streaming", "completing")
-
-    def test_streaming_to_aborted(self) -> None:
-        assert is_legal_transition("streaming", "aborted")
-
-    def test_streaming_to_terminated(self) -> None:
-        assert is_legal_transition("streaming", "terminated")
-
-    def test_completing_to_completed(self) -> None:
-        assert is_legal_transition("completing", "completed")
-
-    def test_completing_to_creation_failed(self) -> None:
-        assert is_legal_transition("completing", "creation_failed")
-
-    def test_completing_to_aborted(self) -> None:
-        assert is_legal_transition("completing", "aborted")
-
-    def test_completing_to_terminated(self) -> None:
-        assert is_legal_transition("completing", "terminated")
+    """The transition map documents the legal lifecycle ordering."""
 
     def test_completed_no_outgoing(self) -> None:
         """Terminal phase has no outgoing transitions."""
@@ -147,12 +102,6 @@ class TestPhaseTransitions:
     def test_terminated_no_outgoing(self) -> None:
         assert len(PHASE_TRANSITIONS["terminated"]) == 0
 
-    def test_idempotent_transition(self) -> None:
-        """Same → same is legal (idempotent)."""
-        assert is_legal_transition("idle", "idle")
-        assert is_legal_transition("streaming", "streaming")
-        assert is_legal_transition("completed", "completed")
-
     def test_terminal_phases_frozenset(self) -> None:
         assert TERMINAL_PHASES == frozenset({
             "completed", "creation_failed", "aborted", "terminated",
@@ -163,11 +112,17 @@ class TestPhaseTransitions:
         assert _TERMINAL is TERMINAL_PHASES
 
 
-# ── CardSession.transition() ─────────────────────────────────────────
+# ── CardSession terminal bookkeeping ─────────────────────────────────
 
 
 class TestCardSessionTransition:
-    """Validated state transitions via CardSession.transition()."""
+    """Terminal recording and epoch invalidation.
+
+    ``CardSession.transition()`` was removed in v1.33: production only ever
+    assigned ``state`` directly, so the validated-transition layer was dead
+    code guarded by tests. ``enter_terminal`` is the surviving piece and is
+    what callbacks rely on for stale-epoch detection.
+    """
 
     def _make_session(self) -> CardSession:
         loop = asyncio.new_event_loop()
@@ -177,52 +132,22 @@ class TestCardSessionTransition:
         finally:
             loop.close()
 
-    def test_legal_transition_returns_true(self) -> None:
+    def test_terminal_recorded_with_reason_and_source(self) -> None:
         s = self._make_session()
-        assert s.transition("creating", "test") is True
-        assert s.state == "creating"
-
-    def test_illegal_transition_returns_false(self) -> None:
-        s = self._make_session()
-        assert s.transition("streaming", "test") is False
-        assert s.state == "idle"  # Unchanged
-
-    def test_idempotent_transition_returns_true(self) -> None:
-        s = self._make_session()
-        assert s.transition("idle", "test") is True
-        assert s.state == "idle"
-
-    def test_terminal_transition_sets_reason(self) -> None:
-        s = self._make_session()
-        s.transition("creating", "test")
-        s.transition("creation_failed", "test_source", reason="creation_failed")
+        s.enter_terminal("creation_failed", "test_source")
         assert s.terminal_reason == "creation_failed"
         assert s.terminal_source == "test_source"
 
-    def test_terminal_transition_increments_epoch(self) -> None:
+    def test_terminal_increments_epoch(self) -> None:
         s = self._make_session()
         epoch_before = s.create_epoch
-        s.transition("creating", "test")
-        s.transition("creation_failed", "test", reason="creation_failed")
+        s.enter_terminal("creation_failed", "test")
         assert s.create_epoch == epoch_before + 1
 
-    def test_entering_creating_snapshots_epoch(self) -> None:
+    def test_missing_transition_method(self) -> None:
+        """The validated-transition layer is gone, not merely unused."""
         s = self._make_session()
-        epoch0 = s.create_epoch
-        s.transition("creating", "test")
-        assert s._create_epoch_snap == epoch0
-
-    def test_full_lifecycle_transitions(self) -> None:
-        s = self._make_session()
-        assert s.transition("creating", "start") is True
-        assert s.state == "creating"
-        assert s.transition("streaming", "card_ready") is True
-        assert s.state == "streaming"
-        assert s.transition("completing", "on_completed") is True
-        assert s.state == "completing"
-        assert s.transition("completed", "sealed", reason="normal") is True
-        assert s.state == "completed"
-        assert s.terminal_reason == "normal"
+        assert not hasattr(s, "transition")
 
 
 # ── CardSession.should_proceed() ─────────────────────────────────────
@@ -526,7 +451,11 @@ class TestBackwardCompatibility:
         from hermes_lark_streaming.state import (
             CardPhase, TerminalReason,
             TERMINAL_PHASES, _TERMINAL,
-            is_legal_transition,
+            PHASE_TRANSITIONS,
         )
         assert CardPhase.CREATION_FAILED == "creation_failed"
         assert TerminalReason.UNAVAILABLE == "unavailable"
+        assert _TERMINAL is TERMINAL_PHASES
+        assert PHASE_TRANSITIONS[CardPhase.IDLE] == frozenset({
+            CardPhase.CREATING, CardPhase.ABORTED, CardPhase.TERMINATED,
+        })

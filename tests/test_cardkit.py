@@ -27,6 +27,7 @@ from hermes_lark_streaming.cardkit.md import (
     _split_long_text,
     _strip_invalid_image_keys,
     optimize_markdown_style,
+    render_answer_markdown,
 )
 
 import pytest
@@ -88,6 +89,47 @@ class TestStripInvalidImageKeys:
 
     def test_non_img_removed(self) -> None:
         assert "http://example.com/img.png" not in _strip_invalid_image_keys("![a](http://example.com/img.png)")
+
+
+# --- 统一 markdown 出口 ---
+
+
+class TestRenderAnswerMarkdown:
+    """Every answer write goes through one pipeline (v1.33).
+
+    The four hand-rolled pipelines disagreed: streaming skipped the table
+    limit, the static fallback card skipped both the limit and the asterisk
+    escape, and the interactive card only normalised on the final frame.
+    """
+
+    def test_streaming_escapes_asterisks(self) -> None:
+        assert render_answer_markdown("2*3*4") == "2\\*3\\*4"
+
+    def test_final_escapes_asterisks_identically(self) -> None:
+        assert render_answer_markdown("2*3*4", final=True) == "2\\*3\\*4"
+
+    def test_streaming_leaves_headings_alone(self) -> None:
+        text = "# Header\n\nbody"
+        assert render_answer_markdown(text) == text
+
+    def test_final_demotes_headings(self) -> None:
+        assert "#### Header" in render_answer_markdown("# Header\n\nbody", final=True)
+
+    def test_streaming_keeps_tables_over_limit(self) -> None:
+        tables = "\n\n".join(f"| A | B |\n|---|---|\n| {i} | x |" for i in range(25))
+        assert "```" not in render_answer_markdown(tables)
+
+    def test_final_downgrades_tables_over_limit(self) -> None:
+        tables = "\n\n".join(f"| A | B |\n|---|---|\n| {i} | x |" for i in range(25))
+        assert "```" in render_answer_markdown(tables, final=True)
+
+    def test_empty_text_becomes_a_space(self) -> None:
+        """Feishu rejects an empty ``content`` field."""
+        assert render_answer_markdown("") == " "
+
+    def test_multiple_blocks_survive(self) -> None:
+        text = "第一段\n\n第二段"
+        assert render_answer_markdown(text) == text
 
 
 # --- 表格处理 ---
@@ -1468,3 +1510,85 @@ class TestPinnedReasoning:
         expanded = build_pinned_reasoning_elements_from_text("想", expanded=True, preview=False)
         assert [e["element_id"] for e in expanded] == ["rsn_toggle", "rsn_body"]
         assert expanded[0]["behaviors"][0]["value"]["expanded"] is False
+
+
+class TestCollapseHintIdentity:
+    """The collapse hint must be found by element_id, not by matching text.
+
+    Matching ``"已折叠"`` in arbitrary content meant a tool result or answer
+    containing those three characters was mistaken for the hint and then
+    rewritten, destroying user content.
+    """
+
+    def _make_rounds(self, n: int) -> list:
+        from hermes_lark_streaming.state.linear import ReasoningRound
+        return [ReasoningRound(index=i + 1, text=f"R{i + 1}") for i in range(n)]
+
+    def test_hint_has_stable_element_id(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import COLLAPSE_HINT_ELEMENT_ID
+        panel = build_unified_panel(
+            reasoning_rounds=self._make_rounds(30),
+            tool_steps=[],
+            max_reasoning_rounds=20,
+        )
+        assert panel["elements"][0]["element_id"] == COLLAPSE_HINT_ELEMENT_ID
+
+    def test_content_mentioning_folded_is_not_treated_as_hint(self) -> None:
+        """A tool output containing 已折叠 must survive enforcement untouched."""
+        from hermes_lark_streaming.cardkit.elements import (
+            COLLAPSE_HINT_ELEMENT_ID,
+            enforce_element_limit,
+        )
+        decoy = {"tag": "markdown", "element_id": "decoy", "content": "还有 99 项已折叠"}
+        # Keep the decoy late in the list: trimming is oldest-first, so a decoy
+        # at the front would be legitimately removed and the assertion would
+        # prove nothing about hint detection.
+        filler = [{"tag": "markdown", "content": f"row {i}"} for i in range(240)]
+        card = {
+            "schema": "2.0",
+            "body": {"elements": [
+                {"tag": "collapsible_panel", "element_id": "agent_process_panel",
+                 "elements": [*filler, decoy]},
+            ]},
+        }
+        result = enforce_element_limit(card)
+        children = result["body"]["elements"][0]["elements"]
+        assert decoy in children, "content that merely mentions 已折叠 must not be removed or rewritten"
+        assert children[0]["element_id"] == COLLAPSE_HINT_ELEMENT_ID
+
+    def test_hint_counts_round_trip_through_both_formats(self) -> None:
+        """The panel format (轮/步) and the legacy 项 format must both parse."""
+        from hermes_lark_streaming.cardkit.elements import (
+            _collapse_hint,
+            _collapse_hint_counts,
+            _collapse_hint_text,
+        )
+        panel_style = _collapse_hint(_collapse_hint_text(3, 2), None)
+        assert _collapse_hint_counts(panel_style) == (3, 2, 0)
+        legacy = _collapse_hint("⚡ 还有 7 项已折叠", None)
+        assert _collapse_hint_counts(legacy) == (0, 0, 7)
+        assert _collapse_hint_text(0, 0, 7) == "⚡ 还有 7 项早期内容已折叠"
+
+    def test_enforcement_preserves_existing_fold_counts(self) -> None:
+        """Trimming an already-folded panel must not reset the counts to zero."""
+        from hermes_lark_streaming.cardkit.elements import (
+            COLLAPSE_HINT_ELEMENT_ID,
+            _collapse_hint,
+            _collapse_hint_counts,
+            _collapse_hint_text,
+            enforce_element_limit,
+        )
+        hint = _collapse_hint(_collapse_hint_text(3, 2), None)
+        filler = [{"tag": "markdown", "content": f"row {i}"} for i in range(240)]
+        card = {
+            "schema": "2.0",
+            "body": {"elements": [
+                {"tag": "collapsible_panel", "element_id": "agent_process_panel",
+                 "elements": [hint, *filler]},
+            ]},
+        }
+        result = enforce_element_limit(card)
+        children = result["body"]["elements"][0]["elements"]
+        new_hint = next(c for c in children if c.get("element_id") == COLLAPSE_HINT_ELEMENT_ID)
+        rounds, tools, other = _collapse_hint_counts(new_hint)
+        assert rounds == 3 and tools == 2 and other > 0

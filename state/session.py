@@ -5,16 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from threading import Lock, RLock
+from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 # Phase constants — single source of truth in state.phase
 from .phase import (
-    _TERMINAL,
     TERMINAL_PHASES,
     CardPhase,
     TerminalReason,
-    is_legal_transition,
 )
 
 # Backward-compatible alias — old code imports IDLE from this module
@@ -68,9 +66,6 @@ class CardSession:
         "chat_id",
         "create_epoch",
         "created_at",
-        "deferred_background_review_closed",
-        "deferred_background_review_lock",
-        "deferred_background_reviews",
         "error_message",
         "existing_elements",
         "flush",
@@ -121,9 +116,6 @@ class CardSession:
         self.text_sizes: dict[str, str | dict[str, str]] = {}
         self.sequence = 1
         self.created_at = time.time()
-        self.deferred_background_review_closed = False
-        self.deferred_background_reviews: list[tuple[str, Any]] = []
-        self.deferred_background_review_lock = Lock()
 
         # ── State machine enhancements ──
         self.create_epoch: int = 0          # Incremented on terminal phase entry
@@ -181,38 +173,6 @@ class CardSession:
         """Whether model/tool callbacks may still mutate live card content."""
         return self.state != CardPhase.COMPLETING and not self.is_terminal_phase
 
-    def transition(self, to: str, source: str = "", reason: str = "") -> bool:
-        """rejected.  Illegal transitions are logged but do not raise."""
-        from_phase = self.state
-        if from_phase == to:
-            return True  # idempotent
-
-        if not is_legal_transition(from_phase, to):
-            _logger.warning(
-                "phase transition rejected: %s → %s (source=%s msg=%s)",
-                from_phase, to, source, (self.message_id or "?")[:12],
-            )
-            return False
-
-        self.state = to
-        _logger.info(
-            "phase transition: %s → %s (source=%s msg=%s)",
-            from_phase, to, source, (self.message_id or "?")[:12],
-        )
-
-        # Track terminal metadata
-        if to in TERMINAL_PHASES:
-            self.enter_terminal(
-                reason=reason or TerminalReason.ERROR,
-                source=source,
-            )
-
-        # Snapshot epoch when entering CREATING (for stale-create detection)
-        if to == CardPhase.CREATING:
-            self._create_epoch_snap = self.create_epoch
-
-        return True
-
     def should_proceed(self, source: str = "") -> bool:
         """Combines:"""
         if self.state in TERMINAL_PHASES:
@@ -231,7 +191,7 @@ class CardSession:
         return epoch != self.create_epoch
 
     def enter_terminal(self, reason: str, source: str = "") -> None:
-        """This is called automatically by ``transition()`` when the target"""
+        """Record why the session ended and invalidate in-flight callbacks."""
         if self.terminal_reason:
             return  # Already recorded — keep the first reason
         self.terminal_reason = reason

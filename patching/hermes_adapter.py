@@ -7,7 +7,7 @@ import logging
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 

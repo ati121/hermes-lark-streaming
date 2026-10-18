@@ -28,13 +28,31 @@ dev = [
 # The plugin code lives at the repo root (alongside plugin.yaml).
 # When loaded as a Hermes directory plugin, the plugin loader imports
 # __init__.py directly from this directory.
-# For pip installs, the repo root is mapped as "hermes_lark_streaming".
+#
+# For pip installs the repo root must be the *package* ``hermes_lark_streaming``
+# — not a flat set of top-level packages. Listing the packages explicitly (and
+# mapping the parent to ".") is what makes the relative imports
+# (``from ..config import Config``) resolve in an installed copy, and it also
+# pulls in the root-level modules (``runtime_globals``, ``__main__``) that the
+# ``find`` directive cannot see because the directory name is not the package
+# name. A bare ``find`` used to install ``config``/``state``/``plugin`` as
+# top-level packages, shadowing unrelated third-party modules.
+[tool.setuptools]
+packages = [
+    "hermes_lark_streaming",
+    "hermes_lark_streaming.aowen",
+    "hermes_lark_streaming.cardkit",
+    "hermes_lark_streaming.config",
+    "hermes_lark_streaming.controller",
+    "hermes_lark_streaming.feishu",
+    "hermes_lark_streaming.flush",
+    "hermes_lark_streaming.patching",
+    "hermes_lark_streaming.plugin",
+    "hermes_lark_streaming.state",
+]
+
 [tool.setuptools.package-dir]
 hermes_lark_streaming = "."
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["controller*", "cardkit*", "patching*", "state*", "feishu*", "config*", "aowen*", "plugin*", "flush*"]
 
 [tool.setuptools.package-data]
 hermes_lark_streaming = ["plugin.yaml", "feishu/assets/*.png"]

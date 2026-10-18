@@ -4,6 +4,162 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.33 (2026-10-18, personal fork)
+
+### Changed — the real GitHub mark, and only when `gh` actually talks to GitHub
+
+- The card used to show 🐙 GitHub for every `terminal` row that ran `gh`, so
+  `gh --version`, `gh --help` and `gh config get` looked like GitHub requests.
+  A `gh` invocation now stays 🖥️ 终端命令 unless it can reach GitHub.
+- Local-only: bare `gh`, any `--help`/`-h`/`--version`, `gh help …`,
+  `gh completion …`, `gh config …`, `gh alias …`, `gh licenses`,
+  `gh extension` (bare) and `gh extension list`. Everything else, including
+  `gh auth status` (it validates the token over the network) and
+  `gh extension install`, still renders as GitHub.
+- The detail line for a local `gh` row keeps the whole command
+  (`gh --version`) instead of dropping the program name, since no alias
+  matched.
+- GitHub rows now carry the official Octocat mark from
+  `feishu/assets/github.png` instead of the 🐙 stand-in. It renders in the
+  div's `icon` slot on both the tool row and the spinner, uploaded once per
+  bot and cached by the same `BrandAssets` path as OpenViking; a failed
+  upload falls back to `setting_outlined`.
+- Rename the internal segment walker `_command_programs` to
+  `_command_invocations` so it also returns each segment's trailing arguments,
+  which is what separates a local call from a GitHub one.
+
+### Fixed — the flush loop could not stop
+
+- `UnifiedLinearState.has_dirty` counted `bg_review_messages`, a list that is
+  only ever appended to. After the first background review every flush saw
+  dirty state and scheduled another flush, so an idle card kept rewriting
+  itself. Reviews are rendered by the seal footer only and are no longer part
+  of the dirty predicate.
+- An immediate flush left the previously armed timer in place, so one update
+  produced two flushes (two CardKit writes and two sequence increments). The
+  immediate branch now cancels the timer before dispatching.
+- An invalid `text_sizes` value raised while the session was still `CREATING`,
+  before the creation `try` block. `_card_ready` never fired and completion
+  blocked for its full 30 s timeout. The value is validated inside the guarded
+  block, which records `CREATION_FAILED` and signals readiness.
+
+### Fixed — element budget and collapse hint
+
+- There was a second, divergent copy of the element-limit enforcement in
+  `cards.py`, and the panel one counted only top-level `tag` objects, so a
+  panel could pass the check and still be rejected by Feishu (200-object cap at
+  every nesting level). There is now one `enforce_element_limit` implementation
+  that counts recursively, and `cards.py` delegates to it.
+- The collapse hint lost its identity: trimming rebuilt the hint from scratch
+  and its text could not be parsed back, so repeated trims dropped the earlier
+  counts. The hint now carries a fixed `element_id` (`panel_collapse_hint`) and
+  parses all three of its forms, folding the trimmed total into the "other"
+  bucket.
+- The seal path still carried its own copy of the trim loop, which had drifted
+  from `enforce_element_limit` in two ways: it recognised the hint by matching
+  "已折叠" anywhere in a row's content, and it re-parsed the hint's "N 项" text,
+  so a second pass dropped the first pass's tally. The seal and its
+  sequence-conflict retry now build the prospective card body and hand it to
+  `enforce_element_limit`; because trimming edits the panel's child list in
+  place, the queued action needs no rebuild step.
+
+### Changed — tool row rendering is 11× cheaper
+
+- `build_display_steps` resolves every row four times (title, emoji, brand,
+  alias stripping), and each resolution re-ran `shlex.split` plus the segment
+  walker. Profiling 20 terminal rows put 45 % of the render inside `shlex`.
+  The command analysis is now memoised (`_cached_terminal_program_spec`,
+  512 entries), taking a full 20-row render from 2.49 ms to 0.22 ms. At the
+  one-second interactive refresh interval that is 0.02 % of a core.
+
+### Fixed — tool step storage and concurrency
+
+- `record_end` stored tool output verbatim. A single large result was
+  re-serialised on every flush and pushed the card toward its body limit.
+  Stored output is now clipped at 4000 characters with an explicit marker.
+- `record_end` could also push the step list past `max_steps` when it appended
+  a fallback row, and it matched names without normalisation, which left a row
+  stuck on `running` when the host changed case between start and end.
+- Phase 2/3 flushes cleared the dirty flags before the network write and lost
+  the update when the write failed. The flags are now snapshotted under
+  `_stream_lock` and restored on transient failure; permanent schema errors
+  drop the snapshot instead.
+- The sequence-conflict seal retry rebuilt the panel but skipped the element
+  trim, so a card that only just fit could fail on retry and degrade to plain
+  text. Both paths now share the same trimming step.
+
+### Changed — one markdown exit, one panel builder
+
+- Answer text reached Feishu through four hand-rolled pipelines that
+  disagreed: streaming skipped the table limit, the static fallback card
+  skipped both the limit and the asterisk escape, and the interactive card
+  normalised only on the final frame. Everything now goes through
+  `render_answer_markdown(text, final=…)`, so the last streamed frame and the
+  sealed frame are produced identically.
+- The eight `build_unified_panel` call sites each assembled their own argument
+  set and had drifted (live reasoning text vs. empty, `active_tool` on two of
+  eight, a clock on the final frames only). They now go through
+  `_build_session_panel`, which supplies the defaults and takes overrides for
+  the genuinely different frames.
+- The plain-text fallback (`TextState`) kept an `accumulated` buffer that was
+  written once on the first delivery and never updated, so a multi-block
+  answer fell back to its first block only. The buffer and its `on_partial`
+  writer are gone; `display_text` returns the full delivered text.
+- `defer_background_review` returned `True` — "the card took it" — for a
+  session whose card had already gone (creation failed, or data released),
+  which silently dropped background reviews. It now returns `False` so the
+  caller's original sender delivers them.
+
+### Removed — dead lifecycle code
+
+- `CardSession.transition()`, `is_legal_transition()` and the
+  `TERMINAL_REASON_TO_PHASE` map had no production callers; every write to
+  `session.state` assigns directly. `PHASE_TRANSITIONS` stays as lifecycle
+  documentation. `enter_terminal()` remains the terminal entry point and still
+  bumps the epoch that stale callbacks check.
+- The deferred-review queue (`deferred_background_reviews` and its lock/closed
+  flag) and `_flush_deferred_background_reviews`, which had no caller: linear
+  mode was the only path, and it consumes reviews immediately.
+- `Controller.on_cron_deliver` (sync variant), unreachable because the hook
+  awaits `on_cron_deliver_async`.
+- Unused imports and an unused `reasoning_elapsed_ms` computation across
+  `cardkit/`, `controller/`, `state/` and `patching/`.
+- `_tool_brand` unpacked the program spec as `(en, zh, emoji)` while it is
+  declared `(zh, en, emoji)`. The two values happen to be equal for `gh`, so
+  nothing misrendered, but the unpacking is now indexed explicitly.
+
+### Changed — duplicated scaffolding collapsed into helpers
+
+- `controller/linear_mixin.py` carried six identical copies of the panel's
+  `partial_update_element` dict and five of the answer's, plus three copies of
+  the cumulative-answer prefix/extension decision and two near-identical
+  answer-stream error handlers. These are now `_panel_update_action`,
+  `_answer_update_action`, `_merge_streamed_answer` and `_write_answer_stream`.
+  The merge also replaces the prefix slice with `str.startswith`, which no
+  longer copies the whole existing answer on every delta.
+- `patching/__init__.py` held a 70-line copy of the `run_conversation`
+  wrapper for the direct-`AIAgent` patch path; it now calls the same
+  `_wrap_run_conversation` the patched path uses. `patching/adapter.py` and
+  `patching/gateway.py` had eight copies of the delayed `SendResult`
+  construction, now `_send_result`.
+- `aowen/__init__.py` built seven cards from the same five-line dict skeleton
+  by hand, now `_card(title, template, elements)`. `cardkit/special.py` had two
+  copies of the 120-character summary trim, now `_static_summary`.
+- Unused imports (`CARDKIT_SCHEMA_ERROR`, `_TERMINAL`,
+  `_enforce_card_element_limit`, `_role_text_size`) and two
+  `asyncio.TimeoutError` aliases removed; `linear_mixin.py` is down from 13
+  lint findings to 6, all deliberate cross-layer `except Exception` guards.
+
+### Fixed — packaging
+
+- `pyproject.toml` used `packages.find` on a flat repo root, which installed
+  `config`, `state`, `plugin` and friends as generic top-level packages and
+  omitted `runtime_globals.py` and `__main__.py`. An explicit package list with
+  `package-dir` maps the root to `hermes_lark_streaming`; a built wheel now
+  contains only that package plus its dist-info.
+- `feishu/assets/github.png` is tracked in git; it was previously produced
+  locally and absent from the repository.
+
 ## v1.32 (2026-10-16, personal fork)
 
 ### Fixed — measure decode speed instead of request latency

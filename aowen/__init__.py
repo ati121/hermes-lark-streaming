@@ -237,6 +237,23 @@ def _footer_note(content: str) -> dict:
 
 # ── Card builders ──
 
+def _card(title: str, template: str, elements: list[dict]) -> dict[str, Any]:
+    """Schema 2.0 card wrapper shared by every ``/aowen`` panel.
+
+    All six panels repeated the same ``schema``/``config``/``header``/``body``
+    skeleton; only the title, colour and elements ever differed.
+    """
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
+        },
+        "body": {"elements": elements},
+    }
+
+
 def build_help_card() -> dict[str, Any]:
     """Build help card — query (read-only) and action (state-changing) commands."""
     version = _get_version()
@@ -283,12 +300,7 @@ def build_help_card() -> dict[str, Any]:
     elements.append({"tag": "hr"})
     elements.append(_footer_note("发送 `/aowen <命令名>` 使用对应功能。"))
 
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {"title": {"tag": "plain_text", "content": "插件命令帮助"}, "template": "blue"},
-        "body": {"elements": elements},
-    }
+    return _card("插件命令帮助", "blue", elements)
 
 def build_status_card() -> dict[str, Any]:
     """Build status card — 3 metrics, patch status, collapsible config."""
@@ -475,62 +487,29 @@ def build_monitor_card() -> dict[str, Any]:
         f"发送 `/aowen monitor` 刷新 · `/aowen monitor reset` 重置"
     ))
 
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {"title": {"tag": "plain_text", "content": "插件监控面板"}, "template": "blue"},
-        "body": {"elements": elements},
-    }
+    return _card("插件监控面板", "blue", elements)
 
 def build_reset_card() -> dict[str, Any]:
     """Build reset confirmation card."""
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "统计已重置"},
-            "template": "green",
-        },
-        "body": {
-            "elements": [
+    return _card("统计已重置", "green", [
                 _icon_div("success", "**所有计数器已清零，运行时间重新计时。**",
                           icon_color="green", icon_size="20px 20px"),
                 {"tag": "hr"},
                 _footer_note("现在发送 `/aowen monitor` 查看重置后的数据。"),
-            ],
-        },
-    }
+            ])
 
 def _build_unknown_command_card(subcommand: str) -> dict:
     """Build unknown command card."""
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "未知命令"},
-            "template": "orange",
-        },
-        "body": {
-            "elements": [
+    return _card("未知命令", "orange", [
                 _icon_div("warning", f"未知命令: `/aowen {subcommand}`",
                           icon_color="orange", icon_size="20px 20px"),
                 {"tag": "hr"},
                 _footer_note("发送 `/aowen help` 查看可用命令列表。"),
-            ],
-        },
-    }
+            ])
 
 def build_interrupt_hint_card() -> dict[str, Any]:
     """Build hint card shown when /aowen sent during active agent run."""
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "AI 正在回复中"},
-            "template": "orange",
-        },
-        "body": {
-            "elements": [
+    return _card("AI 正在回复中", "orange", [
                 _icon_div(
                     "warning",
                     "**AI 正在回复上一条消息，无法处理 /aowen 命令。**",
@@ -544,9 +523,7 @@ def build_interrupt_hint_card() -> dict[str, Any]:
                 ),
                 {"tag": "hr"},
                 _footer_note("当前命令已被忽略，未发送给 AI。"),
-            ],
-        },
-    }
+            ])
 
 def _handle_config_reload() -> dict:
     """Handle /aowen config reload."""
@@ -555,34 +532,16 @@ def _handle_config_reload() -> dict:
         cfg = Config()
         cfg.reload()
         _logger.info("HLS: config reloaded via /aowen config reload")
-        return {
-            "schema": "2.0",
-            "config": {"update_multi": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "配置已重新加载"},
-                "template": "green",
-            },
-            "body": {
-                "elements": [
+        return _card("配置已重新加载", "green", [
                     _icon_div("success", "**配置已重新加载，新配置已立即生效。**",
                               icon_color="green", icon_size="20px 20px"),
                     {"tag": "hr"},
                     _footer_note(f"加载时间: {time.strftime('%Y-%m-%d %H:%M:%S')}"),
-                ],
-            },
-        }
+                ])
     except Exception as e:
         _logger.error("HLS: config reload failed", exc_info=True)
         err_text = str(e)[:500]
-        return {
-            "schema": "2.0",
-            "config": {"update_multi": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "配置加载失败"},
-                "template": "red",
-            },
-            "body": {
-                "elements": [
+        return _card("配置加载失败", "red", [
                     _icon_div("locked", "**配置加载失败，插件继续使用旧配置。**",
                               icon_color="red", icon_size="20px 20px"),
                     {"tag": "hr"},
@@ -590,9 +549,7 @@ def _handle_config_reload() -> dict:
                         {"tag": "div", "text": {"tag": "lark_md",
                           "content": f"```\n{err_text}\n```", "text_size": "notation"}},
                     ], expanded=False, border_color="red"),
-                ],
-            },
-        }
+                ])
 
 def handle_pre_gateway_dispatch(event: Any, gateway: Any = None, **kwargs) -> dict | None:
     """Handle /aowen commands."""

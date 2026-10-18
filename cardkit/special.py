@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from .i18n import _LOCALES, _T, _i18n, _t
+from .i18n import _LOCALES, _T, _i18n
 from .elements import _escape_md
 from .md import (
     _MAX_CRON_TABLES,
@@ -82,6 +82,11 @@ def normalize_clarify_choices(choices: list[str] | None) -> list[str]:
             normalized.append(n)
     return normalized
 
+def _static_summary(content: str) -> str:
+    """One-line card summary — strips fences so the preview can't break."""
+    return content[:120].replace("\n", " ").replace("```", "").strip()
+
+
 def build_cron_card(content: str) -> dict[str, Any]:
     """Cron 推送用的极简静态卡片 — schema 2.0，仅 markdown 内容."""
     card: dict[str, Any] = {
@@ -91,7 +96,7 @@ def build_cron_card(content: str) -> dict[str, Any]:
     }
     if not content.strip():
         return card
-    summary = content[:120].replace("\n", " ").replace("```", "").strip()
+    summary = _static_summary(content)
     if summary:
         card["config"]["summary"] = {"content": summary}
     for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)):
@@ -126,7 +131,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
         "body": {"elements": elements},
     }
 
-    summary = content[:120].replace("\n", " ").replace("```", "").strip() if content.strip() else ""
+    summary = _static_summary(content) if content.strip() else ""
     if summary:
         card["config"]["summary"] = {"content": summary}
 

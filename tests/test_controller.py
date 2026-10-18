@@ -33,6 +33,7 @@ from hermes_lark_streaming.cardkit import (
     _LOADING_HINT_ELEMENT_ID,
     _LOADING_ELEMENT_ID,
     _render_footer_field,
+    build_unified_panel,
 )
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 
@@ -498,37 +499,7 @@ def test_prune_stale_sessions_ignores_none_key_and_prunes_valid_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_background_review_deferred_until_complete() -> None:
-    """v1.1.0: deferred background review flushing was tied to the removed
-    non-linear ``_do_complete`` path. In the unified linear architecture,
-    linear sessions consume background reviews immediately via
-    ``UnifiedLinearState.on_background_review`` (see
-    ``defer_background_review`` in ``controller/core.py``), so there is no
-    longer a "deferred until complete" code path to test. The test that
-    previously lived here asserted on the deleted ``ctrl._do_complete``
-    method and was removed in Task 1.1+1.2.
-
-    The remaining behavior — that ``defer_background_review`` returns True
-    for an active session and the message is consumed by the unified
-    state — is covered by the linear dispatch tests below.
-    """
-    ctrl = _setup_ctrl(linear=True)
-    session = _make_session("msg_bg", linear=True)
-    session.state = STREAMING
-    session.card_msg_id = "card_msg"
-    ctrl._sessions["msg_bg"] = session
-    sent: list[str] = []
-
-    # In linear mode, defer_background_review pushes the text directly
-    # into unified_state and returns True (consumed by card, suppress
-    # plain text). The sender callback is never invoked.
-    assert ctrl.defer_background_review(message_id="msg_bg", text="review", sender=sent.append)
-    assert sent == []
-    assert session.unified_state is not None
-    assert session.unified_state.bg_review_messages == ["review"]
-
-
-def test_background_review_without_active_session_not_deferred() -> None:
+async def test_background_review_without_active_session_not_deferred() -> None:
     ctrl = _setup_ctrl()
     sent: list[str] = []
 
@@ -536,16 +507,34 @@ def test_background_review_without_active_session_not_deferred() -> None:
     assert sent == []
 
 
-def test_background_review_after_flush_not_deferred() -> None:
+def test_background_review_when_card_is_gone_is_not_swallowed() -> None:
+    """A session whose card never materialised must not eat the review.
+
+    ``defer_background_review`` returning True tells the hook wrapper "the card
+    took it, don't call the original sender". With ``unified_state`` cleared
+    (creation failed, or ``_release_session_data`` already ran) there is no
+    surface to render onto, so the method has to return False and let the
+    review reach the user as a normal message.
+    """
     ctrl = _setup_ctrl()
-    session = _make_session("msg_bg")
+    session = _make_session("msg_bg", linear=True)
+    session.unified_state = None
     ctrl._sessions["msg_bg"] = session
     sent: list[str] = []
 
-    ctrl._flush_deferred_background_reviews(session)
-
     assert not ctrl.defer_background_review(message_id="msg_bg", text="review", sender=sent.append)
     assert sent == []
+
+
+def test_background_review_consumed_by_live_linear_card() -> None:
+    ctrl = _setup_ctrl(linear=True)
+    session = _make_session("msg_bg", linear=True)
+    ctrl._sessions["msg_bg"] = session
+    sent: list[str] = []
+
+    assert ctrl.defer_background_review(message_id="msg_bg", text="review", sender=sent.append)
+    assert sent == []
+    assert session.unified_state.bg_review_messages == ["review"]
 
 
 # ── 辅助函数 ──
@@ -884,6 +873,49 @@ class TestDoCreateLinearCard:
         assert session.state == CREATION_FAILED
 
     @pytest.mark.asyncio
+    async def test_invalid_text_sizes_fails_fast(self) -> None:
+        """A bad text_sizes entry must not strand the session in CREATING.
+
+        Validation used to raise before the create try-block. The session stayed
+        CREATING, ``_card_ready`` was never set, so every completion waited the
+        full 30 s timeout and the session was never pruned.
+        """
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_ts")
+        ctrl._sessions["msg_ts"] = session
+
+        cfg_cls = type(ctrl._cfg)
+        original = cfg_cls.text_sizes
+        cfg_cls.text_sizes = property(
+            lambda self: (_ for _ in ()).throw(ValueError("bad text size")),
+        )
+        try:
+            await ctrl._do_create_linear_card(session)
+        finally:
+            cfg_cls.text_sizes = original
+        assert session.state == CREATION_FAILED
+        assert session._card_ready.is_set()
+        ctrl._client.cardkit_create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_completion_race_signals_card_ready(self) -> None:
+        """Completion can claim the session before creation is dequeued.
+
+        The early return used to leave ``_card_ready`` unset, so the completion
+        path blocked for 30 s and then degraded to plain text.
+        """
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_race")
+        session._card_ready.clear()
+        session.state = COMPLETING
+        ctrl._sessions["msg_race"] = session
+
+        await ctrl._do_create_linear_card(session)
+
+        assert session._card_ready.is_set()
+        ctrl._client.cardkit_create.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unified_state_set_before_await(self) -> None:
         """CREATING 期间的事件进入线性路径 — unified_state 在 try 之前设置."""
         ctrl = _setup_ctrl(linear=True)
@@ -1081,7 +1113,7 @@ class TestInteractiveDeviceTextSizeTransport:
         callback_done = threading.Event()
         worker: threading.Thread | None = None
 
-        def snapshot_text(content: str) -> str:
+        def snapshot_text(content: str, *, final: bool = False) -> str:
             nonlocal worker
 
             def append_from_worker() -> None:
@@ -1098,7 +1130,7 @@ class TestInteractiveDeviceTextSizeTransport:
             return content
 
         with patch(
-            "hermes_lark_streaming.controller.linear_mixin.escape_markdown_asterisks",
+            "hermes_lark_streaming.controller.linear_mixin.render_answer_markdown",
             side_effect=snapshot_text,
         ):
             await ctrl._do_unified_flush(session)
@@ -3052,3 +3084,131 @@ class TestInteractivePanelToolsOnly:
         panel = next(e for e in card["body"]["elements"] if e.get("element_id") == UNIFIED_PANEL_ELEMENT_ID)
         assert "想" not in str(panel["elements"])
         assert "轮" not in panel["header"]["title"]["i18n_content"]["zh_cn"]
+
+
+class TestSealRetryTrims:
+    """The sequence-conflict retry must apply the element budget.
+
+    The retry path rebuilds the panel and previously skipped the trim step
+    entirely, so a card that only just fit on the first attempt failed with
+    the element limit on retry and degraded to plain text.
+    """
+
+    @pytest.mark.asyncio
+    async def test_retry_trims_oversized_panel(self) -> None:
+        from hermes_lark_streaming.cardkit.elements import (
+            COLLAPSE_HINT_ELEMENT_ID,
+            _count_tag_objects,
+        )
+
+        ctrl = _setup_ctrl()
+        client = ctrl._client
+        calls: list[list[dict]] = []
+        first = True
+
+        async def _batch(*args, **kwargs):
+            nonlocal first
+            actions = args[1]
+            calls.append(actions)
+            if first:
+                first = False
+                raise FeishuAPIError("sequence conflict", code=CARDKIT_SEQUENCE_CONFLICT)
+            return None
+
+        client.cardkit_batch_update = AsyncMock(side_effect=_batch)
+        client.cardkit_close_streaming = AsyncMock()
+
+        session = _make_session("msg_trim_retry", linear=True)
+        session.state = STREAMING
+        session.card_id = "card_trim"
+        session._creation_stages.update({"panel", "answer", "hint_removed"})
+        ctrl._sessions["msg_trim_retry"] = session
+
+        # Fill the panel well past the tag budget.
+        for i in range(60):
+            session.unified_state._tool_count += 1
+            session.tool_use.record_start("terminal", f"cmd {i}")
+            session.tool_use.record_end("terminal", output="o" * 20)
+        session.unified_state.panel_visible = True
+        session.unified_state.answer_text = "answer"
+
+        await ctrl._do_linear_complete(session)
+
+        retry_actions = calls[-1]
+        panel_action = next(
+            a for a in retry_actions
+            if a.get("action") == "partial_update_element"
+            and a["params"]["element_id"] == UNIFIED_PANEL_ELEMENT_ID
+        )
+        children = panel_action["params"]["partial_element"]["elements"]
+        # Trimming must have run: the retry is under budget and carries the
+        # collapse hint that records what was folded away.
+        assert _count_tag_objects(children) <= 200
+        assert any(c.get("element_id") == COLLAPSE_HINT_ELEMENT_ID for c in children)
+
+
+class TestSinglePanelBuilder:
+    """Streaming, drain and seal must render the same state identically.
+
+    Before v1.33 the eight call sites assembled ``build_unified_panel`` by
+    hand and had drifted: some passed the live reasoning text and some an
+    empty string, and only two passed ``active_tool``. A flush could therefore
+    undo a frame the seal had just written.
+    """
+
+    def test_builder_matches_direct_call(self) -> None:
+        from hermes_lark_streaming.cardkit import build_unified_panel
+
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_panel", linear=True)
+        state = session.unified_state
+        state.on_reasoning_delta("thinking hard")
+        session.tool_use.record_start("terminal", "gh pr list")
+        session.tool_use.record_end("terminal", output="ok")
+
+        built = ctrl._build_session_panel(session, state)
+        direct = build_unified_panel(
+            reasoning_rounds=state.reasoning_rounds,
+            current_reasoning_text=state.current_reasoning_text,
+            tool_steps=session.tool_use.build_display_steps(),
+            tool_elapsed_ms=session.tool_use.elapsed_ms,
+            total_elapsed_ms=0.0,
+            show_reasoning=ctrl._cfg.show_reasoning,
+            expanded=ctrl._cfg.streaming_panel_expanded,
+            panel_events=state.panel_events,
+            max_tool_steps=ctrl._cfg.max_tool_steps,
+            max_reasoning_rounds=ctrl._cfg.max_reasoning_rounds,
+            text_sizes=session.text_sizes,
+            active_tool=ctrl._active_tool_for_header(session),
+        )
+        assert built == direct
+
+    def test_seal_override_drops_live_reasoning_and_clock(self) -> None:
+        """The seal passes an empty reasoning body and the final duration."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_panel2", linear=True)
+        state = session.unified_state
+        state.on_reasoning_delta("live text")
+        session.tool_use.record_start("terminal", "ls")
+
+        seen: dict[str, object] = {}
+        original = build_unified_panel
+
+        def _spy(**kwargs):
+            seen.update(kwargs)
+            return original(**kwargs)
+
+        with patch(
+            "hermes_lark_streaming.controller.linear_mixin.build_unified_panel",
+            side_effect=_spy,
+        ):
+            ctrl._build_session_panel(
+                session, state,
+                current_reasoning_text="",
+                total_elapsed_ms=1234.0,
+                active_tool=None,
+            )
+
+        assert seen["current_reasoning_text"] == ""
+        assert seen["total_elapsed_ms"] == 1234.0
+        assert seen["active_tool"] is None

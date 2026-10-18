@@ -320,12 +320,15 @@ class TestBackgroundReview:
         state.on_background_review("checking quality")
         assert state.bg_review_messages == ["checking quality"]
 
-    def test_has_dirty_with_bg_review(self) -> None:
+    def test_has_dirty_ignores_bg_review(self) -> None:
+        """Background reviews render only in the seal footer, never in a
+        streaming frame, and the list is never cleared. Counting them as dirty
+        rescheduled a flush forever after the first review."""
         state = UnifiedLinearState()
         state.panel_dirty = False
         state.answer_dirty = False
         state.on_background_review("review")
-        assert state.has_dirty is True
+        assert state.has_dirty is False
 
 
 # ── Deprecated backward compat aliases ──

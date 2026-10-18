@@ -381,7 +381,16 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
 🖥️ 终端命令。想让它以自己的名字出现，在 `state/tooluse.py` 里加规则：
 
 - `_TERMINAL_PROGRAM_SPECS`：精确匹配，`程序名或脚本名: (中文名, 英文名, emoji)`。
-  目前有 `smart-search` → 🔍、`gh` → 🐙 GitHub（Unicode 没有 GitHub 图形，用章鱼代指 Octocat）。
+  目前有 `smart-search` → 🔍、`gh` → GitHub。
+  `gh` 只在实际访问 GitHub 时才换行显示；`gh --version`、`gh --help`、`gh help`、
+  `gh config …`、`gh alias …`、`gh completion …`、`gh licenses`、`gh extension list`
+  这类纯本地调用仍是 🖥️ 终端命令（见 `_gh_is_local_only`）。`gh auth status` 会联网
+  校验 token，所以算 GitHub 调用。
+- GitHub 行不再用 emoji，而是 `feishu/assets/github.png` 真实图标：`_tool_brand`
+  给命中行打 `brand="github"`，`cardkit/elements.py` 把它放进 div 的 `icon` 槽，
+  由 `feishu/branding.py` 按 bot 上传并缓存 `img_key`（与 OpenViking 同一套机制，
+  上传失败回退 `setting_outlined`）。新增品牌图标时在 `_ASSETS` 和 `_BRAND_ICONS`
+  各加一条即可。
 - `_IMAGE_SCRIPTS`：只识别已知生图入口 `gpt_image_gen.py` / `zimage_gen.py`，
   并由 `_image_script_action` 按参数确定动作。GPT 脚本可覆盖模型，标签使用家族名，
   不把默认模型版本写死在界面上。

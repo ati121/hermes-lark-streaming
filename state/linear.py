@@ -168,9 +168,15 @@ class UnifiedLinearState:
 
     @property
     def has_dirty(self) -> bool:
-        """Whether any dirty data needs flushing to the card."""
+        """Whether any dirty data needs flushing to the card.
+
+        ``bg_review_messages`` is deliberately excluded: reviews are rendered
+        only by the seal footer (``build_preservative_seal_actions``), never by
+        a streaming frame, and the list is never cleared. Including it made
+        ``has_dirty`` permanently true after the first review, so every flush
+        rescheduled another one forever.
+        """
         return (
             self.panel_dirty
             or self.answer_dirty
-            or bool(self.bg_review_messages)
         )

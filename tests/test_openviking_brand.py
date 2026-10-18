@@ -8,7 +8,7 @@ from hermes_lark_streaming.cardkit.elements import (
     _loading_element,
     _loading_hint_element,
 )
-from hermes_lark_streaming.feishu.branding import OPENVIKING_ASSET, BrandAssets
+from hermes_lark_streaming.feishu.branding import GITHUB_ASSET, OPENVIKING_ASSET, BrandAssets
 from hermes_lark_streaming.state.tooluse import ToolUseTracker
 
 
@@ -61,6 +61,81 @@ def test_non_openviking_tools_keep_their_icons():
     title = _build_tool_step_title({"name": "terminal", "title": "Terminal", "emoji": "🖥️"})
     assert "icon" not in title
     assert "🖥️" in title["text"]["content"]
+
+
+class TestGitHubBrand:
+    """gh 行用真实 GitHub mark，不再用 🐙 代指 Octocat."""
+
+    def _step(self, command: str) -> dict:
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", command)
+        return tracker.build_display_steps()[0]
+
+    def test_gh_step_carries_the_github_brand(self):
+        step = self._step("gh api repos/x/y")
+        assert step["brand"] == "github"
+        title = _build_tool_step_title(step)
+        assert title["icon"]["img_key"] == GITHUB_ASSET
+        assert "🐙" not in title["text"]["content"]
+
+    def test_plain_terminal_step_has_no_brand(self):
+        assert self._step("ls -la")["brand"] is None
+
+    def test_local_gh_keeps_terminal_icon(self):
+        step = self._step("gh --version")
+        assert step["brand"] is None
+        title = _build_tool_step_title(step)
+        assert "icon" not in title
+        assert "🖥️" in title["text"]["content"]
+
+    def test_spinner_uses_github_brand(self):
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "gh pr list")
+        assert tracker.status_tool_brand == "github"
+        spinner = _loading_element(
+            tracker.status_tool_names, emoji=tracker.status_tool_emoji, brand="github",
+        )
+        assert spinner["icon"]["img_key"] == GITHUB_ASSET
+        assert "🐙" not in spinner["text"]["content"]
+
+    def test_local_gh_spinner_keeps_terminal_emoji(self):
+        tracker = ToolUseTracker()
+        tracker.record_start("terminal", "gh --version")
+        assert tracker.status_tool_brand is None
+        spinner = _loading_element(
+            tracker.status_tool_names, emoji=tracker.status_tool_emoji,
+            brand=tracker.status_tool_brand,
+        )
+        assert "🖥️" in spinner["text"]["content"]
+
+    @pytest.mark.asyncio
+    async def test_github_asset_uploads_and_replaces_the_marker(self):
+        assets = BrandAssets()
+        upload = AsyncMock(return_value="img_github")
+        payload = _loading_element(("GitHub", "GitHub"), brand="github")
+        result = await assets.resolve(payload, upload)
+        assert result["icon"]["img_key"] == "img_github"
+        upload.assert_awaited_once()
+        assert upload.await_args.args[0].replace("\\", "/").endswith("assets/github.png")
+
+    @pytest.mark.asyncio
+    async def test_github_upload_failure_falls_back_to_a_standard_icon(self):
+        assets = BrandAssets()
+        result = await assets.resolve(_loading_element(("GitHub", "GitHub"), brand="github"), AsyncMock(return_value=None))
+        assert result["icon"]["tag"] == "standard_icon"
+        assert GITHUB_ASSET not in str(result)
+
+    @pytest.mark.asyncio
+    async def test_openviking_and_github_assets_are_cached_separately(self):
+        assets = BrandAssets()
+        upload = AsyncMock(side_effect=lambda path: "img_gh" if "github" in path else "img_ov")
+        openviking = await assets.resolve(_loading_hint_element("openviking_recall"), upload)
+        github = await assets.resolve(_loading_element(("GitHub", "GitHub"), brand="github"), upload)
+        assert openviking["icon"]["img_key"] == "img_ov"
+        assert github["icon"]["img_key"] == "img_gh"
+        assert upload.await_count == 2
+        await assets.resolve(_loading_element(("GitHub", "GitHub"), brand="github"), upload)
+        assert upload.await_count == 2
 
 
 def test_preparation_duration_does_not_include_later_model_wait(monkeypatch):

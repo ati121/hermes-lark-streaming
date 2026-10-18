@@ -137,22 +137,21 @@ class TestTextState:
         assert ts.display_text == ""
         assert ts.completed_text == ""
 
-    def test_on_partial_accumulates(self) -> None:
-        ts = TextState()
-        ts.on_partial("hello ")
-        ts.on_partial("world")
-        assert ts.display_text == "hello world"
+    def test_dropped_partial_buffer_is_gone(self) -> None:
+        """``on_partial``/``accumulated`` were removed in v1.33.
 
-    def test_on_partial_empty_ignored(self) -> None:
+        They only fed ``display_text``, and the buffer was assigned once on the
+        first delivery, so a multi-block answer fell back to its first block
+        only. Streaming text lives in ``UnifiedLinearState.answer_text``.
+        """
         ts = TextState()
-        ts.on_partial("")
-        assert ts.display_text == ""
+        assert not hasattr(ts, "on_partial")
+        assert not hasattr(ts, "accumulated")
 
     def test_on_deliver_first(self) -> None:
         ts = TextState()
         ts.on_deliver("first block")
         assert ts.completed_text == "first block"
-        assert ts.accumulated == "first block"
 
     def test_on_deliver_appends_with_separator(self) -> None:
         ts = TextState()
@@ -165,18 +164,13 @@ class TestTextState:
         ts.on_deliver("<thinking>reasoning</thinking>answer")
         assert "<thinking>" not in ts.completed_text
 
-    def test_display_text_prefers_accumulated(self) -> None:
-        # on_deliver 在 accumulated 为空时设置它，之后 on_partial 追加
+    def test_display_text_covers_every_delivered_block(self) -> None:
+        """Regression: the fallback used to show only the first block."""
         ts = TextState()
-        ts.on_deliver("delivered")
-        ts.on_partial("partial")
-        assert ts.display_text == "deliveredpartial"
-
-    def test_display_text_fallback_to_completed(self) -> None:
-        ts = TextState()
-        ts.on_deliver("delivered")
-        ts.accumulated = ""
-        assert ts.display_text == "delivered"
+        ts.on_deliver("block A")
+        ts.on_deliver("block B")
+        assert "block A" in ts.display_text
+        assert "block B" in ts.display_text
 
 # v1.3.0 P1-04: removed test_is_dirty_tracking and test_is_dirty_with_explicit_text
 # — the is_dirty() / mark_flushed() / last_flushed mechanism was dead code

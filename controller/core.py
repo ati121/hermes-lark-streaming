@@ -22,7 +22,7 @@ from ..state.linear import UnifiedLinearState
 from ..state.session import CardSession
 from ..state.text import ReasoningStreamSplitter, TextState, strip_reasoning_tags
 from ..state.tooluse import ToolUseTracker
-from .linear_mixin import UnifiedControllerMixin
+from .linear_mixin import UnifiedControllerMixin, _merge_streamed_answer
 from .mixin import (
     ABORTED,
     COMPLETED,
@@ -1571,35 +1571,25 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 ):
                     clean_answer = strip_reasoning_tags(answer)
                     if clean_answer:
-                        _existing = session.unified_state.answer_text
-                        _existing_len = len(_existing)
+                        _existing_len = len(session.unified_state.answer_text)
                         _clean_len = len(clean_answer)
-                        if _existing_len == 0:
-                            # No answer was streamed — use the full on_completed answer
-                            session.unified_state.on_answer_delta(clean_answer)
-                            _logger.info(
-                                "on_completed: linear answer fallback, len=%d msg=%s",
-                                _clean_len, (message_id or "?")[:12],
-                            )
-                        elif _clean_len > _existing_len and clean_answer[:_existing_len] == _existing:
-                            # on_completed answer extends the streamed answer — append diff
-                            _diff = clean_answer[_existing_len:]
-                            if _diff:
-                                session.unified_state.on_answer_delta(_diff)
-                                _logger.info(
-                                    "on_completed: linear answer extended, existing=%d added=%d msg=%s",
-                                    _existing_len, len(_diff), (message_id or "?")[:12],
-                                )
-                        elif _clean_len > _existing_len and clean_answer[:_existing_len] != _existing:
-                            # only a prefix. Replace with the more complete version.
+                        # ``None`` means the completion contradicts what was
+                        # streamed — keep the more complete version.
+                        _merged = _merge_streamed_answer(session.unified_state, clean_answer)
+                        if _merged is None:
                             _logger.warning(
                                 "on_completed: linear answer MISMATCH existing_len=%d clean_len=%d msg=%s "
                                 "existing_head=%r clean_head=%r — replacing with on_completed answer",
                                 _existing_len, _clean_len, (message_id or "?")[:12],
-                                _existing[:60], clean_answer[:60],
+                                session.unified_state.answer_text[:60], clean_answer[:60],
                             )
                             session.unified_state.answer_text = clean_answer
                             session.unified_state.answer_dirty = True
+                        elif _merged:
+                            _logger.info(
+                                "on_completed: linear answer extended, existing=%d added=%d msg=%s",
+                                _existing_len, len(_merged), (message_id or "?")[:12],
+                            )
 
             session.state = COMPLETING
 
@@ -1657,27 +1647,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             _logger.warning("cron card delivery failed", exc_info=True)
             return False
 
-    def on_cron_deliver(
-        self,
-        *,
-        chat_id: str,
-        content: str,
-        loop: asyncio.AbstractEventLoop,
-    ) -> bool:
-        """Cron 推送（同步兼容接口）— 从非事件循环线程调用时使用."""
-        if not self.enabled or not content or not chat_id:
-            return False
-        future = asyncio.run_coroutine_threadsafe(
-            self._do_cron_deliver(chat_id, content), loop
-        )
-        try:
-            future.result(timeout=30)
-            _logger.info("cron card delivered: chat=%s len=%d", chat_id[:12], len(content))
-            return True
-        except Exception:
-            _logger.warning("cron card delivery failed", exc_info=True)
-            return False
-
     def defer_background_review(
         self,
         *,
@@ -1685,7 +1654,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         text: str,
         sender: Callable[[str], Any],
     ) -> bool:
-        """将后台审查消息推入卡片面板（如果在线性模式），否则暂存等卡片收尾后发送."""
+        """将后台审查消息推入卡片面板（如果在线性模式），否则暂停持原发送路径."""
         if not self.enabled or not text or not callable(sender):
             return False
         session = self._get_active_session(message_id)
@@ -1698,27 +1667,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             self._schedule_linear_flush(session)
             return True  # Consumed by card, suppress plain text
 
-        # Non-linear mode: defer as before
-        with session.deferred_background_review_lock:
-            if session.deferred_background_review_closed:
-                return False
-            session.deferred_background_reviews.append((text, sender))
-        return True
-
-    def _flush_deferred_background_reviews(self, session: CardSession) -> None:
-        lock = getattr(session, "deferred_background_review_lock", None)
-        reviews = getattr(session, "deferred_background_reviews", None)
-        if lock is None or reviews is None:
-            return
-        with lock:
-            session.deferred_background_review_closed = True
-            pending = list(reviews)
-            reviews.clear()
-        for text, sender in pending:
-            try:
-                sender(text)
-            except Exception:
-                _logger.debug("background review sender failed", exc_info=True)
+        # The card is gone (creation failed, or the turn already sealed): there
+        # is no surface left to defer onto, and the caller treats True as
+        # "handled". Returning False lets the original sender deliver.
+        return False
 
     def _cleanup(self, message_id: str) -> None:
         session = self._sess_pop(message_id)
@@ -1781,10 +1733,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         try:
             if _fallback_text.strip():
                 from ..cardkit import _streaming_element, build_interactive_card_v2
-                from ..cardkit.md import optimize_markdown_style
+                from ..cardkit.md import render_answer_markdown
                 session.fallback_card = build_interactive_card_v2(
                     elements=[_streaming_element(
-                        content=optimize_markdown_style(_fallback_text) or _fallback_text,
+                        content=render_answer_markdown(_fallback_text, final=True),
                         text_sizes=session.text_sizes,
                     )],
                     summary=_fallback_text[:120],

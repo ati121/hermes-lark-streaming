@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -60,20 +59,3 @@ TERMINAL_PHASES: frozenset[str] = frozenset({
 
 # Legacy alias — old code references _TERMINAL
 _TERMINAL = TERMINAL_PHASES
-
-# ── Terminal reason → phase mapping ──────────────────────────────────
-
-TERMINAL_REASON_TO_PHASE: dict[str, str] = {
-    TerminalReason.NORMAL: CardPhase.COMPLETED,
-    TerminalReason.ERROR: CardPhase.COMPLETED,  # Error is a subtype of completed
-    TerminalReason.ABORT: CardPhase.ABORTED,
-    TerminalReason.UNAVAILABLE: CardPhase.TERMINATED,
-    TerminalReason.CREATION_FAILED: CardPhase.CREATION_FAILED,
-}
-
-def is_legal_transition(from_phase: str, to_phase: str) -> bool:
-    """Check if a phase transition is legal."""
-    if from_phase == to_phase:
-        return True  # idempotent
-    allowed = PHASE_TRANSITIONS.get(from_phase, frozenset())
-    return to_phase in allowed

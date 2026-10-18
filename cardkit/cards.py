@@ -3,29 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from .elements import (
     ANSWER_ELEMENT_ID,
-    STREAMING_ELEMENT_ID,
     UNIFIED_PANEL_ELEMENT_ID,
-    _LOADING_ELEMENT_ID,
-    _LOADING_HINT_ELEMENT_ID,
-    _build_footer_elements,
     _build_unified_panel_placeholder,
-    _collapsible_panel,
-    _count_tag_objects,
     _loading_element,
     _loading_hint_element,
-    _role_text_size,
     _streaming_element,
     build_card_text_size_style,
-    build_unified_panel,
+    enforce_element_limit,
 )
 from .i18n import _LOCALES, _T, _i18n, _t
-
-if TYPE_CHECKING:
-    from ..state.linear import ReasoningRound
 
 __all__ = [
     'build_streaming_card_v2',
@@ -33,11 +23,6 @@ __all__ = [
     '_enforce_card_element_limit',
 ]
 
-# Feishu Card 2.0 element limit — every JSON object with a ``tag`` key
-# counts toward this limit at all nesting levels.
-_FEISHU_ELEMENT_LIMIT = 200
-
-_ELEMENT_LIMIT_MARGIN = 5
 
 def _enforce_card_element_limit(
     card: dict[str, Any],
@@ -45,91 +30,11 @@ def _enforce_card_element_limit(
     panel_element_id: str = UNIFIED_PANEL_ELEMENT_ID,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Counts **all** tag objects in the card (including nested ones)."""
-    threshold = _FEISHU_ELEMENT_LIMIT - _ELEMENT_LIMIT_MARGIN
-    total = _count_tag_objects(card)
-    if total <= threshold:
-        return card
+    """Backwards-compatible alias for :func:`enforce_element_limit`."""
+    return enforce_element_limit(
+        card, panel_element_id=panel_element_id, text_sizes=text_sizes,
+    )
 
-    # ── Find the unified panel element in card body ──
-    body = card.get("body", {})
-    elements = body.get("elements", [])
-    panel = None
-    for elem in elements:
-        if elem.get("element_id") == panel_element_id and elem.get("tag") == "collapsible_panel":
-            panel = elem
-            break
-
-    if panel is None:
-        # No panel found — nothing to trim (answer/footer must not be trimmed)
-        return card
-
-    children: list[dict] = panel.get("elements", [])
-
-    # ── Check if a collapse hint already exists ──
-    hint_idx = None
-    for i, child in enumerate(children):
-        if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
-            hint_idx = i
-            break
-    _HINT_TEMPLATE = {
-        "tag": "markdown",
-        "content": "⚡ 还有 0 项已折叠",
-        "text_size": _role_text_size(text_sizes, "notice", default="notation"),
-    }
-    _HINT_TAG_COUNT = _count_tag_objects(_HINT_TEMPLATE)  # typically 1
-    if hint_idx is None:
-        total += _HINT_TAG_COUNT  # Reserve exact space for the new collapse hint
-
-    # ── Trim oldest items from panel children until under threshold ──
-    trimmed_count = 0
-    while total > threshold and len(children) > 1:
-        # Skip the collapse hint (first child if it ends with "已折叠")
-        first_content = children[0].get("content", "")
-        remove_idx = 1 if isinstance(first_content, str) and first_content.endswith("已折叠") else 0
-        removed = children.pop(remove_idx)
-        total -= _count_tag_objects([removed])
-        trimmed_count += 1
-
-    if trimmed_count > 0:
-        # Update or add collapse hint
-        # Re-find hint_idx (may have shifted due to removals)
-        hint_idx = None
-        for i, child in enumerate(children):
-            if isinstance(child.get("content"), str) and "已折叠" in child["content"]:
-                hint_idx = i
-                break
-        if hint_idx is not None:
-            # Parse existing trimmed count from hint, then add new trimmed count
-            # e.g. "⚡ 还有 5 项已折叠" → existing_count=5, trimmed_count=3 → "⚡ 还有 8 项已折叠"
-            old_hint = children[hint_idx]["content"]
-            # Extract the number before "项" — simple string parsing, no regex needed
-            existing_count = 0
-            _idx = old_hint.find("项")
-            if _idx > 0:
-                # Walk backwards skipping whitespace, then collect digits
-                _end = _idx
-                while _end > 0 and old_hint[_end - 1] == ' ':
-                    _end -= 1
-                _start = _end
-                while _start > 0 and old_hint[_start - 1].isdigit():
-                    _start -= 1
-                if _start < _end:
-                    existing_count = int(old_hint[_start:_end])
-            total_trimmed = existing_count + trimmed_count
-            children[hint_idx]["content"] = f"⚡ 还有 {total_trimmed} 项已折叠"
-        else:
-            children.insert(0, {
-                "tag": "markdown",
-                "content": f"⚡ 还有 {trimmed_count} 项已折叠",
-                "text_size": _role_text_size(
-                    text_sizes, "notice", default="notation",
-                ),
-            })
-
-    # Update panel children in the card
-    panel["elements"] = children
-    return card
 
 def _build_summary(text: str) -> dict[str, Any]:
     """Feishu CardKit 2.0 displays ``i18n_content.<locale>`` for users"""
@@ -154,6 +59,7 @@ def build_streaming_card_v2(
     loading_hint_status: str = "loading_context",
     loading_status_key: str | None = None,
     loading_status_emoji: str | None = None,
+    loading_status_brand: str | None = None,
     include_answer_element: bool = True,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -179,6 +85,7 @@ def build_streaming_card_v2(
     elements.append(_loading_element(
         status_key=loading_status_key,
         emoji=loading_status_emoji,
+        brand=loading_status_brand,
         text_sizes=text_sizes,
     ))
 

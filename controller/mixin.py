@@ -28,7 +28,6 @@ TERMINATED = CardPhase.TERMINATED
 
 if TYPE_CHECKING:
     from ..config import Config
-    from ..state.session import CardSession
     from ..feishu import FeishuClient
 
 _logger = logging.getLogger("hermes_lark_streaming")
@@ -53,7 +52,6 @@ class ControllerMixin:
     _cfg: Config
     _ensure_init: Callable[[], Coroutine[Any, Any, None]]
     _cleanup: Callable[[str], None]
-    _flush_deferred_background_reviews: Callable[[CardSession], None]
 
     async def _do_cron_deliver(self, chat_id: str, content: str) -> None:
         _logger.info("cron _do_cron_deliver: chat=%s content_len=%d", chat_id[:12], len(content))

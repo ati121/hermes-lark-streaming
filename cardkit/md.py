@@ -36,6 +36,7 @@ __all__ = [
     "_strip_invalid_image_keys",
     "escape_markdown_asterisks",
     "optimize_markdown_style",
+    "render_answer_markdown",
 ]
 
 def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
@@ -150,6 +151,26 @@ def optimize_markdown_style(text: str) -> str:
     except Exception:
         _logger.debug("optimize_markdown_style failed", exc_info=True)
         return text
+
+def render_answer_markdown(text: str, *, final: bool = False, table_limit: int = _MAX_CARD_TABLES) -> str:
+    """Normalise answer text for one card write — the single markdown exit.
+
+    Four call sites used to assemble this pipeline by hand and disagreed:
+    streaming writes skipped the table limit, the static fallback card skipped
+    both the limit and the asterisk escape, and the interactive card applied
+    ``optimize_markdown_style`` only to the final frame. Routing every answer
+    write through here keeps the streamed prefix byte-identical to the sealed
+    one, so the last partial update is not a visible re-layout.
+
+    ``final`` adds the whole-text passes (heading/table normalisation). During
+    streaming they are skipped because each delta would re-run them over an
+    ever-growing string; the seal always runs them once.
+    """
+    if not text:
+        return " "
+    rendered = _downgrade_tables(optimize_markdown_style(text), limit=table_limit) if final else text
+    return escape_markdown_asterisks(rendered) or " "
+
 
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
     """将超长文本按段落/换行拆分为多个不超过 limit 字符的块."""

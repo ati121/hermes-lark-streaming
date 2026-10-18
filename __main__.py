@@ -263,7 +263,7 @@ def _cmd_doctor() -> int:
     print(f"      env vars:    {'configured' if has_env else 'not set'}")
     print(f"      config.yaml: {'configured' if has_cfg else 'not set'}")
     print(f"      ~/.hermes/.env: {'exists' if env_file.exists() else 'not found'}"
-          + (f" (found)" if has_dotenv else ""))
+          + (" (found)" if has_dotenv else ""))
     if not (has_env or has_cfg or has_dotenv):
         print("      ⚠ MISSING — cards will NOT work.")
 

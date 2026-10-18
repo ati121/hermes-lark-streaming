@@ -16,6 +16,7 @@ __all__ = [
     "_resolve_tool_descriptor",
     "_sanitize_detail",
     "_tool_emoji",
+    "_tool_brand",
     "_TOOL_DESCRIPTORS",
     "_SENSITIVE_NAME_RE",
     "_INLINE_ASSIGNMENT_RE",
@@ -29,6 +30,7 @@ import re
 import shlex
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 
@@ -350,6 +352,35 @@ _TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
     "gh": ("GitHub", "GitHub", "🐙"),
 }
 
+# ``gh`` is the GitHub CLI, but some of its calls never leave the machine.
+# Those rows stay 🖥️ 终端命令 so 🐙 means "this talked to GitHub", not merely
+# "this ran gh" (老大 2026-10-18).
+_GH_LOCAL_COMMANDS = frozenset({"help", "completion", "config", "alias", "licenses"})
+_GH_LOCAL_FLAGS = frozenset({"--help", "-h", "--version"})
+
+
+def _gh_is_local_only(tokens: list[str]) -> bool:
+    """True when a ``gh`` invocation cannot reach GitHub.
+
+    Covers bare ``gh``, help/version flags anywhere, the help topic command,
+    and the local-only tables (completion scripts, config, aliases, licenses,
+    installed extensions). ``gh extension install`` and everything else still
+    counts as a GitHub call.
+    """
+    if not tokens:
+        return True  # bare ``gh`` prints its help text
+    if any(token in _GH_LOCAL_FLAGS for token in tokens):
+        return True
+    words = [token for token in tokens if not token.startswith("-")]
+    if not words:
+        return True
+    if words[0] in _GH_LOCAL_COMMANDS:
+        return True
+    # ``gh extension`` prints help; ``gh extension list`` reads the local dir.
+    if words[0] == "extension":
+        return len(words) == 1 or words[1] == "list"
+    return False
+
 # Only known entry points identify image generation. Inspecting a script or
 # running its help is not generation, even when its filename contains image.
 _IMAGE_SCRIPTS = {"gpt_image_gen.py": "GPT", "zimage_gen.py": "Zimage"}
@@ -399,14 +430,16 @@ def _resolve_var_token(token: str, variables: dict[str, str]) -> str:
     return value.split()[0]
 
 
-def _command_programs(command: str) -> list[list[str]]:
-    """Leading program tokens (basenames) of each segment of a shell command.
+def _command_invocations(command: str) -> list[tuple[list[str], list[str]]]:
+    """``(leading_tokens, remaining_tokens)`` for each segment of a shell command.
 
-    Each item is ``[program]`` or ``[interpreter, script]``: for
+    ``leading_tokens`` is ``[program]`` or ``[interpreter, script]``: for
     ``python3 /x/zimage_gen.py "p"`` the script is what identifies the call.
+    ``remaining_tokens`` are the arguments after those leading tokens, which
+    is what tells a local ``gh --version`` from a GitHub request.
     Variable references are resolved against the assignments on the same line.
     """
-    programs: list[list[str]] = []
+    invocations: list[tuple[list[str], list[str]]] = []
     variables = _shell_variables(command)
     for segment in _COMMAND_SEGMENT_RE.split(command or ""):
         tokens = [t.strip("'\"") for t in segment.split()]
@@ -421,12 +454,14 @@ def _command_programs(command: str) -> list[list[str]]:
         if not base:
             continue
         entry = [base]
-        if _SCRIPT_INTERPRETER_RE.match(base) and i + 1 < len(tokens) and not tokens[i + 1].startswith("-"):
-            script = os.path.basename(_resolve_var_token(tokens[i + 1], variables).replace("\\", "/"))
+        i += 1
+        if _SCRIPT_INTERPRETER_RE.match(base) and i < len(tokens) and not tokens[i].startswith("-"):
+            script = os.path.basename(_resolve_var_token(tokens[i], variables).replace("\\", "/"))
             if script:
                 entry.append(script)
-        programs.append(entry)
-    return programs
+                i += 1
+        invocations.append((entry, tokens[i:]))
+    return invocations
 
 
 def _lookup_terminal_program(basename: str) -> tuple[str, str, str] | None:
@@ -548,7 +583,7 @@ def _terminal_image_spec(command: str) -> tuple[list[str], tuple[str, str, str]]
     return help_match
 
 
-def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
+def _terminal_program_spec_uncached(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
     """``(leading_tokens, spec)`` when a ``terminal`` command runs a listed program.
 
     ``leading_tokens`` are the command tokens the match covers (``["gh"]`` or
@@ -565,16 +600,62 @@ def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str,
     command = _terminal_command_text(name, detail, args)
     if not command:
         return None
+    return _terminal_program_spec_for_command(command)
+
+
+def _terminal_program_spec_for_command(command: str) -> tuple[list[str], tuple[str, str, str]] | None:
+    """Resolve a command line to a listed program — split out so it can be cached."""
     image = _terminal_image_spec(command)
     if image is not None:
         return image
-    for entry in _command_programs(command):
+    for entry, rest in _command_invocations(command):
         # The script (if any) is the more specific name; try it first.
         for candidate in reversed(entry):
             spec = _lookup_terminal_program(candidate)
-            if spec is not None:
-                return entry, spec
+            if spec is None:
+                continue
+            if candidate.lower() == "gh" and _gh_is_local_only(rest):
+                continue
+            return entry, spec
     return None
+
+
+@lru_cache(maxsize=512)
+def _cached_terminal_program_spec(command: str) -> tuple[tuple[str, ...], tuple[str, str, str]] | None:
+    """Memoised shell analysis for one command line.
+
+    ``build_display_steps`` resolves every row four times (title, emoji,
+    brand, alias stripping) and each resolution re-runs ``shlex.split`` and
+    the segment walker. Profiling 20 terminal rows showed ~2.5 ms per render,
+    45 % of it inside ``shlex``. The command string is the only input that
+    affects the result, so caching by it makes repeat renders free.
+    """
+    spec = _terminal_program_spec_for_command(command)
+    if spec is None:
+        return None
+    entry, resolved = spec
+    return tuple(entry), resolved
+
+
+def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
+    """Cached :func:`_terminal_program_spec_uncached`.
+
+    Returns a fresh list for ``leading_tokens`` so callers cannot corrupt the
+    cached tuple.
+    """
+    if not name or _normalize_tool_name(name) != "terminal":
+        return None
+    if isinstance(args, dict) and args.get("_hls_image_generate") is True:
+        en, zh = _tool_display_names("image_generate", args=args)
+        return [], (zh, en, "🎨")
+    command = _terminal_command_text(name, detail, args)
+    if not command:
+        return None
+    cached = _cached_terminal_program_spec(command)
+    if cached is None:
+        return None
+    entry, resolved = cached
+    return list(entry), resolved
 
 
 def _terminal_command_text(name: str | None, detail: str | None, args: dict[str, Any] | None) -> str:
@@ -830,6 +911,22 @@ def _tool_emoji(name: str | None, detail: str | None = None, args: dict[str, Any
         return _TOOL_EMOJI_BY_ICON.get(str(desc.get("icon") or ""), _DEFAULT_TOOL_EMOJI)
     return _DEFAULT_TOOL_EMOJI
 
+def _tool_brand(name: str | None, detail: str | None = None, args: dict[str, Any] | None = None) -> str | None:
+    """Bundled artwork for a tool row, when an emoji is not enough.
+
+    ``gh`` rows get the real GitHub mark instead of 🐙. Resolution mirrors
+    :func:`_tool_emoji`, so the artwork only appears on the same calls that
+    would have shown the octopus — a local ``gh --version`` keeps 🖥️.
+    """
+    aliased = _terminal_program_spec(name, detail, args)
+    if aliased is None:
+        return None
+    # Spec tuple is ``(zh, en, emoji)`` — index rather than unpack so the
+    # ordering can't silently drift into the wrong name here.
+    if aliased[1][1] == "GitHub":
+        return "github"
+    return None
+
 def _spec_to_descriptor(name: str, spec: tuple[str, str, str, str | None, bool]) -> dict[str, Any]:
     zh, en, icon, sanitizer, no_result = spec
     return {
@@ -932,6 +1029,21 @@ def _fenced_block(language: str, content: str) -> dict[str, Any]:
     fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", content)), default=0) + 1)
     return {"language": language, "content": content, "fenced": f"{fence}{language}\n{content}\n{fence}"}
 
+
+# Tool results are embedded verbatim into the card, and a single ``terminal``
+# or ``web_extract`` call can return megabytes. Feishu's card body has a size
+# budget well below that, and the whole string is re-serialized on every
+# flush, so cap it at storage time rather than at render time.
+_TOOL_OUTPUT_MAX_CHARS = 4000
+
+
+def _clip_tool_output(text: str) -> str:
+    """Truncate a stored tool result, marking that it was cut."""
+    if not isinstance(text, str) or len(text) <= _TOOL_OUTPUT_MAX_CHARS:
+        return text
+    omitted = len(text) - _TOOL_OUTPUT_MAX_CHARS
+    return f"{text[:_TOOL_OUTPUT_MAX_CHARS]}\n…（已截断 {omitted} 字符）"
+
 class ToolUseTracker:
     """按 session 隔离，每个会话独立生命周期."""
 
@@ -1014,6 +1126,14 @@ class ToolUseTracker:
             return None
         return _tool_emoji(step.name, step.detail, step.args)
 
+    @property
+    def status_tool_brand(self) -> str | None:
+        """Bundled artwork for the spinner row, when the emoji is a stand-in."""
+        step = self._status_step()
+        if step is None:
+            return None
+        return _tool_brand(step.name, step.detail, step.args)
+
     def record_memory_retrieval(self, elapsed_ms: float, outcome: str = "completed") -> bool:
         if self._session is None:
             self._session = ToolSession(started_at=time.time())
@@ -1048,8 +1168,14 @@ class ToolUseTracker:
             return
         desc = _resolve_tool_descriptor(name)
         sanitizer = desc.get("sanitizer") if desc else None
+        output = _clip_tool_output(output)
+        error = _clip_tool_output(error)
+        # Hermes is not consistent about casing between the started and
+        # completed events. A strict comparison left the started row stuck at
+        # "running" forever, which also pinned the spinner to that tool.
+        target = _normalize_tool_name(name)
         for step in reversed(self._session.steps):
-            if step.name == name and step.status == "running":
+            if _normalize_tool_name(step.name) == target and step.status == "running":
                 step.status = "error" if error else "success"
                 step.error = error
                 step.output = output
@@ -1059,6 +1185,10 @@ class ToolUseTracker:
                 elif output:
                     step.result_block = _build_display_block(output, "json", sanitizer=sanitizer)
                 return
+        if len(self._session.steps) >= self._max_steps:
+            # A result with no matching start must not grow the session past
+            # the same cap record_start enforces.
+            return
         self._session.steps.append(
             ToolStep(
                 name=name,
@@ -1116,6 +1246,7 @@ class ToolUseTracker:
                     # the card renders ``emoji``, not this token.
                     "icon": desc["icon"] if desc else "setting-inter_outlined",
                     "emoji": _tool_emoji(s.name, s.detail, s.args),
+                    "brand": _tool_brand(s.name, s.detail, s.args),
                     "elapsed_ms": s.elapsed_ms,
                     "result_block": None if (desc and desc.get("no_result")) else s.result_block,
                     "error_block": s.error_block,

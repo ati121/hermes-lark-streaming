@@ -10,5 +10,4 @@ from .phase import (  # noqa: F401
     TERMINAL_PHASES,
     _TERMINAL,
     PHASE_TRANSITIONS,
-    is_legal_transition,
 )
