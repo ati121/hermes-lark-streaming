@@ -4,7 +4,7 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
-## v1.34 (2026-10-18, personal fork)
+## v1.35 (2026-10-19, personal fork)
 
 ### Fixed — the GitHub row: where the mark goes, and keeping the animation
 
@@ -16,9 +16,16 @@ filesystem paths.
   tool icons.
 - The status row now always carries the animation (`_LOADING_IMG_KEY`) on
   every path. Brand artwork stays on the panel's tool row, where it lines up
-  with the other tool icons. `brand` handed to the status row only suppresses
-  the duplicate emoji in its text.
-- The status row gained an 8px left inset (`_STATUS_ROW_INSET`) matching the
+  with the other tool icons.
+- Removing the mark from the status row entirely left a bare `••• GitHub`:
+  when the panel is collapsed the tool row is not visible, so nothing on the
+  card showed what the call was. An animation and a mark cannot share one
+  `div`, so the row is now a fixed two-column `column_set` — animation on the
+  left, brand mark plus label on the right. The shape is the same with and
+  without a brand: `partial_update_element` refuses to change an element's
+  `tag`, so a row that flipped between `div` and `column_set` would be
+  rejected the moment a `gh` call started.
+- The status row keeps an 8px left inset (`_STATUS_ROW_INSET`) matching the
   panel's own 8px padding, so both icon columns sit on one optical line.
 - `brand` now travels through `_current_loading_status` as part of a 4-tuple.
   It used to be passed only by the whole-card render, so the

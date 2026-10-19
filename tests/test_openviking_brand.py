@@ -13,6 +13,19 @@ from hermes_lark_streaming.feishu.branding import GITHUB_ASSET, OPENVIKING_ASSET
 from hermes_lark_streaming.state.tooluse import ToolUseTracker
 
 
+def _row_text(row: dict) -> dict:
+    return row["columns"][1]["elements"][0]["text"]
+
+
+def _spinner_icon(row: dict) -> dict:
+    return row["columns"][0]["elements"][0]["icon"]
+
+
+def _row_brand_icon(row: dict):
+    return row["columns"][1]["elements"][0].get("icon")
+
+
+
 @pytest.mark.asyncio
 async def test_artwork_cached_and_payload_not_mutated():
     assets = BrandAssets()
@@ -56,8 +69,8 @@ def test_official_icon_on_every_openviking_tool(name):
     # The spinner row's icon slot is the animation and nothing else: Feishu
     # allows one icon per div, so brand artwork there would hide the spinner.
     spinner = _loading_element(("OpenViking · Memory", "OpenViking · 记忆"), emoji="📖")
-    assert spinner["icon"]["img_key"] == _LOADING_IMG_KEY
-    assert "📖" not in spinner["text"]["content"]
+    assert _spinner_icon(spinner)["img_key"] == _LOADING_IMG_KEY
+    assert "📖" not in _row_text(spinner)["content"]
 
 
 def test_non_openviking_tools_keep_their_icons():
@@ -105,8 +118,9 @@ class TestGitHubBrand:
         spinner = _loading_element(
             tracker.status_tool_names, emoji=tracker.status_tool_emoji, brand="github",
         )
-        assert spinner["icon"]["img_key"] == _LOADING_IMG_KEY
-        assert "🐙" not in spinner["text"]["content"]
+        assert _spinner_icon(spinner)["img_key"] == _LOADING_IMG_KEY
+        assert _row_brand_icon(spinner)["img_key"] == GITHUB_ASSET
+        assert "🐙" not in _row_text(spinner)["content"]
         # And the tool row still shows the real mark.
         row = _build_tool_step_title(tracker.build_display_steps()[0])
         assert row["icon"]["img_key"] == GITHUB_ASSET
@@ -119,7 +133,7 @@ class TestGitHubBrand:
             tracker.status_tool_names, emoji=tracker.status_tool_emoji,
             brand=tracker.status_tool_brand,
         )
-        assert "🖥️" in spinner["text"]["content"]
+        assert "🖥️" in _row_text(spinner)["content"]
 
     @pytest.mark.asyncio
     async def test_github_asset_uploads_and_replaces_the_marker(self):

@@ -16,7 +16,6 @@ from ..cardkit import (
     _count_tag_objects,
     _loading_element,
     _loading_hint_element,
-    _loading_status_text,
     _streaming_element,
     build_interactive_card_v2,
     build_preservative_seal_actions,
@@ -1155,16 +1154,13 @@ class UnifiedControllerMixin:
             "action": "partial_update_element",
             "params": {
                 "element_id": _LOADING_ELEMENT_ID,
-                "partial_element": {
-                    "icon": _loading_element(
-                        label, status_key=status_key, emoji=emoji, brand=brand,
-                    )["icon"],
-                    "text": _loading_status_text(
-                        label, status_key=status_key, emoji=emoji,
-                        branded=bool(brand),
-                        text_sizes=session.text_sizes,
-                    ),
-                },
+                # The row is a fixed two-column column_set. Columns (and the
+                # cell inside them) carry no element_id of their own, so the
+                # whole row is resent; tag stays column_set on every update.
+                "partial_element": _loading_element(
+                    label, status_key=status_key, emoji=emoji, brand=brand,
+                    text_sizes=session.text_sizes,
+                ),
             },
         }]
         session.sequence += 1

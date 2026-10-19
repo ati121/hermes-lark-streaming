@@ -23,6 +23,7 @@ __all__ = [
     '_collapsible_panel',
     '_streaming_element',
     '_loading_element',
+    '_loading_status_cell',
     '_loading_status_text',
     '_loading_hint_element',
     '_build_tool_step_elements',
@@ -380,6 +381,27 @@ def _loading_status_text(
     }
     return _set_text_size(text, _role_text_size(text_sizes, "notice", default="notation"))
 
+def _loading_status_cell(
+    label: tuple[str, str] | None = None,
+    *,
+    status_key: str | None = None,
+    emoji: str | None = None,
+    brand: str | None = None,
+    text_sizes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The right-hand cell of the status row: optional brand mark + label."""
+    from ..feishu.branding import brand_icon
+
+    text = _loading_status_text(
+        label, status_key=status_key, emoji=emoji, branded=bool(brand),
+        text_sizes=text_sizes,
+    )
+    cell: dict[str, Any] = {"tag": "div", "text": text}
+    if brand:
+        cell["icon"] = brand_icon(brand)
+    return cell
+
+
 def _loading_element(
     label: tuple[str, str] | None = None,
     *,
@@ -387,32 +409,53 @@ def _loading_element(
     emoji: str | None = None,
     brand: str | None = None,
     text_sizes: Mapping[str, Any] | None = None,
-) -> dict:
-    """Loading spinner row.
+) -> dict[str, Any]:
+    """The status row: loading animation on the left, optional brand mark beside it.
 
-    The icon slot always carries the animated spinner. Feishu's ``div.icon``
-    holds exactly one object — there is no list form — and ``lark_md`` cannot
-    render images, so a brand mark placed here would *displace* the animation
-    rather than sit beside it. It also sits at the card's left edge, while the
-    other tool icons are inset inside the panel.
+    Always the same shape — a two-column ``column_set``.
 
-    Brand artwork therefore stays on the panel's tool rows, where it lines up
-    with every other tool icon. ``brand`` is still honoured here, but only to
-    drop the emoji from the label — the real mark is already one row below.
+    Feishu allows one icon per ``div`` (``icon`` is a single object, there is
+    no list form) and ``lark_md`` cannot render images, so an animation and a
+    brand mark can only coexist as two elements. The shape must not depend on
+    whether a brand is present: ``partial_update_element`` refuses to change an
+    element's ``tag``, and a row that flipped between ``div`` and
+    ``column_set`` would be rejected the first time a `gh` call started.
+
+    ``_LOADING_ELEMENT_ID`` stays on the outer element, so the seal's delete
+    path and the label update both keep addressing one element at one id.
     """
+    cell = _loading_status_cell(
+        label, status_key=status_key, emoji=emoji, brand=brand,
+        text_sizes=text_sizes,
+    )
     return {
-        "tag": "div",
-        "icon": {
-            "tag": "custom_icon",
-            "img_key": _LOADING_IMG_KEY,
-            "size": "16px 16px",
-        },
-        "text": _loading_status_text(
-            label, status_key=status_key, emoji=emoji, branded=bool(brand),
-            text_sizes=text_sizes,
-        ),
+        "tag": "column_set",
         "element_id": _LOADING_ELEMENT_ID,
+        "flex_mode": "none",
+        "horizontal_spacing": "0px",
         "margin": _STATUS_ROW_INSET,
+        "columns": [
+            {
+                "tag": "column",
+                "width": "auto",
+                "vertical_align": "center",
+                "elements": [{
+                    "tag": "div",
+                    "icon": {
+                        "tag": "custom_icon",
+                        "img_key": _LOADING_IMG_KEY,
+                        "size": "16px 16px",
+                    },
+                }],
+            },
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "center",
+                "elements": [{**cell, "margin": "0px 0px 0px 6px"}],
+            },
+        ],
     }
 
 def _loading_hint_element(status_key: str = "loading_context") -> dict:

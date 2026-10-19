@@ -38,6 +38,12 @@ from hermes_lark_streaming.cardkit import (
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 
 
+def _row_text(row: dict) -> dict:
+    """Label text inside the status row (fixed two-column layout)."""
+    return row["columns"][1]["elements"][0]["text"]
+
+
+
 def _enable(ctrl: StreamCardController, *, linear: bool = False) -> None:
     ctrl._cfg._raw = {
         "hermes_lark_streaming": {"enabled": True, "linear": linear},
@@ -222,7 +228,7 @@ def test_model_activity_rebuilds_interactive_card_with_thinking_status() -> None
         element for element in card["body"]["elements"]
         if element.get("element_id") == _LOADING_ELEMENT_ID
     )
-    assert spinner["text"]["i18n_content"]["zh_cn"].endswith("模型思考中...")
+    assert _row_text(spinner)["i18n_content"]["zh_cn"].endswith("模型思考中...")
 
 
 def test_compression_rebuilds_interactive_card_with_compressing_status() -> None:
@@ -269,7 +275,7 @@ def test_worker_first_activity_immediately_updates_interactive_card() -> None:
                 element for element in card["body"]["elements"]
                 if element.get("element_id") == _LOADING_ELEMENT_ID
             )
-            assert spinner["text"]["i18n_content"]["zh_cn"].endswith(
+            assert _row_text(spinner)["i18n_content"]["zh_cn"].endswith(
                 "模型思考中..."
             )
         except BaseException as exc:
@@ -1357,8 +1363,11 @@ class TestDoUnifiedFlush:
             if a["action"] == "partial_update_element"
             and a["params"]["element_id"] == _LOADING_ELEMENT_ID
         )
-        assert "tag" not in update["params"]["partial_element"]
-        partial = update["params"]["partial_element"]["text"]
+        # A partial update may not change the tag, so the row keeps its
+        # column_set shape; it resends the whole row instead.
+        element = update["params"]["partial_element"]
+        assert element["tag"] == "column_set"
+        partial = _row_text(element)
         assert partial["i18n_content"]["zh_cn"] == "  💭 模型思考中..."
         assert session._loading_status_key == "model_thinking"
 
@@ -1440,7 +1449,7 @@ class TestDoUnifiedFlush:
             a for a in actions
             if a["action"] == "partial_update_element"
             and a["params"].get("element_id") == _LOADING_ELEMENT_ID
-            and a["params"]["partial_element"]["text"]
+            and _row_text(a["params"]["partial_element"])
             .get("i18n_content", {}).get("zh_cn", "").endswith("模型思考中...")
         ]
         assert thinking, "spinner 行从未收到 模型思考中"
@@ -1555,7 +1564,7 @@ class TestDoUnifiedFlush:
             e for e in card["body"]["elements"]
             if e.get("element_id") == _LOADING_ELEMENT_ID
         )
-        assert spinner["text"]["i18n_content"]["zh_cn"].endswith("模型思考中...")
+        assert _row_text(spinner)["i18n_content"]["zh_cn"].endswith("模型思考中...")
         assert session._loading_status_key == "model_thinking"
         assert _LOADING_HINT_ELEMENT_ID not in session.existing_elements
 
@@ -1598,7 +1607,7 @@ class TestDoUnifiedFlush:
             e for e in card["body"]["elements"]
             if e.get("element_id") == _LOADING_ELEMENT_ID
         )
-        assert "i18n_content" not in spinner["text"], "还没首字，spinner 不该抢先说思考中"
+        assert "i18n_content" not in _row_text(spinner), "还没首字，spinner 不该抢先说思考中"
         assert session._loading_status_key is None
         assert _LOADING_HINT_ELEMENT_ID in session.existing_elements
 

@@ -50,6 +50,12 @@ async def test_query_status_ends_without_invented_internal_stages(make_pipeline)
     assert "准备记忆上下文" not in str(pipeline.client.mock_calls)
 
 
+
+def _row_text(row: dict) -> dict:
+    """Label text inside the status row (fixed two-column layout)."""
+    return row["columns"][1]["elements"][0]["text"]
+
+
 class MemoryManager:
     """A bound per-provider wait, matching the Hermes manager entry point."""
 
@@ -309,7 +315,7 @@ async def test_initial_card_shows_active_recall_once(make_pipeline, interactive)
         else pipeline.client.cardkit_create.await_args.args[0]
     )
     assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == _RECALL
-    assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
+    assert _row_text(element(card, _LOADING_ELEMENT_ID))["content"] == " "
     assert _WAITING not in json.dumps(card, ensure_ascii=False)
 
 
@@ -334,7 +340,7 @@ async def test_query_lifecycle_works_without_server_events(
     if interactive:
         card = pipeline.client.update_card.await_args.args[1]
         assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == _RECALL
-        assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
+        assert _row_text(element(card, _LOADING_ELEMENT_ID))["content"] == " "
     else:
         assert session.existing_elements == {_LOADING_ELEMENT_ID, _LOADING_HINT_ELEMENT_ID}
         assert session._loading_hint_state == "openviking_recall"
@@ -347,7 +353,7 @@ async def test_query_lifecycle_works_without_server_events(
     if interactive:
         card = pipeline.client.update_card.await_args.args[1]
         assert element(card, _LOADING_HINT_ELEMENT_ID)["text"]["i18n_content"]["zh_cn"] == _WAITING
-        assert element(card, _LOADING_ELEMENT_ID)["text"]["content"] == " "
+        assert _row_text(element(card, _LOADING_ELEMENT_ID))["content"] == " "
     else:
         assert hint_updates(pipeline.client)[-1]["i18n_content"]["zh_cn"] == _WAITING
         assert _LOADING_HINT_ELEMENT_ID in session.existing_elements

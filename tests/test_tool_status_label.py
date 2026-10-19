@@ -26,6 +26,21 @@ from hermes_lark_streaming.state.tooluse import (
 )
 
 
+def _row_text(row: dict) -> dict:
+    """The label text object inside a status row (a fixed two-column layout)."""
+    return row["columns"][1]["elements"][0]["text"]
+
+
+def _row_icon(row: dict):
+    """The brand icon of a status row, or None when the row carries no mark."""
+    return row["columns"][1]["elements"][0].get("icon")
+
+
+def _spinner_icon(row: dict) -> dict:
+    """The animation icon of a status row (always the left column)."""
+    return row["columns"][0]["elements"][0]["icon"]
+
+
 class TestRealHermesToolNames:
     """Names observed in production on DXP4800 (agent.log)."""
 
@@ -446,8 +461,8 @@ class TestLoadingStatusText:
     def test_label_lands_in_the_spinner_row(self) -> None:
         el = _loading_element(("Read", "读取文件"), emoji="📄")
         assert el["element_id"] == _LOADING_ELEMENT_ID
-        assert el["icon"]["tag"] == "custom_icon"  # the three dots
-        assert el["text"]["i18n_content"]["zh_cn"] == "  📄 读取文件"
+        assert _spinner_icon(el)["tag"] == "custom_icon"  # the three dots
+        assert _row_text(el)["i18n_content"]["zh_cn"] == "  📄 读取文件"
 
     def test_spinner_row_adds_no_elements(self) -> None:
         from hermes_lark_streaming.cardkit.elements import _count_tag_objects
@@ -519,7 +534,7 @@ class TestLabelReachedFromRealFlush:
 
         updates = self._label_updates(client)
         assert updates, "spinner label was never sent during a real flush"
-        assert "终端命令" in updates[-1]["text"]["i18n_content"]["zh_cn"]
+        assert "终端命令" in _row_text(updates[-1])["i18n_content"]["zh_cn"]
 
     def test_label_stays_after_a_fast_tool_finishes(self) -> None:
         """The 1s terminal call that blinked and vanished on Feishu."""
@@ -536,8 +551,8 @@ class TestLabelReachedFromRealFlush:
 
         updates = self._label_updates(client)
         assert updates, "label was never sent"
-        assert "终端命令" in updates[-1]["text"]["i18n_content"]["zh_cn"]
-        blanks = [u for u in updates if u["text"].get("content") == " "]
+        assert "终端命令" in _row_text(updates[-1])["i18n_content"]["zh_cn"]
+        blanks = [u for u in updates if _row_text(u).get("content") == " "]
         assert not blanks, "label must not blank out when a tool completes"
 
     def test_label_rotates_to_the_next_tool(self) -> None:
@@ -553,7 +568,7 @@ class TestLabelReachedFromRealFlush:
         finally:
             loop.close()
 
-        zh = [u["text"]["i18n_content"]["zh_cn"] for u in self._label_updates(client)]
+        zh = [_row_text(u)["i18n_content"]["zh_cn"] for u in self._label_updates(client)]
         assert "终端命令" in zh[0]
         assert "读取文件" in zh[-1]
 
@@ -569,7 +584,7 @@ class TestLabelReachedFromRealFlush:
 
         updates = self._label_updates(client)
         assert updates, "label lost when an answer delta shares the flush"
-        assert "读取文件" in updates[-1]["text"]["i18n_content"]["zh_cn"]
+        assert "读取文件" in _row_text(updates[-1])["i18n_content"]["zh_cn"]
 
 
 class TestFooterStatusIcons:
@@ -690,8 +705,10 @@ class TestSyncLoadingLabel:
         assert actions[0]["action"] == "partial_update_element"
         assert actions[0]["params"]["element_id"] == _LOADING_ELEMENT_ID
         partial = actions[0]["params"]["partial_element"]
-        assert "tag" not in partial, "partial_update_element 不应带 tag"
-        assert "终端命令" in partial["text"]["i18n_content"]["zh_cn"]
+        # A partial update may not change an element's tag, so the row keeps
+        # its column_set shape on every update.
+        assert partial["tag"] == "column_set"
+        assert "终端命令" in _row_text(partial)["i18n_content"]["zh_cn"]
         assert session._loading_label == ("Terminal", "终端命令")
 
     def test_skips_when_unchanged(self) -> None:
@@ -727,7 +744,7 @@ class TestSyncLoadingLabel:
         asyncio.run(self._ctrl(client)._sync_loading_label(session))
 
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
-        assert "读取文件" in partial["text"]["i18n_content"]["zh_cn"]
+        assert "读取文件" in _row_text(partial)["i18n_content"]["zh_cn"]
 
     def test_github_spinner_uses_the_mark_not_the_emoji(self) -> None:
         """The spinner keeps its animation; the mark lives on the tool row.
@@ -747,8 +764,8 @@ class TestSyncLoadingLabel:
         asyncio.run(self._ctrl(client)._sync_loading_label(session))
 
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
-        assert partial["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
-        assert "🐙" not in partial["text"]["i18n_content"]["zh_cn"]
+        assert _spinner_icon(partial)["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+        assert "🐙" not in _row_text(partial)["i18n_content"]["zh_cn"]
         assert session._loading_brand == "github"
 
     def test_github_brand_change_is_pushed_even_with_the_same_label(self) -> None:
@@ -769,8 +786,8 @@ class TestSyncLoadingLabel:
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
         # Same animation either way; what changed is that the plain row now
         # carries its own emoji again.
-        assert partial["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
-        assert "🖥️" in partial["text"]["i18n_content"]["zh_cn"]
+        assert _spinner_icon(partial)["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+        assert "🖥️" in _row_text(partial)["i18n_content"]["zh_cn"]
         assert session._loading_brand is None
 
     def test_skips_after_loading_element_deleted(self) -> None:
