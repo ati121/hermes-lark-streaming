@@ -730,12 +730,14 @@ class TestSyncLoadingLabel:
         assert "读取文件" in partial["text"]["i18n_content"]["zh_cn"]
 
     def test_github_spinner_uses_the_mark_not_the_emoji(self) -> None:
-        """Regression: the row showed 🐙 while the tool row below had the mark.
+        """The spinner keeps its animation; the mark lives on the tool row.
 
-        The emoji travels with a ``brand`` key, and only the fully rendered
-        card was passing it. The spinner update — the path that actually runs
-        during a tool call — sent the emoji alone, so the stand-in stayed
-        visible for the whole GitHub request.
+        Regression: `brand` was only passed by the whole-card render, so the
+        partial update sent the emoji alone. Passing the mark through instead
+        would have been worse — Feishu's ``div.icon`` is one object, so the
+        brand image would *replace* the loading animation. The spinner now
+        always keeps the animation and simply drops its emoji when the panel
+        row below already shows the real mark.
         """
         client = MagicMock()
         client.cardkit_batch_update = AsyncMock()
@@ -745,7 +747,7 @@ class TestSyncLoadingLabel:
         asyncio.run(self._ctrl(client)._sync_loading_label(session))
 
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
-        assert partial["icon"]["img_key"] == "hls-asset:github"
+        assert partial["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
         assert "🐙" not in partial["text"]["i18n_content"]["zh_cn"]
         assert session._loading_brand == "github"
 
@@ -765,8 +767,10 @@ class TestSyncLoadingLabel:
 
         client.cardkit_batch_update.assert_awaited_once()
         partial = client.cardkit_batch_update.await_args.args[1][0]["params"]["partial_element"]
-        assert partial["icon"]["tag"] == "custom_icon"
-        assert partial["icon"]["img_key"] != "hls-asset:github"
+        # Same animation either way; what changed is that the plain row now
+        # carries its own emoji again.
+        assert partial["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+        assert "🖥️" in partial["text"]["i18n_content"]["zh_cn"]
         assert session._loading_brand is None
 
     def test_skips_after_loading_element_deleted(self) -> None:

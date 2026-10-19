@@ -21,15 +21,24 @@ filesystem paths.
   matched.
 - GitHub rows now carry the official Octocat mark from
   `feishu/assets/github.png` instead of the 🐙 stand-in. It renders in the
-  div's `icon` slot on both the tool row and the spinner, uploaded once per
-  bot and cached by the same `BrandAssets` path as OpenViking; a failed
-  upload falls back to `setting_outlined`.
+  div's `icon` slot on the tool row, uploaded once per bot and cached by the
+  same `BrandAssets` path as OpenViking; a failed upload falls back to
+  `setting_outlined`.
 - The spinner still showed 🐙 in practice, because only the fully rendered
   card passed `brand` to `_loading_element`; the `partial_update_element` path
   that runs during every tool call sent the emoji alone. `brand` now travels
   with the emoji through `_current_loading_status`, on the spinner update, the
   streaming card created mid-turn, and the interactive card. A tool switch
   that only changes the brand is also no longer skipped as "same label".
+- Routing that brand into the spinner's `icon` slot was wrong and is reverted:
+  Feishu's `div.icon` holds exactly one object (no list form) and `lark_md`
+  does not support images at all ("不支持在 text 元素的 lark_md 类型中使用"),
+  so the mark *replaced* the loading animation instead of sitting beside it,
+  and it also rendered at the card's far-left edge rather than in the panel's
+  icon column. The spinner slot is the animation again, on every path; the
+  brand stays on the panel's tool row, and `brand` on the status row only
+  suppresses the duplicate emoji. The status row also gets an 8px left inset
+  so its icon lines up with the panel's 8px padding.
 - `feishu/assets/github.png` was a grey rounded badge with a reversed-out cat,
   which at 16px read as a grey square rather than GitHub's mark. It is now the
   official Octocat silhouette on a transparent background, cropped to the ink

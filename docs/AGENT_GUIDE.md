@@ -391,6 +391,12 @@ MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计
   由 `feishu/branding.py` 按 bot 上传并缓存 `img_key`（与 OpenViking 同一套机制，
   上传失败回退 `setting_outlined`）。新增品牌图标时在 `_ASSETS` 和 `_BRAND_ICONS`
   各加一条即可。
+- 品牌图标**只放在面板内的工具行**，不要放进状态行（`loading_icon`）。飞书
+  `div.icon` 只能放一个图标对象，没有数组形式，而且 `lark_md` 不支持行内图片
+  （官方明确写「不支持在 text 元素的 lark_md 类型中使用」）。放进去不是并排，
+  而是把转圈动画顶掉。状态行固定用 `_LOADING_IMG_KEY` 承载动画；`brand` 传进来
+  只用于去掉文本里的 emoji，避免同一个 mark 出现两次。状态行带
+  `_STATUS_ROW_INSET`（8px 左缩进），与面板 8px 内边距对齐。
 - `_IMAGE_SCRIPTS`：只识别已知生图入口 `gpt_image_gen.py` / `zimage_gen.py`，
   并由 `_image_script_action` 按参数确定动作。GPT 脚本可覆盖模型，标签使用家族名，
   不把默认模型版本写死在界面上。

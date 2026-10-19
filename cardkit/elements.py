@@ -95,6 +95,12 @@ _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_HINT_ELEMENT_ID = "context_loading_hint"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 
+# Horizontal inset for the spinner row. The panel's own rows are indented by
+# its 8px padding, so an un-inset spinner icon sits further left than every
+# tool icon below it and the column looks broken. Matching that padding keeps
+# the spinner mark on the same optical line as the tool marks.
+_STATUS_ROW_INSET = "0px 0px 0px 8px"
+
 # Feishu Card 2.0 caps every JSON object carrying a ``tag`` key, at every
 # nesting level, at 200. The margin absorbs elements the surrounding card
 # assembler adds after the panel (answer, footer, error block).
@@ -382,28 +388,31 @@ def _loading_element(
     brand: str | None = None,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Loading spinner element (div with icon — div natively supports icon, markdown varies)."""
-    from ..feishu.branding import brand_icon, openviking_icon
+    """Loading spinner row.
 
-    is_openviking = status_key == "openviking_recall" or bool(label and label[0].startswith("OpenViking · "))
-    if is_openviking:
-        icon = openviking_icon()
-    elif brand:
-        icon = brand_icon(brand)
-    else:
-        icon = {
+    The icon slot always carries the animated spinner. Feishu's ``div.icon``
+    holds exactly one object — there is no list form — and ``lark_md`` cannot
+    render images, so a brand mark placed here would *displace* the animation
+    rather than sit beside it. It also sits at the card's left edge, while the
+    other tool icons are inset inside the panel.
+
+    Brand artwork therefore stays on the panel's tool rows, where it lines up
+    with every other tool icon. ``brand`` is still honoured here, but only to
+    drop the emoji from the label — the real mark is already one row below.
+    """
+    return {
+        "tag": "div",
+        "icon": {
             "tag": "custom_icon",
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
-        }
-    return {
-        "tag": "div",
-        "icon": icon,
+        },
         "text": _loading_status_text(
             label, status_key=status_key, emoji=emoji, branded=bool(brand),
             text_sizes=text_sizes,
         ),
         "element_id": _LOADING_ELEMENT_ID,
+        "margin": _STATUS_ROW_INSET,
     }
 
 def _loading_hint_element(status_key: str = "loading_context") -> dict:
