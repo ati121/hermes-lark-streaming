@@ -4,9 +4,36 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.34 (2026-10-18, personal fork)
+
+### Fixed — the GitHub row: where the mark goes, and keeping the animation
+
+- The mark was first routed into the status row's `icon` slot. That slot holds
+  exactly one object — Feishu's `div.icon` has no list form — and `lark_md`
+  does not support images at all ("不支持在 text 元素的 lark_md 类型中使用"),
+  so the mark *replaced* the loading animation instead of sitting beside it.
+  It also rendered at the card's far-left edge, further out than the panel's
+  tool icons.
+- The status row now always carries the animation (`_LOADING_IMG_KEY`) on
+  every path. Brand artwork stays on the panel's tool row, where it lines up
+  with the other tool icons. `brand` handed to the status row only suppresses
+  the duplicate emoji in its text.
+- The status row gained an 8px left inset (`_STATUS_ROW_INSET`) matching the
+  panel's own 8px padding, so both icon columns sit on one optical line.
+- `brand` now travels through `_current_loading_status` as part of a 4-tuple.
+  It used to be passed only by the whole-card render, so the
+  `partial_update_element` path that runs during every tool call sent the
+  emoji alone and the row showed 🐙 for the whole request.
+- A tool switch that only changes the brand (`gh pr list` → `ls`) is no longer
+  skipped as "same label"; the last pushed brand is tracked on the session.
+- `feishu/assets/github.png` was a grey rounded badge with a reversed-out cat,
+  which at 16px read as a grey square rather than GitHub's mark. It is now the
+  official Octocat silhouette on a transparent background, cropped to the ink
+  and padded optically.
+
 ## v1.33 (2026-10-18, personal fork)
 
-### Changed — the real GitHub mark, and only when `gh` actually talks to GitHub
+### Changed — a real GitHub mark, and only when `gh` actually talks to GitHub
 
 - The card used to show 🐙 GitHub for every `terminal` row that ran `gh`, so
   `gh --version`, `gh --help` and `gh config get` looked like GitHub requests.
@@ -19,30 +46,12 @@ filesystem paths.
 - The detail line for a local `gh` row keeps the whole command
   (`gh --version`) instead of dropping the program name, since no alias
   matched.
-- GitHub rows now carry the official Octocat mark from
-  `feishu/assets/github.png` instead of the 🐙 stand-in. It renders in the
-  div's `icon` slot on the tool row, uploaded once per bot and cached by the
-  same `BrandAssets` path as OpenViking; a failed upload falls back to
-  `setting_outlined`.
-- The spinner still showed 🐙 in practice, because only the fully rendered
-  card passed `brand` to `_loading_element`; the `partial_update_element` path
-  that runs during every tool call sent the emoji alone. `brand` now travels
-  with the emoji through `_current_loading_status`, on the spinner update, the
-  streaming card created mid-turn, and the interactive card. A tool switch
-  that only changes the brand is also no longer skipped as "same label".
-- Routing that brand into the spinner's `icon` slot was wrong and is reverted:
-  Feishu's `div.icon` holds exactly one object (no list form) and `lark_md`
-  does not support images at all ("不支持在 text 元素的 lark_md 类型中使用"),
-  so the mark *replaced* the loading animation instead of sitting beside it,
-  and it also rendered at the card's far-left edge rather than in the panel's
-  icon column. The spinner slot is the animation again, on every path; the
-  brand stays on the panel's tool row, and `brand` on the status row only
-  suppresses the duplicate emoji. The status row also gets an 8px left inset
-  so its icon lines up with the panel's 8px padding.
-- `feishu/assets/github.png` was a grey rounded badge with a reversed-out cat,
-  which at 16px read as a grey square rather than GitHub's mark. It is now the
-  official Octocat silhouette on a transparent background, cropped to the ink
-  and padded optically.
+- GitHub rows carry a real mark from `feishu/assets/github.png` instead of the
+  🐙 stand-in, uploaded once per bot and cached by the same `BrandAssets` path
+  as OpenViking; a failed upload falls back to `setting_outlined`.
+- Rename the internal segment walker `_command_programs` to
+  `_command_invocations` so it also returns each segment's trailing arguments,
+  which is what separates a local call from a GitHub one.
 - Rename the internal segment walker `_command_programs` to
   `_command_invocations` so it also returns each segment's trailing arguments,
   which is what separates a local call from a GitHub one.
