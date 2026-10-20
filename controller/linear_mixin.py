@@ -1853,7 +1853,15 @@ class UnifiedControllerMixin:
         self, session: CardSession, message_id: str, card: dict[str, Any],
         *, epoch: int, was_aborted: bool,
     ) -> None:
-        """Bounded repair of the original frozen card; never sends more replies."""
+        """Bounded repair of the original frozen card.
+
+        While the repair can still land it owns delivery: the completion path
+        holds its static reply until this verdict lands, because that reply
+        repeats the answer the repaired card is about to show (DXP4800,
+        2026-10-20: reply at +39s, original sealed at +59s). The held reply is
+        sent only when the repair gives up, so a card that stays frozen still
+        ends up with a readable answer.
+        """
 
         def still_current() -> bool:
             return (
@@ -1888,7 +1896,12 @@ class UnifiedControllerMixin:
                     _logger.info("interactive seal recovered: msg=%s", message_id[:12])
                 return
             _logger.warning("interactive seal recovery exhausted: msg=%s", message_id[:12])
+            if still_current():
+                await self._send_card_or_text_fallback(
+                    session, fallback_text=session._seal_recovery_fallback_text,
+                )
         finally:
+            session._seal_recovery_fallback_text = ""
             session.seal_task = None
 
     def _finish_interactive_seal(self, session: CardSession) -> None:

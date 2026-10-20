@@ -4,6 +4,21 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.36 (2026-10-20, personal fork)
+
+### Fixed — a rate-limited seal no longer duplicates the answer
+
+- When a terminal seal is rejected by IM rate limiting (`230020`) the
+  controller both sent a static fallback reply and kept a bounded repair of
+  the original card running. If that repair then succeeded, the chat held the
+  answer twice: once in the repaired card, once in the reply.
+- The completion path now holds the static reply while a repair is in flight
+  and hands its answer snapshot to the repair. The reply goes out only when
+  the repair is exhausted, which is the case the fallback exists for.
+- A repair that lands (or stops because the card was replaced, deleted, or
+  its session disposed) sends nothing extra, so there is exactly one copy of
+  the answer.
+
 ## v1.35 (2026-10-19, personal fork)
 
 ### Fixed — the GitHub row: where the mark goes, and keeping the animation

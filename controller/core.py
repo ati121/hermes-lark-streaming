@@ -1730,6 +1730,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         elif session.text and session.text.display_text:
             _fallback_text = session.text.display_text
 
+        # Handed to the seal repair as well: if the repair never lands it
+        # sends this snapshot, and the answer is released from the session by
+        # then.
+        session._seal_recovery_fallback_text = _fallback_text
         try:
             if _fallback_text.strip():
                 from ..cardkit import _streaming_element, build_interactive_card_v2
@@ -1743,18 +1747,31 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     text_sizes=session.text_sizes,
                 )
             result = await self._do_linear_complete(session)
-            if not result:
-                await self._send_card_or_text_fallback(
-                    session, fallback_text=_fallback_text,
-                )
-            else:
+            if result:
                 session.fallback_card = None
+                session._seal_recovery_fallback_text = ""
+                return
+            # A rate-limited seal hands delivery to its bounded repair: the
+            # repair card and a static reply carry the same answer, so sending
+            # the reply now put both on screen as soon as the repair landed
+            # (DXP4800, 2026-10-20: reply at +39s, original sealed at +59s).
+            if session.seal_task is not None:
+                return
+            session._seal_recovery_fallback_text = ""
+            await self._send_card_or_text_fallback(
+                session, fallback_text=_fallback_text,
+            )
         except Exception:
             _logger.warning(
                 "linear complete with fallback failed: msg=%s",
                 (session.message_id or "?")[:12],
                 exc_info=True,
             )
+            if session.seal_task is not None:
+                # The seal already scheduled its repair before failing here;
+                # it owns delivery now.
+                return
+            session._seal_recovery_fallback_text = ""
             await self._send_card_or_text_fallback(
                 session, fallback_text=_fallback_text,
             )

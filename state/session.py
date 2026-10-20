@@ -55,6 +55,7 @@ class CardSession:
         "_pending_flush",
         "_response_phase",
         "_reasoning_splitter",
+        "_seal_recovery_fallback_text",
         "_streaming_closed",
         "_streaming_closed_logged",
         "_stream_lock",
@@ -110,6 +111,10 @@ class CardSession:
         self.flush = FlushController(loop=loop)
         self.footer: dict[str, Any] = {}
         self.fallback_card: dict[str, Any] | None = None
+        # Answer snapshot for the static reply a failed seal may still owe the
+        # chat. Held here (not on the controller) so a deferred delivery can
+        # outlive the completion coroutine that captured it.
+        self._seal_recovery_fallback_text: str = ""
         self.seal_task: asyncio.Task[None] | None = None
         self._completion_started = False
         self._interactive_seal_started = False

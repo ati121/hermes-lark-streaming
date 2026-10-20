@@ -129,7 +129,12 @@ async def test_network_failure_keeps_first_flush_and_dirty(card_session):
 
 
 @pytest.mark.asyncio
-async def test_terminal_failure_sends_static_card_then_repairs_original(card_session, monkeypatch):
+async def test_repair_success_sends_no_static_reply(card_session, monkeypatch):
+    """A repair that lands must not leave a second copy of the answer.
+
+    生产复现（DXP4800 2026-10-20）：封口撞 230020 后静态兜底卡先发出，
+    原卡片的延迟修复随后也成功，聊天里就出现两张内容相同的卡片。
+    """
     ctrl, session = card_session
     original_id = session.card_msg_id
     monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0,))
@@ -137,12 +142,10 @@ async def test_terminal_failure_sends_static_card_then_repairs_original(card_ses
     await ctrl._do_linear_complete_with_fallback(session)
     assert session.state == CREATION_FAILED
     assert session.unified_state is None
-    assert session.fallback_card is None
-    ctrl._client.reply_card.assert_awaited_once()
+    assert session.fallback_card is not None
+    # 修复还在跑：先不回复
+    ctrl._client.reply_card.assert_not_awaited()
     ctrl._client.reply_text.assert_not_awaited()
-    fallback_card = ctrl._client.reply_card.await_args.args[1]
-    assert_static(fallback_card)
-    assert "hls_body" in json.dumps(fallback_card)
 
     # A newer independent turn is allowed, but repair must target only the old card.
     newer = CardSession("new-turn", session.chat_id, asyncio.get_running_loop())
@@ -152,10 +155,28 @@ async def test_terminal_failure_sends_static_card_then_repairs_original(card_ses
     await drain_recovery(session)
     assert session.state == COMPLETED
     assert newer.state == STREAMING
-    args = ctrl._client.update_card.await_args.args
-    assert args[0] == original_id
-    assert args[1] == fallback_card
-    assert ctrl._client.reply_card.await_count == 1
+    assert ctrl._client.update_card.await_args.args[0] == original_id
+    assert session.fallback_card is None
+    assert ctrl._client.reply_card.await_count == 0
+    assert ctrl._client.reply_text.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_repair_exhaustion_sends_static_card_once(card_session, monkeypatch):
+    """修复彻底失败时才补一张静态卡，且只补一张。"""
+    ctrl, session = card_session
+    monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0, 0, 0))
+    ctrl._client.update_card.side_effect = frequency_error()
+    await ctrl._do_linear_complete_with_fallback(session)
+    ctrl._client.reply_card.assert_not_awaited()
+    await drain_recovery(session)
+    assert session.state == CREATION_FAILED
+    assert ctrl._client.update_card.await_count == 4
+    ctrl._client.reply_card.assert_awaited_once()
+    ctrl._client.reply_text.assert_not_awaited()
+    assert ctrl._client.reply_card.await_args.args[0] == session.message_id
+    assert_static(ctrl._client.reply_card.await_args.args[1])
+    assert "hls_body" in json.dumps(ctrl._client.reply_card.await_args.args[1])
 
 
 @pytest.mark.asyncio
@@ -490,7 +511,11 @@ async def test_stop_during_last_rejected_patch_updates_fallback_snapshot(card_se
     assert build.call_args.kwargs["is_aborted"] is True
     await drain_recovery(session)
     assert session.state == ABORTED
-    assert ctrl._client.update_card.await_args.args[1] == ctrl._client.reply_card.await_args.args[1]
+    # 修复带的是「已停止」快照，且没有另发一份内容相同的静态卡
+    repaired = ctrl._client.update_card.await_args.args[1]
+    assert_static(repaired)
+    assert "Stopped" in json.dumps(repaired)
+    ctrl._client.reply_card.assert_not_awaited()
 
 
 @pytest.mark.asyncio
