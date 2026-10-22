@@ -4,6 +4,20 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.37 (2026-10-22, personal fork)
+
+### Fixed — background completions and priority follow-ups keep streaming cards
+
+- Internal gateway events carry producer identities instead of platform message
+  IDs. Use a process-local card ID and send their streaming card directly to the
+  chat, so background completions no longer fail with an invalid reply target
+  and fall back to a gateway card containing a raw Reasoning block.
+- Observe accepted steer/redirect input and actual interruptions on newer
+  Hermes priority paths. Seal the previous card and continue under the new
+  user message, with the existing per-message deduplication protecting paths
+  that also reach the older busy hook. Internal events and rejected folds do
+  not trigger this transition.
+
 ## v1.36 (2026-10-20, personal fork)
 
 ### Fixed — a rate-limited seal no longer duplicates the answer

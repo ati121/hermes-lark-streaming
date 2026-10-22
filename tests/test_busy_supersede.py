@@ -400,3 +400,68 @@ class TestBusyWrapper:
 
         assert result is False
         hook.assert_not_called()
+
+
+class TestPriorityBusyWrapper:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["steer", "redirect", "interrupt"])
+    async def test_priority_input_moves_stream_to_new_card(self, mode):
+        from hermes_lark_streaming.patching import gateway as gw
+
+        ctrl = StreamCardController()
+        _enable(ctrl)
+        old = _add_session(ctrl, "om_old", card_msg_id="om_card_old")
+        event = SimpleNamespace(
+            internal=False,
+            message_id="om_new",
+            source=SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="chat1"),
+        )
+        turn = object()
+
+        def fold(self, running_agent, session_key, event):
+            return turn
+
+        async def interrupt(self, event, *args):
+            return "interrupted"
+
+        fire, create = _patch_side_effects(ctrl)
+        with fire, create, patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=ctrl):
+            if mode == "interrupt":
+                result = await gw._wrap_busy_interrupt(interrupt)(None, event, "session-key")
+                assert result == "interrupted"
+            else:
+                assert gw._wrap_fold_into_running_turn(fold)(None, object(), "session-key", event) is turn
+            continuation = ctrl._get_active_session("om_old")
+            assert continuation is not old
+            assert continuation.anchor_id == "om_new"
+            assert old.state == COMPLETING
+            # The older busy entry can still report the same event afterwards.
+            gw._notify_busy_supersede(event)
+            ctrl.on_answer(message_id="om_old", text="follow-up answer")
+
+        assert continuation.unified_state.answer_text == "follow-up answer"
+        assert len({id(s) for _, s in ctrl._sess_items_snapshot()}) == 2
+
+    @pytest.mark.parametrize("internal", [False, True])
+    def test_rejected_or_internal_fold_does_not_supersede(self, internal):
+        from hermes_lark_streaming.patching import gateway as gw
+
+        event = SimpleNamespace(internal=internal)
+        with patch("hermes_lark_streaming.patching.hooks.on_busy_superseded") as hook:
+            wrapped = gw._wrap_fold_into_running_turn(lambda *args: object() if internal else None)
+            wrapped(None, object(), "session-key", event)
+        hook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_interrupt_preserves_exception(self):
+        from hermes_lark_streaming.patching import gateway as gw
+
+        async def interrupt(*args):
+            raise RuntimeError("interrupt failed")
+
+        with (
+            patch("hermes_lark_streaming.patching.hooks.on_busy_superseded") as hook,
+            pytest.raises(RuntimeError, match="interrupt failed"),
+        ):
+            await gw._wrap_busy_interrupt(interrupt)(None, object())
+        hook.assert_not_called()

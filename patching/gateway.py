@@ -139,17 +139,15 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
     async def wrapper(self, event, source, *args, **kwargs):
         mid = getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
         anchor_id = self._reply_anchor_for_event(event)
-        if not mid:
-            # Gateway recovery events can be reconstructed without the
-            # platform message id. Keep them on the streaming-card path with
-            # a process-local id instead of falling through to standalone
-            # gateway cards. There is no valid platform reply target in this
-            # case, so the synthetic id is only used internally by HLS.
+        if getattr(event, "internal", False) or not mid:
+            # Internal wakes carry producer identities, not platform reply
+            # targets. Recovery events can also lack an id. Give both a local
+            # lifecycle id so creation sends a standalone streaming card.
             chat_id_for_id = getattr(source, "chat_id", "") or "unknown"
             mid = f"hls-recovery-{chat_id_for_id}-{uuid.uuid4().hex}"
             anchor_id = None
-            _logger.warning(
-                "HLS: inbound event missing message_id; using synthetic id=%s",
+            _logger.info(
+                "HLS: inbound event has no platform reply target; using synthetic id=%s",
                 mid[:48],
             )
         chat_id = source.chat_id if hasattr(source, "chat_id") else ""
@@ -354,6 +352,38 @@ def _wrap_handle_active_session_busy_message(orig: Callable) -> Callable:
         return result
 
     return wrapper
+
+
+def _wrap_fold_into_running_turn(orig: Callable) -> Callable:
+    """Observe accepted steer/redirect input, including the priority path."""
+
+    @functools.wraps(orig)
+    def wrapper(self, running_agent, session_key, event, *args, **kwargs):
+        result = orig(self, running_agent, session_key, event, *args, **kwargs)
+        if result is not None:
+            try:
+                _notify_busy_supersede(event)
+            except Exception:  # noqa: BLE001 - display hooks must not break the host turn
+                _logger.debug("HLS: folded busy input notify failed", exc_info=True)
+        return result
+
+    return wrapper
+
+
+def _wrap_busy_interrupt(orig: Callable) -> Callable:
+    """Observe actual interrupts before the host awaits its busy acknowledgement."""
+
+    @functools.wraps(orig)
+    async def wrapper(self, event, *args, **kwargs):
+        result = await orig(self, event, *args, **kwargs)
+        try:
+            _notify_busy_supersede(event)
+        except Exception:  # noqa: BLE001 - display hooks must not break the host turn
+            _logger.debug("HLS: busy interrupt notify failed", exc_info=True)
+        return result
+
+    return wrapper
+
 
 def _wrap_run_agent(orig: Callable) -> Callable:
     """Inject COMPLETE hook after agent runs; propagate event_message_id."""

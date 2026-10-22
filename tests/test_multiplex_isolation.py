@@ -118,6 +118,15 @@ def _make_runner_class() -> type:
         async def _run_background_task(self, *args, **kwargs):
             return None
 
+        def _fold_into_running_turn(self, running_agent, session_key, event):
+            return object()
+
+        async def _hm_busy_interrupt(self, event, source, running_agent, session_key):
+            return None
+
+        async def _interrupt_running_agent_for_busy_event(self, event, adapter, running_agent):
+            return None
+
     return FakeGatewayRunner
 
 
@@ -135,6 +144,9 @@ def test_gateway_runner_is_wrapped_only_once_across_plugin_copies(two_copies) ->
     assert _wrap_depth(runner._handle_message) == 1, "second copy stacked a wrapper"
     assert _wrap_depth(runner._run_agent) == 1
     assert _wrap_depth(runner._run_background_task) == 1
+    assert _wrap_depth(runner._fold_into_running_turn) == 1
+    assert _wrap_depth(runner._hm_busy_interrupt) == 1
+    assert _wrap_depth(runner._interrupt_running_agent_for_busy_event) == 1
 
     # The marker lives on the shared class, so every copy sees the same verdict.
     assert getattr(runner, patching_a._GW_CLASS_MARK_ATTR, False)
