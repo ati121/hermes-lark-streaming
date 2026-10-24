@@ -688,6 +688,57 @@ async def _schedule_confirm_card(*, cid: str) -> None:
         # Always cleanup stored data after confirm attempt
         _cleanup()
 
+def _resolve_clarify_and_confirm(adapter_instance, clarify_id: str, text: str, *, retry: bool = False) -> None:
+    """Resolve a clarify via tools.clarify_gateway, then confirm the card.
+
+    Prefers the adapter's event loop (safe_schedule_threadsafe); falls back to
+    a synchronous resolve when scheduling fails or no loop exists. ``retry``
+    only switches the log wording to the historical retry-path texts.
+    """
+    what = "retry resolve" if retry else "resolve_gateway_clarify"
+    loop = getattr(adapter_instance, "_loop", None)
+    if loop is not None:
+        try:
+            from tools.clarify_gateway import resolve_gateway_clarify
+            from agent.async_utils import safe_schedule_threadsafe
+
+            async def _do_resolve():
+                resolve_gateway_clarify(clarify_id, text)
+                # Schedule server-side confirm update after resolve
+                await _schedule_confirm_card(cid=clarify_id)
+
+            safe_schedule_threadsafe(
+                _do_resolve(), loop,
+                logger=_logger,
+                log_message=(
+                    "clarify card: failed to schedule retry resolve"
+                    if retry
+                    else "clarify card: failed to schedule resolve_gateway_clarify"
+                ),
+                log_level=logging.WARNING,
+            )
+        except Exception as e:
+            _logger.warning("clarify card: %s scheduling failed: %s", what, e)
+            # Try synchronous fallback
+            try:
+                from tools.clarify_gateway import resolve_gateway_clarify
+                resolve_gateway_clarify(clarify_id, text)
+            except Exception as e2:
+                _logger.warning(
+                    "clarify card: synchronous %s also failed: %s",
+                    "retry resolve" if retry else "resolve", e2,
+                )
+    else:
+        # No event loop — synchronous fallback
+        try:
+            from tools.clarify_gateway import resolve_gateway_clarify
+            resolve_gateway_clarify(clarify_id, text)
+        except Exception as e:
+            _logger.warning(
+                "clarify card: synchronous %s failed: %s",
+                "retry resolve" if retry else "resolve", e,
+            )
+
 def _handle_clarify_card_action(
     adapter_instance,
     data: Any,
@@ -767,37 +818,7 @@ def _handle_clarify_card_action(
         )
 
         # Re-resolve the clarify
-        loop = getattr(adapter_instance, "_loop", None)
-        if loop is not None:
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                from agent.async_utils import safe_schedule_threadsafe
-
-                async def _do_retry_resolve():
-                    resolve_gateway_clarify(clarify_id, stored_selection)
-                    # Schedule server-side confirm update after retry
-                    await _schedule_confirm_card(cid=clarify_id)
-
-                safe_schedule_threadsafe(
-                    _do_retry_resolve(), loop,
-                    logger=_logger,
-                    log_message="clarify card: failed to schedule retry resolve",
-                    log_level=logging.WARNING,
-                )
-            except Exception as e:
-                _logger.warning("clarify card: retry resolve scheduling failed: %s", e)
-                try:
-                    from tools.clarify_gateway import resolve_gateway_clarify
-                    resolve_gateway_clarify(clarify_id, stored_selection)
-                except Exception as e2:
-                    _logger.warning("clarify card: synchronous retry resolve also failed: %s", e2)
-        else:
-            # No event loop — synchronous fallback
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                resolve_gateway_clarify(clarify_id, stored_selection)
-            except Exception as e:
-                _logger.warning("clarify card: synchronous retry resolve failed: %s", e)
+        _resolve_clarify_and_confirm(adapter_instance, clarify_id, stored_selection, retry=True)
 
         # Return the same submitted card (soft lock with retry button)
         return _submitted_card_response(stored_selection, choices, question, clarify_id)
@@ -832,38 +853,7 @@ def _handle_clarify_card_action(
             _clarify_selections[clarify_id] = choice_text
 
         # Resolve the clarify (schedule on event loop since we're in a sync callback)
-        loop = getattr(adapter_instance, "_loop", None)
-        if loop is not None:
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                from agent.async_utils import safe_schedule_threadsafe
-
-                async def _do_resolve():
-                    resolve_gateway_clarify(clarify_id, choice_text)
-                    # Schedule server-side confirm update after resolve
-                    await _schedule_confirm_card(cid=clarify_id)
-
-                safe_schedule_threadsafe(
-                    _do_resolve(), loop,
-                    logger=_logger,
-                    log_message="clarify card: failed to schedule resolve_gateway_clarify",
-                    log_level=logging.WARNING,
-                )
-            except Exception as e:
-                _logger.warning("clarify card: resolve_gateway_clarify scheduling failed: %s", e)
-                # Try synchronous fallback
-                try:
-                    from tools.clarify_gateway import resolve_gateway_clarify
-                    resolve_gateway_clarify(clarify_id, choice_text)
-                except Exception as e2:
-                    _logger.warning("clarify card: synchronous resolve also failed: %s", e2)
-        else:
-            # No event loop — synchronous fallback
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                resolve_gateway_clarify(clarify_id, choice_text)
-            except Exception as e:
-                _logger.warning("clarify card: synchronous resolve failed: %s", e)
+        _resolve_clarify_and_confirm(adapter_instance, clarify_id, choice_text)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet
         return _submitted_card_response(choice_text, choices_list or None, question, clarify_id)
@@ -888,37 +878,7 @@ def _handle_clarify_card_action(
             _clarify_selections[clarify_id] = input_text
 
         # Resolve the clarify
-        loop = getattr(adapter_instance, "_loop", None)
-        if loop is not None:
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                from agent.async_utils import safe_schedule_threadsafe
-
-                async def _do_resolve_input():
-                    resolve_gateway_clarify(clarify_id, input_text)
-                    # Schedule server-side confirm update after resolve
-                    await _schedule_confirm_card(cid=clarify_id)
-
-                safe_schedule_threadsafe(
-                    _do_resolve_input(), loop,
-                    logger=_logger,
-                    log_message="clarify card: failed to schedule resolve_gateway_clarify",
-                    log_level=logging.WARNING,
-                )
-            except Exception as e:
-                _logger.warning("clarify card: resolve_gateway_clarify scheduling failed: %s", e)
-                try:
-                    from tools.clarify_gateway import resolve_gateway_clarify
-                    resolve_gateway_clarify(clarify_id, input_text)
-                except Exception as e2:
-                    _logger.warning("clarify card: synchronous resolve also failed: %s", e2)
-        else:
-            # No event loop — synchronous fallback
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                resolve_gateway_clarify(clarify_id, input_text)
-            except Exception as e:
-                _logger.warning("clarify card: synchronous resolve failed: %s", e)
+        _resolve_clarify_and_confirm(adapter_instance, clarify_id, input_text)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet
         return _submitted_card_response(input_text, choices, question, clarify_id)
@@ -945,37 +905,7 @@ def _handle_clarify_card_action(
             _clarify_selections[clarify_id] = input_text
 
         # Resolve the clarify
-        loop = getattr(adapter_instance, "_loop", None)
-        if loop is not None:
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                from agent.async_utils import safe_schedule_threadsafe
-
-                async def _do_resolve_button():
-                    resolve_gateway_clarify(clarify_id, input_text)
-                    # Schedule server-side confirm update after resolve
-                    await _schedule_confirm_card(cid=clarify_id)
-
-                safe_schedule_threadsafe(
-                    _do_resolve_button(), loop,
-                    logger=_logger,
-                    log_message="clarify card: failed to schedule resolve_gateway_clarify",
-                    log_level=logging.WARNING,
-                )
-            except Exception as e:
-                _logger.warning("clarify card: resolve_gateway_clarify scheduling failed: %s", e)
-                try:
-                    from tools.clarify_gateway import resolve_gateway_clarify
-                    resolve_gateway_clarify(clarify_id, input_text)
-                except Exception as e2:
-                    _logger.warning("clarify card: synchronous resolve also failed: %s", e2)
-        else:
-            # No event loop — synchronous fallback
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                resolve_gateway_clarify(clarify_id, input_text)
-            except Exception as e:
-                _logger.warning("clarify card: synchronous resolve failed: %s", e)
+        _resolve_clarify_and_confirm(adapter_instance, clarify_id, input_text)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet
         return _submitted_card_response(input_text, choices, question, clarify_id)

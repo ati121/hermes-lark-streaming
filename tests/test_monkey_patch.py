@@ -257,11 +257,12 @@ class TestRecursiveInterruptContext:
     def test_child_complete_includes_result(self) -> None:
         """Child COMPLETE hook should use the inner _run_agent's result (B's answer)."""
         from hermes_lark_streaming.patching import _wrap_run_agent
+        from hermes_lark_streaming.patching.gateway import _fire_complete_hook
         import inspect
 
         source = inspect.getsource(_wrap_run_agent)
-        # In the _saved_parent_ctx branch, the child's COMPLETE should call
-        # on_message_completed with result data (not empty answer)
+        # In the _saved_parent_ctx branch, the child's COMPLETE should route
+        # through _fire_complete_hook with B's result (not empty answer)
         lines = source.split('\n')
         in_saved_parent_block = False
         found_child_on_message_completed = False
@@ -269,13 +270,13 @@ class TestRecursiveInterruptContext:
         for i, line in enumerate(lines):
             if '_saved_parent_ctx is not None' in line:
                 in_saved_parent_block = True
-            if in_saved_parent_block and 'on_message_completed' in line:
-                # Check nearby lines for final_response
-                nearby = '\n'.join(lines[max(0, i-2):i+10])
-                if 'final_response' in nearby:
+            if in_saved_parent_block and '_fire_complete_hook' in line:
+                # The shared helper forwards the result's final_response
+                helper_source = inspect.getsource(_fire_complete_hook)
+                if 'final_response' in helper_source:
                     found_child_final_response = True
                     found_child_on_message_completed = True
-                    break
+                break
             # Stop looking once we hit the parent ABORTED section
             if in_saved_parent_block and 'ABORTED' in line and 'Step 2' in line:
                 break

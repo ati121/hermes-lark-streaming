@@ -23,6 +23,85 @@ from .usage import _speed_footer, _totals_for_context
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
+def _fire_complete_hook(
+    ctx: dict,
+    result: dict | None,
+    *,
+    message_id: str | None = None,
+    warn_prefix: str | None = "",
+    aborted: bool | None = None,
+    include_interrupt_message: bool = True,
+    strict_result: bool = False,
+) -> bool:
+    """Fire on_message_completed with the standard token/cost footer.
+
+    Shared by the child-agent, normal-agent and background-task completion
+    paths. ``warn_prefix`` (None disables the finish_reason/error warnings
+    entirely), ``aborted`` and ``include_interrupt_message`` keep each path's
+    historical semantics; ``strict_result`` makes a None result fail like the
+    old inline ``result.get`` calls did (background tasks pass None legally).
+    Returns the hook's card_sent verdict; errors propagate to the caller's
+    try/except.
+    """
+    from .hooks import on_message_completed
+
+    if strict_result and result is None:
+        raise AttributeError("'NoneType' object has no attribute 'get'")
+    r = result or {}
+    mid = ctx["message_id"] if message_id is None else message_id
+    elapsed = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
+
+    is_interrupted = r.get("interrupted", False) or r.get("partial", False)
+    error_msg = r.get("error", "") or (r.get("interrupt_message", "") if include_interrupt_message else "")
+    if warn_prefix is not None:
+        finish_reason = r.get("finish_reason", "")
+        if finish_reason and finish_reason != "stop":
+            _logger.warning(
+                "hermes-lark-streaming v%s: %snon-stop finish_reason=%s model=%s msg=%s",
+                __version__, warn_prefix, finish_reason,
+                r.get("model", "?"), (mid or "?")[:12],
+            )
+        if error_msg:
+            _logger.warning(
+                "hermes-lark-streaming v%s: %sagent error: %s model=%s msg=%s",
+                __version__, warn_prefix, error_msg[:200],
+                r.get("model", "?"), (mid or "?")[:12],
+            )
+
+    # Cache/cost tokens from the agent reference (set by _maybe_wrap_callbacks)
+    agent_ref = ctx.get("_agent_ref")
+    cache_read = getattr(agent_ref, "session_cache_read_tokens", 0) if agent_ref else 0
+    cache_write = getattr(agent_ref, "session_cache_write_tokens", 0) if agent_ref else 0
+    reasoning_tokens = getattr(agent_ref, "session_reasoning_tokens", 0) if agent_ref else 0
+    estimated_cost_usd = getattr(agent_ref, "session_estimated_cost_usd", 0) if agent_ref else 0
+    cost_status = getattr(agent_ref, "session_cost_status", "unknown") if agent_ref else "unknown"
+
+    return bool(on_message_completed(
+        message_id=mid,
+        answer=r.get("final_response", ""),
+        duration=elapsed,
+        model=r.get("model", ""),
+        tokens={
+            "input_tokens": r.get("input_tokens", 0),
+            "output_tokens": r.get("output_tokens", 0),
+            **_speed_footer(ctx),
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+        },
+        context={
+            "used_tokens": r.get("last_prompt_tokens", 0),
+            "max_tokens": r.get("context_length", 0),
+        },
+        api_calls=r.get("api_calls", 0),
+        history_offset=r.get("history_offset", 0),
+        compression_exhausted=r.get("compression_exhausted", False),
+        aborted=is_interrupted if aborted is None else aborted,
+        error_message=error_msg,
+        reasoning_tokens=reasoning_tokens,
+        estimated_cost_usd=estimated_cost_usd,
+        cost_status=cost_status,
+    ))
+
 def _wrap_enrich_inbound_images(orig: Callable) -> Callable:
     """Observe newly attached native pixels; never resolve or change routing."""
     @functools.wraps(orig)
@@ -502,61 +581,8 @@ def _wrap_run_agent(orig: Callable) -> Callable:
             # Step 1: Fire B's (child) COMPLETE hook normally
             if ctx is not None:
                 try:
-                    from .hooks import on_message_completed
-
-                    _elapsed_child = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
-                    is_interrupted_child = result.get("interrupted", False) or result.get("partial", False)
-
-                    _finish_reason_child = result.get("finish_reason", "")
-                    _error_msg_child = result.get("error") or result.get("interrupt_message", "")
-                    if _finish_reason_child and _finish_reason_child != "stop":
-                        _logger.warning(
-                            "hermes-lark-streaming v%s: child non-stop finish_reason=%s model=%s msg=%s",
-                            __version__,
-                            _finish_reason_child,
-                            result.get("model", "?"),
-                            (ctx["message_id"] or "?")[:12],
-                        )
-                    if _error_msg_child:
-                        _logger.warning(
-                            "hermes-lark-streaming v%s: child agent error: %s model=%s msg=%s",
-                            __version__,
-                            _error_msg_child[:200],
-                            result.get("model", "?"),
-                            (ctx["message_id"] or "?")[:12],
-                        )
-
-                    _agent_ref_child = ctx.get("_agent_ref")
-                    cache_read_child = getattr(_agent_ref_child, "session_cache_read_tokens", 0) if _agent_ref_child else 0
-                    cache_write_child = getattr(_agent_ref_child, "session_cache_write_tokens", 0) if _agent_ref_child else 0
-                    reasoning_tokens = getattr(_agent_ref_child, "session_reasoning_tokens", 0) if _agent_ref_child else 0
-                    estimated_cost_usd = getattr(_agent_ref_child, "session_estimated_cost_usd", 0) if _agent_ref_child else 0
-                    cost_status = getattr(_agent_ref_child, "session_cost_status", "unknown") if _agent_ref_child else "unknown"
-
-                    card_sent_child = on_message_completed(
-                        message_id=ctx["message_id"],
-                        answer=result.get("final_response", ""),
-                        duration=_elapsed_child,
-                        model=result.get("model", ""),
-                        tokens={
-                            "input_tokens": result.get("input_tokens", 0),
-                            "output_tokens": result.get("output_tokens", 0),
-                            **_speed_footer(ctx),
-                            "cache_read_tokens": cache_read_child,
-                            "cache_write_tokens": cache_write_child,
-                        },
-                        context={
-                            "used_tokens": result.get("last_prompt_tokens", 0),
-                            "max_tokens": result.get("context_length", 0),
-                        },
-                        api_calls=result.get("api_calls", 0),
-                        history_offset=result.get("history_offset", 0),
-                        compression_exhausted=result.get("compression_exhausted", False),
-                        aborted=is_interrupted_child,
-                        error_message=_error_msg_child,
-                        reasoning_tokens=reasoning_tokens,
-                        estimated_cost_usd=estimated_cost_usd,
-                        cost_status=cost_status,
+                    card_sent_child = _fire_complete_hook(
+                        ctx, result, warn_prefix="child ", strict_result=True,
                     )
                     if card_sent_child:
                         result["already_sent"] = True
@@ -589,63 +615,7 @@ def _wrap_run_agent(orig: Callable) -> Callable:
                 _logger.debug("run_agent: parent ABORTED completion failed", exc_info=True)
         elif ctx is not None:
             try:
-                from .hooks import on_message_completed
-
-                _elapsed = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
-
-                is_interrupted = result.get("interrupted", False) or result.get("partial", False)
-
-                _finish_reason = result.get("finish_reason", "")
-                _error_msg = result.get("error") or result.get("interrupt_message", "")
-                if _finish_reason and _finish_reason != "stop":
-                    _logger.warning(
-                        "hermes-lark-streaming v%s: non-stop finish_reason=%s model=%s msg=%s",
-                        __version__,
-                        _finish_reason,
-                        result.get("model", "?"),
-                        (ctx["message_id"] or "?")[:12],
-                    )
-                if _error_msg:
-                    _logger.warning(
-                        "hermes-lark-streaming v%s: agent error: %s model=%s msg=%s",
-                        __version__,
-                        _error_msg[:200],
-                        result.get("model", "?"),
-                        (ctx["message_id"] or "?")[:12],
-                    )
-
-                _agent_ref = ctx.get("_agent_ref")
-                cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
-                cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
-                reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
-                estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
-                cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
-
-                card_sent = on_message_completed(
-                    message_id=ctx["message_id"],
-                    answer=result.get("final_response", ""),
-                    duration=_elapsed,
-                    model=result.get("model", ""),
-                    tokens={
-                        "input_tokens": result.get("input_tokens", 0),
-                        "output_tokens": result.get("output_tokens", 0),
-                        **_speed_footer(ctx),
-                        "cache_read_tokens": cache_read,
-                        "cache_write_tokens": cache_write,
-                    },
-                    context={
-                        "used_tokens": result.get("last_prompt_tokens", 0),
-                        "max_tokens": result.get("context_length", 0),
-                    },
-                    api_calls=result.get("api_calls", 0),
-                    history_offset=result.get("history_offset", 0),
-                    compression_exhausted=result.get("compression_exhausted", False),
-                    aborted=is_interrupted,
-                    error_message=_error_msg,
-                    reasoning_tokens=reasoning_tokens,
-                    estimated_cost_usd=estimated_cost_usd,
-                    cost_status=cost_status,
-                )
+                card_sent = _fire_complete_hook(ctx, result, strict_result=True)
                 if card_sent:
                     result["already_sent"] = True
                     ctx["card_sent"] = True
@@ -772,42 +742,12 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
             ctx = _msg_ctx.get()
             if ctx is not None:
                 try:
-                    from .hooks import on_message_completed
-
-                    _elapsed = time.monotonic() - ctx.get("_msg_start_time", time.monotonic())
-
-                    # Extract cache tokens from agent reference (set by _maybe_wrap_callbacks)
-                    _agent_ref = ctx.get("_agent_ref")
-                    cache_read = getattr(_agent_ref, "session_cache_read_tokens", 0) if _agent_ref else 0
-                    cache_write = getattr(_agent_ref, "session_cache_write_tokens", 0) if _agent_ref else 0
-                    reasoning_tokens = getattr(_agent_ref, "session_reasoning_tokens", 0) if _agent_ref else 0
-                    estimated_cost_usd = getattr(_agent_ref, "session_estimated_cost_usd", 0) if _agent_ref else 0
-                    cost_status = getattr(_agent_ref, "session_cost_status", "unknown") if _agent_ref else "unknown"
-
-                    card_sent = on_message_completed(
+                    card_sent = _fire_complete_hook(
+                        ctx, result,
                         message_id=task_id,
-                        answer=(result or {}).get("final_response", ""),
-                        duration=_elapsed,
-                        model=(result or {}).get("model", ""),
-                        tokens={
-                            "input_tokens": (result or {}).get("input_tokens", 0),
-                            "output_tokens": (result or {}).get("output_tokens", 0),
-                            **_speed_footer(ctx),
-                            "cache_read_tokens": cache_read,
-                            "cache_write_tokens": cache_write,
-                        },
-                        context={
-                            "used_tokens": (result or {}).get("last_prompt_tokens", 0),
-                            "max_tokens": (result or {}).get("context_length", 0),
-                        },
-                        api_calls=(result or {}).get("api_calls", 0),
-                        history_offset=(result or {}).get("history_offset", 0),
-                        compression_exhausted=(result or {}).get("compression_exhausted", False),
+                        warn_prefix=None,
                         aborted=False,
-                        error_message=(result or {}).get("error") or "",
-                        reasoning_tokens=reasoning_tokens,
-                        estimated_cost_usd=estimated_cost_usd,
-                        cost_status=cost_status,
+                        include_interrupt_message=False,
                     )
 
                     if card_sent:

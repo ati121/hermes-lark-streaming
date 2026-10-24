@@ -1323,6 +1323,13 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         self._complete_session(session)
 
+    def _abort_session_now(self, session: CardSession, message_id: str, *, note: str = "") -> None:
+        """Immediate abort bookkeeping shared by the on_interrupted paths."""
+        session.state = ABORTED
+        session.flush.mark_completed()
+        _logger.info("on_interrupted: abort old msg=%s%s", message_id[:12], note)
+        self._complete_session(session)
+
     def on_interrupted(
         self,
         *,
@@ -1381,32 +1388,18 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                                     old_message_id[:12],
                                 )
                                 return
-                            old_session.state = ABORTED
-                            old_session.flush.mark_completed()
-                            _logger.info(
-                                "on_interrupted: abort old msg=%s (after flush wait)",
-                                old_message_id[:12],
+                            self._abort_session_now(
+                                old_session, old_message_id, note=" (after flush wait)",
                             )
-                            self._complete_session(old_session)
                         self._fire_and_forget(_wait_and_abort(), loop)
                     else:
                         # No loop — immediate abort (best effort)
-                        old_session.state = ABORTED
-                        old_session.flush.mark_completed()
-                        _logger.info(
-                            "on_interrupted: abort old msg=%s (no loop, immediate)",
-                            old_message_id[:12],
+                        self._abort_session_now(
+                            old_session, old_message_id, note=" (no loop, immediate)",
                         )
-                        self._complete_session(old_session)
                 else:
                     # No flush in progress — immediate abort
-                    old_session.state = ABORTED
-                    old_session.flush.mark_completed()
-                    _logger.info(
-                        "on_interrupted: abort old msg=%s",
-                        old_message_id[:12],
-                    )
-                    self._complete_session(old_session)
+                    self._abort_session_now(old_session, old_message_id)
 
         if self._sess_get(new_message_id) is None:
             existing_continuation = self._continuation_session_for(new_message_id)
