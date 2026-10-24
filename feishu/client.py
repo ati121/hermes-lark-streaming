@@ -266,27 +266,28 @@ class FeishuClient:
                 raise
             except _NETWORK_ERROR_BASES as e:
                 # v1.3.4 fix (P1): 网络错误（httpx ConnectError/ReadTimeout 等）
-                if attempt < transient_limit:
-                    delay = _TRANSIENT_RETRY_DELAYS[min(attempt, len(_TRANSIENT_RETRY_DELAYS) - 1)]
-                    _logger.info(
-                        "transient retry (network): %s attempt=%d/%d error=%s delay=%.2fs",
-                        operation, attempt + 1, transient_limit, type(e).__name__, delay,
-                    )
-                    await asyncio.sleep(delay)
+                if await self._backoff_retry(operation, attempt, transient_limit, "network", e):
                     continue
                 raise
             except _TOKEN_ERROR_BASES as e:
                 # v1.3.4 fix (P1): token 刷新失败（ObtainAccessTokenException）
-                if attempt < transient_limit:
-                    delay = _TRANSIENT_RETRY_DELAYS[min(attempt, len(_TRANSIENT_RETRY_DELAYS) - 1)]
-                    _logger.info(
-                        "transient retry (token): %s attempt=%d/%d error=%s delay=%.2fs",
-                        operation, attempt + 1, transient_limit, type(e).__name__, delay,
-                    )
-                    await asyncio.sleep(delay)
+                if await self._backoff_retry(operation, attempt, transient_limit, "token", e):
                     continue
                 raise
         raise last_error  # unreachable, but type-safe
+
+    @staticmethod
+    async def _backoff_retry(operation: str, attempt: int, limit: int, label: str, error: BaseException) -> bool:
+        """Sleep one transient-retry backoff step; False when attempts ran out."""
+        if attempt >= limit:
+            return False
+        delay = _TRANSIENT_RETRY_DELAYS[min(attempt, len(_TRANSIENT_RETRY_DELAYS) - 1)]
+        _logger.info(
+            "transient retry (%s): %s attempt=%d/%d error=%s delay=%.2fs",
+            label, operation, attempt + 1, limit, type(error).__name__, delay,
+        )
+        await asyncio.sleep(delay)
+        return True
 
     @staticmethod
     def _check(response: Any, operation: str) -> None:
@@ -330,6 +331,20 @@ class FeishuClient:
     async def _card_json(self, payload: Any) -> str:
         return self._dumps(await self._brand_assets.resolve(payload, self.upload_local_image))
 
+    async def _create_message(self, operation: str, request: Any) -> str:
+        resp = await self._client.im.v1.message.acreate(request)
+        self._check(resp, operation)
+        if resp.data and resp.data.message_id:
+            return str(resp.data.message_id)
+        raise FeishuAPIError(f"{operation}: response missing message_id")
+
+    async def _reply_message(self, operation: str, request: Any) -> str:
+        resp = await self._client.im.v1.message.areply(request)
+        self._check(resp, operation)
+        if resp.data and resp.data.message_id:
+            return str(resp.data.message_id)
+        raise FeishuAPIError(f"{operation}: response missing message_id")
+
     async def send_card_to_chat(self, chat_id: str, card: dict[str, Any]) -> str:
         """发送独立卡片到聊天（非回复），返回 message_id."""
         request = (
@@ -344,11 +359,7 @@ class FeishuClient:
             )
             .build()
         )
-        resp = await self._client.im.v1.message.acreate(request)
-        self._check(resp, "send_card_to_chat")
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError("send_card_to_chat: response missing message_id")
+        return await self._create_message("send_card_to_chat", request)
 
     async def send_card_by_id_to_chat(self, chat_id: str, card_id: str) -> str:
         """发送 CardKit 实体到聊天（非回复），返回 message_id."""
@@ -364,11 +375,7 @@ class FeishuClient:
             )
             .build()
         )
-        resp = await self._client.im.v1.message.acreate(request)
-        self._check(resp, "send_card_by_id_to_chat")
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError("send_card_by_id_to_chat: response missing message_id")
+        return await self._create_message("send_card_by_id_to_chat", request)
 
     async def reply_card(self, message_id: str, card: dict[str, Any]) -> str:
         """回复消息，返回 message_id."""
@@ -378,11 +385,7 @@ class FeishuClient:
             .request_body(ReplyMessageRequestBody.builder().msg_type("interactive").content(await self._card_json(card)).build())
             .build()
         )
-        resp = await self._client.im.v1.message.areply(request)
-        self._check(resp, "reply_card")
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError("reply_card: response missing message_id")
+        return await self._reply_message("reply_card", request)
 
     async def reply_text(self, message_id: str, text: str) -> str:
         """回复纯文本消息，返回 message_id."""
@@ -397,11 +400,7 @@ class FeishuClient:
             )
             .build()
         )
-        resp = await self._client.im.v1.message.areply(request)
-        self._check(resp, "reply_text")
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError("reply_text: response missing message_id")
+        return await self._reply_message("reply_text", request)
 
     async def reply_card_by_id(self, message_id: str, card_id: str) -> str:
         """通过 card_id 回复 CardKit 卡片消息，返回 message_id."""
@@ -416,11 +415,7 @@ class FeishuClient:
             )
             .build()
         )
-        resp = await self._client.im.v1.message.areply(request)
-        self._check(resp, "reply_card_by_id")
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError("reply_card_by_id: response missing message_id")
+        return await self._reply_message("reply_card_by_id", request)
 
     async def update_card(
         self,
@@ -569,6 +564,24 @@ class FeishuClient:
 
         await self._retry_transient("cardkit_batch_update", _do)
 
+    @staticmethod
+    def _summary_settings(summary: str) -> dict[str, Any]:
+        truncated = summary[:120]
+        return {
+            "content": truncated,
+            "i18n_content": {"zh_cn": truncated, "en_us": truncated},
+        }
+
+    async def _apply_card_settings(self, card_id: str, settings: dict[str, Any], operation: str, *, sequence: int = 0) -> None:
+        async def _do():
+            body_builder = SettingsCardRequestBody.builder().settings(self._dumps(settings))
+            body_builder = body_builder.sequence(sequence)
+            request = SettingsCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
+            resp = await self._client.cardkit.v1.card.asettings(request)
+            self._check(resp, operation)
+
+        await self._retry_transient(operation, _do)
+
     async def cardkit_close_streaming(
         self,
         card_id: str,
@@ -583,23 +596,8 @@ class FeishuClient:
             }
         }
         if summary:
-            truncated = summary[:120]
-            settings["config"]["summary"] = {
-                "content": truncated,
-                "i18n_content": {
-                    "zh_cn": truncated,
-                    "en_us": truncated,
-                },
-            }
-
-        async def _do():
-            body_builder = SettingsCardRequestBody.builder().settings(self._dumps(settings))
-            body_builder = body_builder.sequence(sequence)
-            request = SettingsCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
-            resp = await self._client.cardkit.v1.card.asettings(request)
-            self._check(resp, "cardkit_close_streaming")
-
-        await self._retry_transient("cardkit_close_streaming", _do)
+            settings["config"]["summary"] = self._summary_settings(summary)
+        await self._apply_card_settings(card_id, settings, "cardkit_close_streaming", sequence=sequence)
 
     async def cardkit_update_summary(
         self,
@@ -611,27 +609,21 @@ class FeishuClient:
         """Update the card summary text WITHOUT closing streaming mode."""
         if not summary:
             return
-        truncated = summary[:120]
         settings: dict[str, Any] = {
-            "config": {
-                "summary": {
-                    "content": truncated,
-                    "i18n_content": {
-                        "zh_cn": truncated,
-                        "en_us": truncated,
-                    },
-                },
-            },
+            "config": {"summary": self._summary_settings(summary)},
         }
+        await self._apply_card_settings(card_id, settings, "cardkit_update_summary", sequence=sequence)
 
-        async def _do():
-            body_builder = SettingsCardRequestBody.builder().settings(self._dumps(settings))
-            body_builder = body_builder.sequence(sequence)
-            request = SettingsCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
-            resp = await self._client.cardkit.v1.card.asettings(request)
-            self._check(resp, "cardkit_update_summary")
-
-        await self._retry_transient("cardkit_update_summary", _do)
+    async def _upload_image_file(self, image_file: io.BytesIO) -> str | None:
+        request = (
+            CreateImageRequest.builder()
+            .request_body(CreateImageRequestBody.builder().image_type("message").image(image_file).build())
+            .build()
+        )
+        resp = await self._client.im.v1.image.acreate(request)
+        if resp.success() and resp.data and resp.data.image_key:
+            return str(resp.data.image_key)
+        return None
 
     async def upload_image(self, image_url: str) -> str | None:
         """下载远程图片并上传到飞书，返回 img_key."""
@@ -651,16 +643,7 @@ class FeishuClient:
 
         # v1.3.2 fix (P1-03): wrap the upload call in try/except to match
         try:
-            file = io.BytesIO(data)
-            request = (
-                CreateImageRequest.builder()
-                .request_body(CreateImageRequestBody.builder().image_type("message").image(file).build())
-                .build()
-            )
-            resp = await self._client.im.v1.image.acreate(request)
-            if resp.success() and resp.data and resp.data.image_key:
-                return str(resp.data.image_key)
-            return None
+            return await self._upload_image_file(io.BytesIO(data))
         except Exception:
             _logger.debug("image upload (API call) failed for %s", image_url, exc_info=True)
             return None
@@ -675,20 +658,7 @@ class FeishuClient:
                 image_bytes = f.read()
             image_file = io.BytesIO(image_bytes)
             image_file.name = os.path.basename(image_path)
-            request = (
-                CreateImageRequest.builder()
-                .request_body(
-                    CreateImageRequestBody.builder()
-                    .image_type("message")
-                    .image(image_file)
-                    .build()
-                )
-                .build()
-            )
-            resp = await self._client.im.v1.image.acreate(request)
-            if resp.success() and resp.data and resp.data.image_key:
-                return str(resp.data.image_key)
-            return None
+            return await self._upload_image_file(image_file)
         except Exception:
             _logger.debug("local image upload failed for %s", image_path, exc_info=True)
             return None

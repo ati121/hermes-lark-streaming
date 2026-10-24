@@ -104,27 +104,25 @@ class ControllerMixin:
             await self._ensure_init()
             assert self._client is not None
             card = build_gateway_card(content, category=category)
-
-            if card_id:
-                # CardKit container — update via cardkit_update
-                await self._client.cardkit_update(card_id, card)
-                _logger.info(
-                    "gateway card updated (cardkit): card_id=%s category=%s",
-                    card_id[:12],
-                    category,
-                )
-                return True
-            else:
-                # IM PATCH mode — update via update_card
-                await self._client.update_card(card_msg_id, card)
-                _logger.info(
-                    "gateway card updated (im_patch): card_msg_id=%s category=%s",
-                    card_msg_id[:12],
-                    category,
-                )
-                return True
+            await self._update_gateway_card(card, card_id=card_id, card_msg_id=card_msg_id)
+            _logger.info(
+                "gateway card updated (%s): card_id=%s card_msg_id=%s category=%s",
+                "cardkit" if card_id else "im_patch",
+                (card_id or "?")[:12],
+                card_msg_id[:12],
+                category,
+            )
+            return True
         except Exception:
             return False
+
+    async def _update_gateway_card(self, card: dict, *, card_id: str | None, card_msg_id: str) -> None:
+        """CardKit 容器走 cardkit_update，否则 IM PATCH."""
+        assert self._client is not None
+        if card_id:
+            await self._client.cardkit_update(card_id, card)
+        else:
+            await self._client.update_card(card_msg_id, card)
 
     async def _do_gateway_card_status(
         self,
@@ -145,10 +143,7 @@ class ControllerMixin:
                 status_label=status_label,
                 status_emoji=emoji,
             )
-            if card_id:
-                await self._client.cardkit_update(card_id, card)
-            else:
-                await self._client.update_card(card_msg_id, card)
+            await self._update_gateway_card(card, card_id=card_id, card_msg_id=card_msg_id)
             _logger.info(
                 "gateway card status: card_msg_id=%s status=%s emoji=%s",
                 card_msg_id[:12],

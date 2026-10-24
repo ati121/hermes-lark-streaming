@@ -445,24 +445,26 @@ class Config:
                 return result
         return {}
 
+    def _read_hermes_yaml(self, home: Any, context: str = "") -> dict[str, Any]:
+        """Read the Hermes config YAML; syntax/read failures degrade to {}."""
+        config_path = _get_hermes_config_path(home)
+        if not config_path.exists():
+            return {}
+        try:
+            text = config_path.read_text(encoding="utf-8")
+            return yaml.safe_load(text) or {}
+        except yaml.YAMLError:
+            _logger.warning("HLS: config YAML syntax error in %s%s, using empty config", config_path, context)
+        except (OSError, UnicodeDecodeError):
+            _logger.warning("HLS: config file read error in %s%s, using empty config", config_path, context)
+        return {}
+
     def _load(self) -> dict[str, Any]:
         with self._lock:
             self._sync_generation()
             if self._raw is not None:
                 return self._raw
-            config_path = _get_hermes_config_path(self._home)
-            if config_path.exists():
-                try:
-                    text = config_path.read_text(encoding="utf-8")
-                    self._raw = yaml.safe_load(text) or {}
-                except yaml.YAMLError:
-                    _logger.warning("HLS: config YAML syntax error in %s, using empty config", config_path)
-                    self._raw = {}
-                except (OSError, UnicodeDecodeError):
-                    _logger.warning("HLS: config file read error in %s, using empty config", config_path)
-                    self._raw = {}
-            else:
-                self._raw = {}
+            self._raw = self._read_hermes_yaml(self._home)
             return self._raw
 
     def _reload_cached(self) -> dict[str, Any]:
@@ -472,18 +474,6 @@ class Config:
             self._sync_generation()
             if self._reload_cache is not None and (now - self._reload_cache_at) < _RELOAD_CACHE_TTL:
                 return self._reload_cache
-            config_path = _get_hermes_config_path(self._home)
-            if config_path.exists():
-                try:
-                    text = config_path.read_text(encoding="utf-8")
-                    self._reload_cache = yaml.safe_load(text) or {}
-                except yaml.YAMLError:
-                    _logger.warning("HLS: config YAML syntax error in %s (reload), using empty config", config_path)
-                    self._reload_cache = {}
-                except (OSError, UnicodeDecodeError):
-                    _logger.warning("HLS: config file read error in %s (reload), using empty config", config_path)
-                    self._reload_cache = {}
-            else:
-                self._reload_cache = {}
+            self._reload_cache = self._read_hermes_yaml(self._home, " (reload)")
             self._reload_cache_at = now
             return self._reload_cache

@@ -292,6 +292,33 @@ def enforce_element_limit(
     panel["elements"] = children
     return card
 
+def _i18n_title(en: str, zh: str, *, color: str = "grey") -> dict:
+    """i18n plain_text panel title — the shared shape of every panel header."""
+    return {
+        "tag": "plain_text",
+        "content": en,
+        "i18n_content": _i18n(en, zh),
+        "text_color": color,
+        "text_size": "notation",
+    }
+
+def _panel_header(title_el: dict, *, icon_position: str = "right") -> dict:
+    """collapsible_panel header with the grey chevron icon."""
+    icon_el: dict = {
+        "tag": "standard_icon",
+        "token": "down-small-ccm_outlined",
+        "size": "16px 16px",
+    }
+    if icon_position == "right":
+        icon_el["color"] = "grey"
+    return {
+        "title": title_el,
+        "vertical_align": "center",
+        "icon": icon_el,
+        "icon_position": icon_position,
+        "icon_expanded_angle": -180,
+    }
+
 def _collapsible_panel(
     *,
     expanded: bool,
@@ -300,23 +327,10 @@ def _collapsible_panel(
     vertical_spacing: str = "4px",
     icon_position: str = "right",
 ) -> dict:
-    icon_el = {
-        "tag": "standard_icon",
-        "token": "down-small-ccm_outlined",
-        "size": "16px 16px",
-    }
-    if icon_position == "right":
-        icon_el["color"] = "grey"
     return {
         "tag": "collapsible_panel",
         "expanded": expanded,
-        "header": {
-            "title": title_el,
-            "vertical_align": "center",
-            "icon": icon_el,
-            "icon_position": icon_position,
-            "icon_expanded_angle": -180,
-        },
+        "header": _panel_header(title_el, icon_position=icon_position),
         "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": vertical_spacing,
         "padding": "8px 8px 8px 8px",
@@ -487,20 +501,23 @@ def _build_unified_panel_placeholder(*, expanded: bool = False) -> dict:
     en_title, zh_title = _T["agent_process"]
     panel = _collapsible_panel(
         expanded=expanded,
-        title_el={
-            "tag": "plain_text",
-            "content": en_title,
-            "i18n_content": _i18n(en_title, zh_title),
-            "text_color": "grey",
-            "text_size": "notation",
-        },
+        title_el=_i18n_title(en_title, zh_title),
         elements=[{"tag": "markdown", "content": " "}],
     )
     panel["element_id"] = UNIFIED_PANEL_ELEMENT_ID
     return panel
 
-def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, total_elapsed_ms: float = 0, show_reasoning: bool = True, active_tool: tuple[str, str] | None = None) -> dict:
-    """Build header dict for unified panel. Title computed from state (rounds/tools/elapsed)."""
+def _panel_title_el(
+    *,
+    reasoning_rounds: list,
+    current_reasoning_text: str,
+    tool_steps: list[dict],
+    tool_elapsed_ms: float,
+    total_elapsed_ms: float,
+    show_reasoning: bool,
+    active_tool: tuple[str, str] | None,
+) -> dict:
+    """Title computed from state (rounds/tools/elapsed)."""
     en_title, zh_title = _T["agent_process"]
     en_parts: list[str] = [en_title]
     zh_parts: list[str] = [zh_title]
@@ -536,31 +553,19 @@ def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = 
         en_parts.append(en_tpl.format(active_tool[0]))
         zh_parts.append(zh_tpl.format(active_tool[1]))
 
-    en_full = " · ".join(en_parts)
-    zh_full = " · ".join(zh_parts)
+    return _i18n_title(" · ".join(en_parts), " · ".join(zh_parts))
 
-    title_el = {
-        "tag": "plain_text",
-        "content": en_full,
-        "i18n_content": _i18n(en_full, zh_full),
-        "text_color": "grey",
-        "text_size": "notation",
-    }
-
-    # Header structure (matches _collapsible_panel; icon_position=right → grey).
-    icon_el = {
-        "tag": "standard_icon",
-        "token": "down-small-ccm_outlined",
-        "size": "16px 16px",
-        "color": "grey",
-    }
-    return {
-        "title": title_el,
-        "vertical_align": "center",
-        "icon": icon_el,
-        "icon_position": "right",
-        "icon_expanded_angle": -180,
-    }
+def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, total_elapsed_ms: float = 0, show_reasoning: bool = True, active_tool: tuple[str, str] | None = None) -> dict:
+    """Build header dict for unified panel. Title computed from state (rounds/tools/elapsed)."""
+    return _panel_header(_panel_title_el(
+        reasoning_rounds=reasoning_rounds,
+        current_reasoning_text=current_reasoning_text,
+        tool_steps=tool_steps,
+        tool_elapsed_ms=tool_elapsed_ms,
+        total_elapsed_ms=total_elapsed_ms,
+        show_reasoning=show_reasoning,
+        active_tool=active_tool,
+    ))
 
 _REASONING_DISPLAY_LIMIT = 2000  # 单条推理文本最大显示字数
 
@@ -816,17 +821,7 @@ def build_panel_children(
                     text_sizes=text_sizes,
                 ))
                 if round_.text.strip():
-                    children.append({
-                        "tag": "div",
-                        "margin": "0px 0px 0px 22px",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": _truncate_reasoning(round_.text),
-                            "text_size": _role_text_size(
-                                text_sizes, "reasoning", default="notation",
-                            ),
-                        },
-                    })
+                    children.append(_reasoning_body_element(round_.text, text_sizes))
             elif kind == "tool" and idx < len(tool_steps):
                 if idx not in rendered_tools:
                     step = tool_steps[idx]
@@ -842,17 +837,7 @@ def build_panel_children(
                 in_progress_idx, 0, finalized=False, text_sizes=text_sizes,
             ))
             if current_reasoning_text.strip():
-                children.append({
-                    "tag": "div",
-                    "margin": "0px 0px 0px 22px",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": _truncate_reasoning(current_reasoning_text),
-                        "text_size": _role_text_size(
-                            text_sizes, "reasoning", default="notation",
-                        ),
-                    },
-                })
+                children.append(_reasoning_body_element(current_reasoning_text, text_sizes))
 
         # Remaining tool steps not in panel_events.
         for i, step in enumerate(tool_steps):
@@ -873,17 +858,7 @@ def build_panel_children(
                     text_sizes=text_sizes,
                 ))
                 if round_.text.strip():
-                    children.append({
-                        "tag": "div",
-                        "margin": "0px 0px 0px 22px",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": _truncate_reasoning(round_.text),
-                            "text_size": _role_text_size(
-                                text_sizes, "reasoning", default="notation",
-                            ),
-                        },
-                    })
+                    children.append(_reasoning_body_element(round_.text, text_sizes))
 
             # In-progress reasoning.
             if current_reasoning_text:
@@ -892,17 +867,7 @@ def build_panel_children(
                     in_progress_idx, 0, finalized=False, text_sizes=text_sizes,
                 ))
                 if current_reasoning_text.strip():
-                    children.append({
-                        "tag": "div",
-                        "margin": "0px 0px 0px 22px",
-                        "text": {
-                            "tag": "lark_md",
-                            "content": _truncate_reasoning(current_reasoning_text),
-                            "text_size": _role_text_size(
-                                text_sizes, "reasoning", default="notation",
-                            ),
-                        },
-                    })
+                    children.append(_reasoning_body_element(current_reasoning_text, text_sizes))
 
         # Tool steps.
         for step in tool_steps:
@@ -931,16 +896,7 @@ def build_unified_panel(
     text_sizes: Mapping[str, Any] | None = None,
     active_tool: tuple[str, str] | None = None,
 ) -> dict:
-    """Build full unified panel. Thin assembler over build_panel_header/children."""
-    header = build_panel_header(
-        reasoning_rounds=reasoning_rounds,
-        current_reasoning_text=current_reasoning_text,
-        tool_steps=tool_steps,
-        tool_elapsed_ms=tool_elapsed_ms,
-        total_elapsed_ms=total_elapsed_ms,
-        show_reasoning=show_reasoning,
-        active_tool=active_tool,
-    )
+    """Build full unified panel. Thin assembler over _panel_title_el/children."""
     children = build_panel_children(
         reasoning_rounds=reasoning_rounds,
         current_reasoning_text=current_reasoning_text,
@@ -951,15 +907,19 @@ def build_unified_panel(
         max_reasoning_rounds=max_reasoning_rounds,
         text_sizes=text_sizes,
     )
-    panel = {
-        "tag": "collapsible_panel",
-        "expanded": expanded,
-        "header": header,
-        "border": {"color": "grey", "corner_radius": "5px"},
-        "vertical_spacing": "4px",
-        "padding": "8px 8px 8px 8px",
-        "elements": children,
-    }
+    panel = _collapsible_panel(
+        expanded=expanded,
+        title_el=_panel_title_el(
+            reasoning_rounds=reasoning_rounds,
+            current_reasoning_text=current_reasoning_text,
+            tool_steps=tool_steps,
+            tool_elapsed_ms=tool_elapsed_ms,
+            total_elapsed_ms=total_elapsed_ms,
+            show_reasoning=show_reasoning,
+            active_tool=active_tool,
+        ),
+        elements=children,
+    )
     panel["element_id"] = element_id or UNIFIED_PANEL_ELEMENT_ID
     return panel
 
@@ -983,7 +943,6 @@ def _build_tool_step_title(
     text_sizes: Mapping[str, Any] | None = None,
 ) -> dict:
     status = step.get("status", "running")
-    status_info = _tool_status_info(status)
     title = step.get("title", step.get("name", "tool"))
     title_zh = step.get("title_zh") or title
     color = _tool_status_info(status)
@@ -1012,6 +971,20 @@ def _build_tool_step_title(
         "tag": "div",
         "text": text,
         **({"icon": icon} if icon else {}),
+    }
+
+def _reasoning_body_element(text: str, text_sizes: Mapping[str, Any] | None = None) -> dict:
+    """Indented reasoning body line under a round title."""
+    return {
+        "tag": "div",
+        "margin": "0px 0px 0px 22px",
+        "text": {
+            "tag": "lark_md",
+            "content": _truncate_reasoning(text),
+            "text_size": _role_text_size(
+                text_sizes, "reasoning", default="notation",
+            ),
+        },
     }
 
 def _build_reasoning_round_title(
@@ -1169,13 +1142,7 @@ def _build_error_panel(
 
     panel = _collapsible_panel(
         expanded=expanded,
-        title_el={
-            "tag": "plain_text",
-            "content": en_label,
-            "i18n_content": _i18n(en_label, zh_label),
-            "text_color": "red" if not is_aborted else "orange",
-            "text_size": "notation",
-        },
+        title_el=_i18n_title(en_label, zh_label, color="red" if not is_aborted else "orange"),
         elements=[markdown_el],
         vertical_spacing="8px",
     )
@@ -1201,13 +1168,7 @@ def _build_background_review_panel(
         children.append({"tag": "markdown", "content": " "})
     panel = _collapsible_panel(
         expanded=expanded,
-        title_el={
-            "tag": "plain_text",
-            "content": en_title,
-            "i18n_content": _i18n(en_title, zh_title),
-            "text_color": "grey",
-            "text_size": "notation",
-        },
+        title_el=_i18n_title(en_title, zh_title),
         elements=children,
     )
     if element_id:
@@ -1280,36 +1241,38 @@ def build_preservative_seal_actions(
     def _elem_exists(eid: str) -> bool:
         return existing_elements is None or eid in existing_elements
 
-    # Error/interrupt panel.
-    if error_message:
-        actions.append({
+    def _insert_before(elements: list[dict]) -> dict:
+        return {
             "action": "add_elements",
             "params": {
                 "type": "insert_before",
                 "target_element_id": _LOADING_ELEMENT_ID,
-                "elements": [_build_error_panel(
-                    error_message, is_aborted=is_aborted, expanded=True,
-                    card_trace_id=card_trace_id,
-                    text_sizes=text_sizes,
-                )],
+                "elements": elements,
             },
-        })
+        }
+
+    def _delete(eid: str) -> dict:
+        return {
+            "action": "delete_elements",
+            "params": {"element_ids": [eid]},
+        }
+
+    # Error/interrupt panel.
+    if error_message:
+        actions.append(_insert_before([_build_error_panel(
+            error_message, is_aborted=is_aborted, expanded=True,
+            card_trace_id=card_trace_id,
+            text_sizes=text_sizes,
+        )]))
 
     # Background review panel.
     bg_review_messages = footer_data.get("bg_review_messages") if footer_data else None
     if bg_review_messages:
-        actions.append({
-            "action": "add_elements",
-            "params": {
-                "type": "insert_before",
-                "target_element_id": _LOADING_ELEMENT_ID,
-                "elements": [_build_background_review_panel(
-                    bg_review_messages,
-                    expanded=True,
-                    text_sizes=text_sizes,
-                )],
-            },
-        })
+        actions.append(_insert_before([_build_background_review_panel(
+            bg_review_messages,
+            expanded=True,
+            text_sizes=text_sizes,
+        )]))
 
     # Partial indicator or footer.
     if partial:
@@ -1322,18 +1285,10 @@ def build_preservative_seal_actions(
             },
             _role_text_size(text_sizes, "notice", default=None),
         )
-        partial_elements = [
+        actions.append(_insert_before([
             {"tag": "hr"},
             partial_notice,
-        ]
-        actions.append({
-            "action": "add_elements",
-            "params": {
-                "type": "insert_before",
-                "target_element_id": _LOADING_ELEMENT_ID,
-                "elements": partial_elements,
-            },
-        })
+        ]))
     else:
         footer_elements = _build_footer_elements(
             footer_data,
@@ -1344,34 +1299,24 @@ def build_preservative_seal_actions(
             text_sizes=text_sizes,
         )
         if footer_elements:
-            actions.append({
-                "action": "add_elements",
-                "params": {
-                    "type": "insert_before",
-                    "target_element_id": _LOADING_ELEMENT_ID,
-                    "elements": footer_elements,
-                },
-            })
+            actions.append(_insert_before(footer_elements))
 
     # Delete loading hint (may remain if sealed before answer arrived).
     if _elem_exists(_LOADING_HINT_ELEMENT_ID):
-        actions.append({
-            "action": "delete_elements",
-            "params": {
-                "element_ids": [_LOADING_HINT_ELEMENT_ID],
-            },
-        })
+        actions.append(_delete(_LOADING_HINT_ELEMENT_ID))
 
     # Delete loading icon.
     if _elem_exists(_LOADING_ELEMENT_ID):
-        actions.append({
-            "action": "delete_elements",
-            "params": {
-                "element_ids": [_LOADING_ELEMENT_ID],
-            },
-        })
+        actions.append(_delete(_LOADING_ELEMENT_ID))
 
     return actions
+
+def _labelled(key: str, val: str, show_label: bool) -> tuple[str, str]:
+    """Footer value with/without its i18n label prefix."""
+    en_tpl, zh_tpl = _T[key]
+    if show_label:
+        return en_tpl.format(val), zh_tpl.format(val)
+    return val, val
 
 def _render_footer_field(
     name: str,
@@ -1390,10 +1335,7 @@ def _render_footer_field(
     if name == "elapsed":
         duration = data.get("duration", 0)
         if isinstance(duration, (int, float)) and duration > 0:
-            val = _format_elapsed(duration * 1000)
-            if show_label:
-                return _T["elapsed"][0].format(val), _T["elapsed"][1].format(val)
-            return val, val
+            return _labelled("elapsed", _format_elapsed(duration * 1000), show_label)
         return None, None
 
     if name == "speed":
@@ -1402,9 +1344,7 @@ def _render_footer_field(
             data.get("speed_request_seconds", 0) or 0,
         )
         if val:
-            if show_label:
-                return _T["speed"][0].format(val), _T["speed"][1].format(val)
-            return val, val
+            return _labelled("speed", val, show_label)
         return None, None
 
     if name == "model":
@@ -1427,10 +1367,7 @@ def _render_footer_field(
         max_c = data.get("context_max", 0) or 0
         if max_c:
             pct = int(used / max_c * 100)
-            val = f"{_compact(used)}/{_compact(max_c)} ({pct}%)"
-            if show_label:
-                return _T["context"][0].format(val), _T["context"][1].format(val)
-            return val, val
+            return _labelled("context", f"{_compact(used)}/{_compact(max_c)} ({pct}%)", show_label)
         return None, None
 
     if name == "api_calls":
@@ -1463,9 +1400,7 @@ def _render_footer_field(
         if cache_read and input_total:
             hit_pct = int(cache_read / input_total * 100)
             v = f"{_compact(cache_read)}/{_compact(input_total)} ({hit_pct}%)"
-            if show_label:
-                return _T["cache"][0].format(v), _T["cache"][1].format(v)
-            return v, v
+            return _labelled("cache", v, show_label)
         return None, None
 
     if name == "cost":

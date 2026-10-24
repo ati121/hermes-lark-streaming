@@ -87,21 +87,45 @@ def _static_summary(content: str) -> str:
     return content[:120].replace("\n", " ").replace("```", "").strip()
 
 
+def _static_card_shell(elements: list[dict], *, streaming_mode: bool | None = None) -> dict[str, Any]:
+    """schema-2.0 static card shell. streaming_mode=None keeps the key absent
+    (cron/gateway cards omit it; clarify cards pin it to False)."""
+    config: dict[str, Any] = {"locales": _LOCALES}
+    if streaming_mode is not None:
+        config["streaming_mode"] = streaming_mode
+    return {
+        "schema": "2.0",
+        "config": config,
+        "body": {"elements": elements},
+    }
+
+
+def _icon_div(token: str, color: str, text: dict[str, Any], *, size: str = "20px 20px") -> dict:
+    return {
+        "tag": "div",
+        "icon": {
+            "tag": "standard_icon",
+            "token": token,
+            "size": size,
+            "color": color,
+        },
+        "text": text,
+    }
+
+
 def build_cron_card(content: str) -> dict[str, Any]:
     """Cron 推送用的极简静态卡片 — schema 2.0，仅 markdown 内容."""
-    card: dict[str, Any] = {
-        "schema": "2.0",
-        "config": {"locales": _LOCALES},
-        "body": {"elements": []},
-    }
     if not content.strip():
-        return card
+        return _static_card_shell([])
+    elements = [
+        {"tag": "markdown", "content": chunk}
+        for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES))
+        if chunk.strip()
+    ]
+    card = _static_card_shell(elements)
     summary = _static_summary(content)
     if summary:
         card["config"]["summary"] = {"content": summary}
-    for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)):
-        if chunk.strip():
-            card["body"]["elements"].append({"tag": "markdown", "content": chunk})
     return card
 
 def build_gateway_card(content: str, *, category: str = "", status_label: str = "", status_emoji: str = "") -> dict[str, Any]:
@@ -125,11 +149,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
             if chunk.strip():
                 elements.append({"tag": "markdown", "content": chunk})
 
-    card: dict[str, Any] = {
-        "schema": "2.0",
-        "config": {"locales": _LOCALES},
-        "body": {"elements": elements},
-    }
+    card = _static_card_shell(elements)
 
     summary = _static_summary(content) if content.strip() else ""
     if summary:
@@ -140,29 +160,20 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
 def build_clarify_card(*, question: str, choices: list[str] | None = None, clarify_id: str = "") -> dict[str, Any]:
     """构建 Clarify 待选择态卡片 (State 1: Pending). 三态: 标题/选项列表/快速选择下拉/
     自定义输入. choices 经 normalize + escape for lark_md. select_static 用 plain_text."""
-    elements: list[dict] = []
-
-    elements.append({
-        "tag": "div",
-        "icon": {
-            "tag": "standard_icon",
-            "token": "info_outlined",
-            "size": "20px 20px",
-            "color": "blue",
-        },
-        "text": {
+    elements: list[dict] = [
+        _icon_div("info_outlined", "blue", {
             "tag": "lark_md",
             "content": f"**{_escape_md(question)}**",
-        },
-    })
+        }),
+    ]
 
     # Defense in depth: adapter also normalizes, but card builders must be safe.
     normalized_choices = normalize_clarify_choices(choices)
 
     if normalized_choices:
+        labels = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(len(normalized_choices))]
         option_lines = []
-        for i, choice in enumerate(normalized_choices):
-            label = chr(ord("A") + i) if i < 26 else str(i + 1)
+        for label, choice in zip(labels, normalized_choices):
             option_lines.append(f"{label}. {_escape_md(choice)}")
         options_md = "\n".join(option_lines)
         elements.append({
@@ -171,13 +182,13 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
         })
 
         # select_static dropdown (plain_text, no markdown).
-        options: list[dict] = []
-        for i, choice in enumerate(normalized_choices):
-            label = chr(ord("A") + i) if i < 26 else str(i + 1)
-            options.append({
+        options: list[dict] = [
+            {
                 "text": {"tag": "plain_text", "content": f"{label}. {choice}"},
                 "value": str(i),
-            })
+            }
+            for i, (label, choice) in enumerate(zip(labels, normalized_choices))
+        ]
 
         en_placeholder, zh_placeholder = _T["clarify_select_placeholder"]
         select_el: dict[str, Any] = {
@@ -220,56 +231,34 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
     }
     elements.append(input_el)
 
-    card: dict[str, Any] = {
-        "schema": "2.0",
-        "config": {
-            "streaming_mode": False,
-            "locales": _LOCALES,
-        },
-        "body": {"elements": elements},
-    }
-    return card
+    return _static_card_shell(elements, streaming_mode=False)
 
-def build_clarify_submitted_card(*, question: str, selected: str, clarify_id: str = "") -> dict[str, Any]:
-    """构建 Clarify 已提交态卡片 (State 2: Submitted/Soft Lock). 标题 + 用户选择 +
-    "已提交" 提示 + 重试按钮."""
-    # Escape selected for lark_md (rendered inside "已选择: {}" template).
+def _clarify_header_elements(question: str, selected: str, *, token: str, color: str) -> list[dict]:
+    """Shared two-row header of the submitted/confirmed clarify cards."""
     safe_selected = _escape_md(selected)
     en_selected, zh_selected = _T["clarify_selected"]
     en_sel_label = en_selected.format(safe_selected)
     zh_sel_label = zh_selected.format(safe_selected)
+    return [
+        _icon_div(token, color, {
+            "tag": "lark_md",
+            "content": f"**{_escape_md(question)}**",
+        }),
+        _icon_div(token, color, {
+            "tag": "lark_md",
+            "content": en_sel_label,
+            "i18n_content": _i18n(en_sel_label, zh_sel_label),
+        }, size="16px 16px"),
+    ]
 
+def build_clarify_submitted_card(*, question: str, selected: str, clarify_id: str = "") -> dict[str, Any]:
+    """构建 Clarify 已提交态卡片 (State 2: Submitted/Soft Lock). 标题 + 用户选择 +
+    "已提交" 提示 + 重试按钮."""
     en_submitted, zh_submitted = _T["clarify_submitted"]
     en_retry, zh_retry = _T["clarify_retry"]
 
     elements: list[dict] = [
-        {
-            "tag": "div",
-            "icon": {
-                "tag": "standard_icon",
-                "token": "lock_outlined",
-                "size": "20px 20px",
-                "color": "orange",
-            },
-            "text": {
-                "tag": "lark_md",
-                "content": f"**{_escape_md(question)}**",
-            },
-        },
-        {
-            "tag": "div",
-            "icon": {
-                "tag": "standard_icon",
-                "token": "lock_outlined",
-                "size": "16px 16px",
-                "color": "orange",
-            },
-            "text": {
-                "tag": "lark_md",
-                "content": en_sel_label,
-                "i18n_content": _i18n(en_sel_label, zh_sel_label),
-            },
-        },
+        *_clarify_header_elements(question, selected, token="lock_outlined", color="orange"),
         {
             "tag": "div",
             "text": {
@@ -299,53 +288,14 @@ def build_clarify_submitted_card(*, question: str, selected: str, clarify_id: st
         },
     ]
 
-    card: dict[str, Any] = {
-        "schema": "2.0",
-        "config": {
-            "streaming_mode": False,
-            "locales": _LOCALES,
-        },
-        "body": {"elements": elements},
-    }
-    return card
+    return _static_card_shell(elements, streaming_mode=False)
 
 def build_clarify_confirmed_card(*, question: str, selected: str) -> dict[str, Any]:
     """构建 Clarify 已确认态卡片 (State 3: Confirmed/Hard Lock). 标题 + 选择 + "已确认"."""
-    safe_selected = _escape_md(selected)
-    en_selected, zh_selected = _T["clarify_selected"]
-    en_sel_label = en_selected.format(safe_selected)
-    zh_sel_label = zh_selected.format(safe_selected)
-
     en_confirmed, zh_confirmed = _T["clarify_confirmed"]
 
     elements: list[dict] = [
-        {
-            "tag": "div",
-            "icon": {
-                "tag": "standard_icon",
-                "token": "resolve_filled",
-                "size": "20px 20px",
-                "color": "green",
-            },
-            "text": {
-                "tag": "lark_md",
-                "content": f"**{_escape_md(question)}**",
-            },
-        },
-        {
-            "tag": "div",
-            "icon": {
-                "tag": "standard_icon",
-                "token": "resolve_filled",
-                "size": "16px 16px",
-                "color": "green",
-            },
-            "text": {
-                "tag": "lark_md",
-                "content": en_sel_label,
-                "i18n_content": _i18n(en_sel_label, zh_sel_label),
-            },
-        },
+        *_clarify_header_elements(question, selected, token="resolve_filled", color="green"),
         {
             "tag": "div",
             "text": {
@@ -356,12 +306,4 @@ def build_clarify_confirmed_card(*, question: str, selected: str) -> dict[str, A
         },
     ]
 
-    card: dict[str, Any] = {
-        "schema": "2.0",
-        "config": {
-            "streaming_mode": False,
-            "locales": _LOCALES,
-        },
-        "body": {"elements": elements},
-    }
-    return card
+    return _static_card_shell(elements, streaming_mode=False)

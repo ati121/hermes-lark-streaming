@@ -426,11 +426,7 @@ class UnifiedControllerMixin:
         # 标题也不再带「N 轮」；没有工具调用的回合面板整个不出现（否则只剩空壳）。
         # CardKit 实体卡路径没有顶部思考块，仍由面板承载推理，不受影响。
         _tool_steps = session.tool_use.build_display_steps() if state is not None else []
-        _total_elapsed_ms = 0.0
-        if final and isinstance(footer_data, dict):
-            _duration = footer_data.get("duration", 0)
-            if isinstance(_duration, (int, float)) and _duration > 0:
-                _total_elapsed_ms = _duration * 1000
+        _total_elapsed_ms = _footer_elapsed_ms(footer_data) if final else 0.0
         if state is not None and state.panel_visible and _tool_steps:
             elements.append(self._build_session_panel(
                 session, state,

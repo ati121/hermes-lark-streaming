@@ -15,19 +15,25 @@ _metrics_lock = threading.Lock()
 # Hold strong refs to fire-and-forget tasks (prevent mid-execution GC).
 _aowen_pending_tasks: set = set()
 
-_metrics: dict[str, Any] = {
-    "cards_created": 0,
-    "cards_completed": 0,
-    "cards_failed": 0,
-    "cards_aborted": 0,
-    "api_calls": 0,
-    "api_errors": 0,
-    "stream_element_calls": 0,
-    "stream_element_failures": 0,
-    "batch_update_calls": 0,
-    "active_sessions": 0,
-    "started_at": time.time(),
-}
+
+def _fresh_metrics(*, active_sessions: int = 0, started_at: float | None = None) -> dict[str, Any]:
+    """New zeroed metrics dict — single source for init and /aowen reset."""
+    return {
+        "cards_created": 0,
+        "cards_completed": 0,
+        "cards_failed": 0,
+        "cards_aborted": 0,
+        "api_calls": 0,
+        "api_errors": 0,
+        "stream_element_calls": 0,
+        "stream_element_failures": 0,
+        "batch_update_calls": 0,
+        "active_sessions": active_sessions,
+        "started_at": time.time() if started_at is None else started_at,
+    }
+
+
+_metrics: dict[str, Any] = _fresh_metrics()
 
 _error_codes: dict[int, int] = {}  # error_code → count
 
@@ -88,17 +94,12 @@ def _format_uptime(seconds: float) -> str:
     return f"{hours}h {minutes % 60}m"
 
 def _get_version() -> str:
-    """Get plugin version from plugin.yaml."""
+    """Get plugin version from the root package (parses plugin.yaml once)."""
     try:
-        from pathlib import Path
-        yaml_path = Path(__file__).resolve().parent.parent / "plugin.yaml"
-        if yaml_path.exists():
-            for line in yaml_path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("version:"):
-                    return line.split(":", 1)[1].strip().strip('"').strip("'")
+        from .. import __version__
+        return __version__
     except Exception:
-        pass
-    return "unknown"
+        return "unknown"
 
 # Color: green=success, orange=warning, red=error, blue=info, grey=neutral.
 _ICON_TOKENS: dict[str, str] = {
@@ -619,19 +620,8 @@ def _do_reset() -> None:
         old_created = _metrics["cards_created"]
         old_errors = _metrics["api_errors"]
 
-        _metrics = {
-            "cards_created": 0,
-            "cards_completed": 0,
-            "cards_failed": 0,
-            "cards_aborted": 0,
-            "api_calls": 0,
-            "api_errors": 0,
-            "stream_element_calls": 0,
-            "stream_element_failures": 0,
-            "batch_update_calls": 0,
-            "active_sessions": _metrics["active_sessions"],
-            "started_at": time.time(),
-        }
+        # reset keeps the live active-session count; started_at restarts
+        _metrics = _fresh_metrics(active_sessions=_metrics["active_sessions"])
         _error_codes.clear()
 
     _logger.info("HLS: metrics reset (was: created=%d, errors=%d)", old_created, old_errors)

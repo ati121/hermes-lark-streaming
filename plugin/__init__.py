@@ -79,6 +79,13 @@ def _prepare_config(cfg: dict[str, Any]) -> dict[str, Any]:
             result[k] = v
     return result
 
+def _load_raw_config(config_path) -> dict:
+    return yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+def _write_raw_config(config_path, raw: dict) -> None:
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
 def _ensure_streaming_config() -> None:
     """Ensure ``config.yaml`` has a clean top-level ``hermes_lark_streaming`` section."""
     config_path = _get_hermes_config_path()
@@ -87,8 +94,7 @@ def _ensure_streaming_config() -> None:
         return
 
     try:
-        text = config_path.read_text(encoding="utf-8")
-        raw = yaml.safe_load(text) or {}
+        raw = _load_raw_config(config_path)
         changed = False
 
         if "hermes_lark_streaming" not in raw:
@@ -110,9 +116,7 @@ def _ensure_streaming_config() -> None:
                 _logger.info("Added %s to plugins.enabled", _PLUGIN_NAME)
 
         if changed:
-            prepped = _prepare_config(raw)
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(prepped, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            _write_raw_config(config_path, _prepare_config(raw))
     except Exception:
         _logger.exception("Failed to ensure hermes_lark_streaming config in config.yaml")
 
@@ -123,8 +127,7 @@ def _cleanup_config() -> None:
         return
 
     try:
-        text = config_path.read_text(encoding="utf-8")
-        raw = yaml.safe_load(text) or {}
+        raw = _load_raw_config(config_path)
         changed = False
 
         if "hermes_lark_streaming" in raw:
@@ -135,14 +138,13 @@ def _cleanup_config() -> None:
         plugins = raw.get("plugins")
         if isinstance(plugins, dict):
             enabled = plugins.get("enabled")
-            if isinstance(enabled, list) and "hermes-lark-streaming" in enabled:
-                enabled.remove("hermes-lark-streaming")
+            if isinstance(enabled, list) and _PLUGIN_NAME in enabled:
+                enabled.remove(_PLUGIN_NAME)
                 changed = True
-                _logger.info("Removed hermes-lark-streaming from plugins.enabled")
+                _logger.info("Removed %s from plugins.enabled", _PLUGIN_NAME)
 
         if changed:
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            _write_raw_config(config_path, raw)
     except Exception:
         _logger.exception("Failed to clean up hermes_lark_streaming config / plugins.enabled")
 

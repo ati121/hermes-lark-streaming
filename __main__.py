@@ -147,6 +147,11 @@ def _print_usage() -> None:
     print("Note: This plugin uses runtime monkey patching (no file modification).")
     print("      Install/uninstall via: hermes plugins install/uninstall")
 
+def _import_error_exit(e: ImportError) -> int:
+    print(f"Error: Cannot import hermes_lark_streaming: {e}")
+    print("Please ensure the plugin is installed correctly.")
+    return 1
+
 def _cmd_status() -> int:
     try:
         from hermes_lark_streaming.config import Config
@@ -162,9 +167,7 @@ def _cmd_status() -> int:
         print("Plugin uses runtime monkey patching — no source files are modified.")
         print("Install/uninstall via: hermes plugins install/uninstall")
     except ImportError as e:
-        print(f"Error: Cannot import hermes_lark_streaming: {e}")
-        print("Please ensure the plugin is installed correctly.")
-        return 1
+        return _import_error_exit(e)
     return 0
 
 def _cmd_verify() -> int:
@@ -189,9 +192,7 @@ def _cmd_verify() -> int:
         except ImportError as e:
             print(f"run_agent.AIAgent: NOT importable ({e})")
     except ImportError as e:
-        print(f"Error: Cannot import hermes_lark_streaming: {e}")
-        print("Please ensure the plugin is installed correctly.")
-        return 1
+        return _import_error_exit(e)
 
     return 0
 
@@ -205,9 +206,7 @@ def _cmd_cleanup() -> int:
         print("  1. hermes plugins uninstall hermes-lark-streaming")
         print("  2. hermes gateway restart")
     except ImportError as e:
-        print(f"Error: Cannot import hermes_lark_streaming: {e}")
-        print("Please ensure the plugin is installed correctly.")
-        return 1
+        return _import_error_exit(e)
     return 0
 
 def _cmd_doctor() -> int:
