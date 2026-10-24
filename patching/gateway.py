@@ -692,21 +692,18 @@ def _wrap_run_conversation(orig: Callable) -> Callable:
         # gateway.message_timestamps.enabled for this purpose.
 
         _maybe_wrap_callbacks(self)
-        try:
-            # 用关键字参数传递，兼容有/无 persist_user_timestamp 的 Hermes 版本
-            call_kwargs = {
-                "system_message": system_message,
-                "conversation_history": conversation_history,
-                "task_id": task_id,
-                "stream_callback": stream_callback,
-                "persist_user_message": persist_user_message,
-            }
-            if _has_persist_ts:
-                call_kwargs["persist_user_timestamp"] = persist_user_timestamp
-            call_kwargs.update(kwargs)
-            return orig(self, user_message, **call_kwargs)
-        finally:
-            pass  # v1.3.0: inject_time guard removed
+        # 用关键字参数传递，兼容有/无 persist_user_timestamp 的 Hermes 版本
+        call_kwargs = {
+            "system_message": system_message,
+            "conversation_history": conversation_history,
+            "task_id": task_id,
+            "stream_callback": stream_callback,
+            "persist_user_message": persist_user_message,
+        }
+        if _has_persist_ts:
+            call_kwargs["persist_user_timestamp"] = persist_user_timestamp
+        call_kwargs.update(kwargs)
+        return orig(self, user_message, **call_kwargs)
 
     return wrapper
 
@@ -882,11 +879,7 @@ def _wrap_cron_deliver(orig: Callable) -> Callable:
                     len(content) if content else 0,
                 )
                 if ctrl.enabled and content:
-                    cleaned = content
-                    if not cleaned.strip():
-                        cleaned = content
-
-                    await ctrl._do_cron_deliver(chat_id, cleaned.strip())
+                    await ctrl._do_cron_deliver(chat_id, content.strip())
 
                     _logger.info(
                         "hermes-lark-streaming v%s: cron card delivered: chat=%s",

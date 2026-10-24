@@ -749,22 +749,6 @@ def build_pinned_reasoning_elements_from_text(
     return out
 
 
-def build_pinned_reasoning_elements(
-    reasoning_rounds: list,
-    current_reasoning_text: str = "",
-    *,
-    text_sizes: Mapping[str, Any] | None = None,
-    expanded: bool = False,
-    preview: bool = True,
-) -> list[dict]:
-    return build_pinned_reasoning_elements_from_text(
-        pinned_reasoning_full_text(reasoning_rounds, current_reasoning_text),
-        text_sizes=text_sizes,
-        expanded=expanded,
-        preview=preview,
-    )
-
-
 def build_pinned_reasoning_refresh(full: str, *, expanded: bool, text_sizes=None) -> list[dict]:
     """CardKit 实体卡兜底：只做元素级字段刷新。"""
     size = _role_text_size(text_sizes, "reasoning", default="notation")
@@ -1002,7 +986,7 @@ def _build_tool_step_title(
     status_info = _tool_status_info(status)
     title = step.get("title", step.get("name", "tool"))
     title_zh = step.get("title_zh") or title
-    color = status_info["color"]
+    color = _tool_status_info(status)
     # The mark is the tool's emoji, in the text rather than in the div's icon
     # slot: Feishu's standard_icon tokens are monochrome line art, so a row
     # built from one is grey whatever token is chosen. Emoji carry their own
@@ -1122,12 +1106,12 @@ def _build_tool_step_output(
         },
     }
 
-def _tool_status_info(status: str) -> dict[str, str]:
+def _tool_status_info(status: str) -> str:
     return {
-        "running": {"label": "", "color": "orange-300"},
-        "success": {"label": "", "color": "green"},
-        "error": {"label": "", "color": "red"},
-    }.get(status, {"label": "", "color": "grey"})
+        "running": "orange-300",
+        "success": "green",
+        "error": "red",
+    }.get(status, "grey")
 
 def _format_code_block(content: str, language: str) -> str:
     normalized = content.replace("\r\n", "\n").strip()

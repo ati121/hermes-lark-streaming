@@ -506,7 +506,6 @@ class UnifiedControllerMixin:
         # Snapshot epoch before async creation
         epoch = session.create_epoch
         session.state = CREATING
-        session._create_epoch_snap = epoch
         session.linear = True
         # v1.4.0 fix (问题3 根因1 — delegate_task 后卡片降级纯文本):
         if session.unified_state is None:

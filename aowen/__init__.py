@@ -119,6 +119,9 @@ _COLOR_MAP: dict[str, str | None] = {
     "orange": "orange-300",
     "red": "red",
     "turquoise": "turquoise",
+    # 语义别名：调用方大量传 success/error（见 line 103 注释 green=success, red=error）
+    "success": "green",
+    "error": "red",
 }
 
 def _icon_div(icon_key: str, content: str, *, icon_color: str = "grey", text_size: str = "normal", text_color: str | None = None, icon_size: str = "16px 16px") -> dict:
@@ -648,10 +651,6 @@ def _send_card_async(chat_id: str, card: dict, cmd_name: str) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         _logger.warning("HLS: /aowen %s but no running event loop", cmd_name)
-        return
-
-    if not loop.is_running():
-        _logger.warning("HLS: /aowen %s but event loop not running", cmd_name)
         return
 
     async def _init_and_send():

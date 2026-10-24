@@ -124,6 +124,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     def _dispose_session(session: CardSession) -> None:
         """Invalidate snapshots before cancelling work on its owning loop."""
         session.flush.mark_completed()
+        # Tests pass duck-typed session stubs; full teardown needs real slots.
         if not isinstance(session, CardSession):
             return
         session._disposed = True

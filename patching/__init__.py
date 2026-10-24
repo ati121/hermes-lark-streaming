@@ -36,8 +36,6 @@ __all__ = [
     '_patched_feishu_classes',
     # Functions
     '_get_config',
-    '_get_event_message_id',
-    '_get_thread_local_ctx',
     '_apply_gateway_runner_patches',
     'apply_patches',
         '_apply_direct_agent_patch',
@@ -46,7 +44,6 @@ __all__ = [
     '_start_deferred_patch_thread',
     # FeishuAdapter patch helpers
     '_apply_feishu_adapter_patches',
-    '_verify_feishu_patch_identity',
     # v1.6.0: hook platform_registry.create_adapter — main-chain fix for deferred loading
     '_wrap_platform_registry_create_adapter',
     '_apply_create_adapter_hook',
@@ -208,30 +205,11 @@ def _mark_class(cls: Any, attr: str, home: str = "") -> None:
 # _wrap_cron_deliver carry no double-wrap marker of their own, so these flags are
 # what keeps a retry from wrapping an already-wrapped callable twice.
 _conversation_loop_patched: bool = False
-_aiagent_patched: bool = False
 _cron_patched: bool = False
 _feishu_patched: bool = False
-_create_adapter_hooked: bool = False
 
 _deferred_thread: threading.Thread | None = None
 _deferred_thread_lock = threading.Lock()
-
-# When both the module-level patch and the direct AIAgent patch are active,
-# The guard prevents the second call from injecting the prefix again.
-
-def _get_event_message_id() -> str | None:
-    ctx = _msg_ctx.get()
-    if ctx is None:
-        ctx = _get_thread_local_ctx()
-    if ctx is None:
-        return None
-    # Recovery turns may not have a platform event id. The per-turn
-    # message_id is still unique inside the controller and is sufficient to
-    # keep all callbacks on the same streaming card.
-    return ctx.get("event_message_id") or ctx.get("message_id")
-
-def _get_thread_local_ctx() -> dict | None:
-    return getattr(_thread_local_ctx, "data", None)
 
 # These imports must come AFTER shared state is defined to avoid circular
 
@@ -690,25 +668,6 @@ def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) ->
     )
     return True
 
-def _verify_feishu_patch_identity(adapter_instance: Any) -> bool:
-    """Verify that an adapter instance's class has been patched by HLS."""
-    if adapter_instance is None:
-        return False
-    cls = type(adapter_instance)
-    cls_id = id(cls)
-    if _class_marked(cls, _FEISHU_CLASS_MARK_ATTR):
-        _patched_feishu_classes.add(cls_id)
-        return True
-    if cls_id in _patched_feishu_classes:
-        return True
-    _logger.error(
-        "HLS: FeishuAdapter identity mismatch! adapter instance class id=%s "
-        "not in patched classes %s. Clarify/delegate cards will fall back to "
-        "text. Run /aowen doctor.",
-        cls_id, sorted(_patched_feishu_classes),
-    )
-    return False
-
 
 def _wrap_platform_registry_create_adapter(orig_create_adapter: Callable) -> Callable:
     """v1.6.0: wrap platform_registry.create_adapter so every adapter instance
@@ -794,8 +753,6 @@ def _apply_create_adapter_hook(compat: Any | None = None) -> bool:
 
     Returns True if the hook was installed (or was already installed).
     """
-    global _create_adapter_hooked
-
     # v1.6.2: via _try_import — gateway.platform_registry does not import
     # gateway.run and is only imported lazily inside host functions, so this
     # still resolves synchronously at register() time in practice.  Going
@@ -819,11 +776,9 @@ def _apply_create_adapter_hook(compat: Any | None = None) -> bool:
         return False
 
     if getattr(_current, "_hls_create_adapter_wrapped", False):
-        _create_adapter_hooked = True
         return True  # already wrapped
 
     _pr.create_adapter = _wrap_platform_registry_create_adapter(_current)
-    _create_adapter_hooked = True
     _logger.info(
         "hermes-lark-streaming: platform_registry.create_adapter hooked ✓ "
         "(main-chain deferred-loading fix — every FeishuAdapter instance gets "
@@ -837,8 +792,6 @@ def _apply_direct_agent_patch(compat: Any | None = None) -> bool:
     Returns True once the patch is installed, so the deferred retry loop can
     stop chasing it.
     """
-    global _aiagent_patched
-
     if compat is None:
         compat = HermesCompat()
     AIAgent = compat.aiagent_class
@@ -851,7 +804,6 @@ def _apply_direct_agent_patch(compat: Any | None = None) -> bool:
 
         # Guard: skip if already patched
         if getattr(_orig_method, "_hls_direct_patched", False):
-            _aiagent_patched = True
             _logger.debug("hermes-lark-streaming: AIAgent.run_conversation already directly patched, skip")
             return True
 
@@ -862,7 +814,6 @@ def _apply_direct_agent_patch(compat: Any | None = None) -> bool:
         _patched_run_conversation = _wrap_run_conversation(_orig_method)
         _patched_run_conversation._hls_direct_patched = True
         AIAgent.run_conversation = _patched_run_conversation
-        _aiagent_patched = True
         _logger.info("hermes-lark-streaming: AIAgent.run_conversation patched directly")
         return True
     except AttributeError as e:

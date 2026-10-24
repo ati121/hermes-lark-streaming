@@ -583,26 +583,6 @@ def _terminal_image_spec(command: str) -> tuple[list[str], tuple[str, str, str]]
     return help_match
 
 
-def _terminal_program_spec_uncached(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
-    """``(leading_tokens, spec)`` when a ``terminal`` command runs a listed program.
-
-    ``leading_tokens`` are the command tokens the match covers (``["gh"]`` or
-    ``["python3", "zimage_gen.py"]``) so the detail line can drop them.
-    ``args`` (Hermes's tool arguments) beats ``detail``: the preview is
-    truncated to ``display.tool_preview_length`` and a long path can push the
-    script name out of it.
-    """
-    if not name or _normalize_tool_name(name) != "terminal":
-        return None
-    if isinstance(args, dict) and args.get("_hls_image_generate") is True:
-        en, zh = _tool_display_names("image_generate", args=args)
-        return [], (zh, en, "🎨")
-    command = _terminal_command_text(name, detail, args)
-    if not command:
-        return None
-    return _terminal_program_spec_for_command(command)
-
-
 def _terminal_program_spec_for_command(command: str) -> tuple[list[str], tuple[str, str, str]] | None:
     """Resolve a command line to a listed program — split out so it can be cached."""
     image = _terminal_image_spec(command)
@@ -638,7 +618,7 @@ def _cached_terminal_program_spec(command: str) -> tuple[tuple[str, ...], tuple[
 
 
 def _terminal_program_spec(name: str | None, detail: str | None, args: dict[str, Any] | None = None) -> tuple[list[str], tuple[str, str, str]] | None:
-    """Cached :func:`_terminal_program_spec_uncached`.
+    """Cached terminal-program resolution (memoised by command line).
 
     Returns a fresh list for ``leading_tokens`` so callers cannot corrupt the
     cached tuple.

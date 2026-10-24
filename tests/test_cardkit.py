@@ -566,11 +566,11 @@ class TestBuildStreamingCardV2:
         assert panel["expanded"] is False
 
     def test_print_strategy_delay(self) -> None:
-        card = build_streaming_card_v2(show_reasoning=True)
+        card = build_streaming_card_v2()
         assert card["config"]["streaming_config"]["print_strategy"] == "delay"
 
     def test_print_strategy_fast(self) -> None:
-        card = build_streaming_card_v2(show_reasoning=True, print_strategy="fast")
+        card = build_streaming_card_v2(print_strategy="fast")
         assert card["config"]["streaming_config"]["print_strategy"] == "fast"
 
     def test_initial_summary_has_i18n_content(self) -> None:

@@ -102,7 +102,6 @@ class FeishuAPIError(RuntimeError):
 
 CARDKIT_CONTENT_FAILED = 230099  # 卡片内容创建失败（通用码，需检查子错误）
 CARDKIT_ELEMENT_LIMIT = 11310  # 子码: 卡片元素数量超限
-CARDKIT_ELEMENT_LIMIT_DIRECT = 300305  # 直报码: 卡片元素数量超限（cardkit_update 返回此码）
 CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property) OR element not found for insert_before
 CARDKIT_STREAMING_CLOSED = 300309  # 卡片流式模式已关闭
 CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
@@ -136,13 +135,6 @@ _FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 _ELEMENT_NOT_FOUND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 _ELEMENT_NOT_FOUND_MAX_RETRIES = len(_ELEMENT_NOT_FOUND_RETRY_DELAYS)
-
-def is_element_limit_error(e: "FeishuAPIError") -> bool:
-    """判断 FeishuAPIError 是否为元素超限错误。"""
-    return (
-        e.code == CARDKIT_ELEMENT_LIMIT_DIRECT
-        or (e.code == CARDKIT_CONTENT_FAILED and e.extract_sub_code() == CARDKIT_ELEMENT_LIMIT)
-    )
 
 def is_schema_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为卡片 Schema 非法属性错误。"""
@@ -507,7 +499,6 @@ class FeishuClient:
                 .request_body(body_builder.build())
                 .build()
             )
-            t0 = _time.monotonic()
             if self._use_async_stream_element:
                 resp = await self._client.cardkit.v1.card_element.acontent(request)
             else:
@@ -515,9 +506,6 @@ class FeishuClient:
                     self._client.cardkit.v1.card_element.content,
                     request,
                 )
-            elapsed_ms = (_time.monotonic() - t0) * 1000
-            if elapsed_ms > 200:
-                pass
             self._check(resp, "cardkit_stream_element")
 
         last_error: FeishuAPIError | None = None

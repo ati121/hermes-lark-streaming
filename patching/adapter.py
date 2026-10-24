@@ -161,10 +161,6 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                     return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
 
                 cleaned = _text_content
-                if not cleaned.strip():
-                    cleaned = content
-                if not cleaned.strip():
-                    return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
 
                 category = _classify_gateway_message(cleaned or content)
                 card_msg_id, card_id = await ctrl._do_gateway_deliver(
@@ -259,8 +255,6 @@ def _wrap_feishu_adapter_edit(orig_edit: Callable) -> Callable:
                     cfg = _get_config()
                     if cfg.gateway_cards:
                         cleaned = content
-                        if not cleaned.strip():
-                            cleaned = content
 
                         category = _classify_gateway_message(cleaned)
                         updated = await ctrl._do_gateway_card_update(
@@ -507,7 +501,7 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
                 from tools.clarify_gateway import mark_awaiting_text
                 mark_awaiting_text(clarify_id)
                 _logger.debug("clarify card: mark_awaiting_text called for clarify_id=%s", (clarify_id or "?")[:12])
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.debug("clarify card: mark_awaiting_text failed (%s), card callback will handle resolution", e)
 
             # Return success to suppress the original text-based send_clarify
@@ -790,19 +784,19 @@ def _handle_clarify_card_action(
                     log_message="clarify card: failed to schedule retry resolve",
                     log_level=logging.WARNING,
                 )
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: retry resolve scheduling failed: %s", e)
                 try:
                     from tools.clarify_gateway import resolve_gateway_clarify
                     resolve_gateway_clarify(clarify_id, stored_selection)
-                except (ImportError, Exception) as e2:
+                except Exception as e2:
                     _logger.warning("clarify card: synchronous retry resolve also failed: %s", e2)
         else:
             # No event loop — synchronous fallback
             try:
                 from tools.clarify_gateway import resolve_gateway_clarify
                 resolve_gateway_clarify(clarify_id, stored_selection)
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: synchronous retry resolve failed: %s", e)
 
         # Return the same submitted card (soft lock with retry button)
@@ -855,20 +849,20 @@ def _handle_clarify_card_action(
                     log_message="clarify card: failed to schedule resolve_gateway_clarify",
                     log_level=logging.WARNING,
                 )
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: resolve_gateway_clarify scheduling failed: %s", e)
                 # Try synchronous fallback
                 try:
                     from tools.clarify_gateway import resolve_gateway_clarify
                     resolve_gateway_clarify(clarify_id, choice_text)
-                except (ImportError, Exception) as e2:
+                except Exception as e2:
                     _logger.warning("clarify card: synchronous resolve also failed: %s", e2)
         else:
             # No event loop — synchronous fallback
             try:
                 from tools.clarify_gateway import resolve_gateway_clarify
                 resolve_gateway_clarify(clarify_id, choice_text)
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: synchronous resolve failed: %s", e)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet
@@ -911,19 +905,19 @@ def _handle_clarify_card_action(
                     log_message="clarify card: failed to schedule resolve_gateway_clarify",
                     log_level=logging.WARNING,
                 )
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: resolve_gateway_clarify scheduling failed: %s", e)
                 try:
                     from tools.clarify_gateway import resolve_gateway_clarify
                     resolve_gateway_clarify(clarify_id, input_text)
-                except (ImportError, Exception) as e2:
+                except Exception as e2:
                     _logger.warning("clarify card: synchronous resolve also failed: %s", e2)
         else:
             # No event loop — synchronous fallback
             try:
                 from tools.clarify_gateway import resolve_gateway_clarify
                 resolve_gateway_clarify(clarify_id, input_text)
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: synchronous resolve failed: %s", e)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet
@@ -968,19 +962,19 @@ def _handle_clarify_card_action(
                     log_message="clarify card: failed to schedule resolve_gateway_clarify",
                     log_level=logging.WARNING,
                 )
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: resolve_gateway_clarify scheduling failed: %s", e)
                 try:
                     from tools.clarify_gateway import resolve_gateway_clarify
                     resolve_gateway_clarify(clarify_id, input_text)
-                except (ImportError, Exception) as e2:
+                except Exception as e2:
                     _logger.warning("clarify card: synchronous resolve also failed: %s", e2)
         else:
             # No event loop — synchronous fallback
             try:
                 from tools.clarify_gateway import resolve_gateway_clarify
                 resolve_gateway_clarify(clarify_id, input_text)
-            except (ImportError, Exception) as e:
+            except Exception as e:
                 _logger.warning("clarify card: synchronous resolve failed: %s", e)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet

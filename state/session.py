@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from threading import RLock
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 # Phase constants — single source of truth in state.phase
 from .phase import (
@@ -15,19 +14,11 @@ from .phase import (
     TerminalReason,
 )
 
-# Backward-compatible alias — old code imports IDLE from this module
-IDLE = CardPhase.IDLE
-
 from ..feishu import UnavailableGuard
 from ..flush import FlushController
 from .linear import UnifiedLinearState
 from .text import ReasoningStreamSplitter, TextState
 from .tooluse import ToolUseTracker
-
-if TYPE_CHECKING:
-    pass
-
-_logger = logging.getLogger("hermes_lark_streaming")
 
 class CardSession:
     """单条消息的卡片会话状态."""
@@ -36,7 +27,6 @@ class CardSession:
         "_card_ready",
         "_compression_previous_phase",
         "_continuation_reactivation_count",
-        "_create_epoch_snap",
         "_creation_stages",
         "_completion_started",
         "_disposed",
@@ -97,7 +87,7 @@ class CardSession:
         self.message_id = message_id
         self.anchor_id: str | None = None
         self.chat_id = chat_id
-        self.state: str = IDLE
+        self.state: str = CardPhase.IDLE
         self.card_msg_id: str | None = None
         self.card_id: str | None = None
         # v1.1.0: card_trace_id — short unique ID for correlating all logs
@@ -125,7 +115,6 @@ class CardSession:
 
         # ── State machine enhancements ──
         self.create_epoch: int = 0          # Incremented on terminal phase entry
-        self._create_epoch_snap: int = 0    # Snapshotted when creation starts
         self.terminal_reason: str = ""      # Why the session ended
         self.terminal_source: str = ""      # Which code path triggered terminal
 

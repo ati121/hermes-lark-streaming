@@ -48,8 +48,6 @@ def build_streaming_card_v2(
     *,
     tool_steps: list[dict] | None = None,
     elapsed_ms: float = 0,
-    show_tool_use: bool = True,
-    show_reasoning: bool = False,
     show_streaming_element: bool = True,
     streaming_panel_expanded: bool = True,
     print_strategy: str = "delay",
