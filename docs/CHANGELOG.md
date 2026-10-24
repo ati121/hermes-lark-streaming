@@ -4,6 +4,32 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.38 (2026-10-24, personal fork)
+
+### Fixed — status and monitor cards show their real colors again
+
+- The `aowen` color map never contained the semantic keys the metric builders
+  actually pass (`success`, `error`), so `_metric_block` silently resolved them
+  to no font color and a grey icon. Readiness, credential and API-error metrics
+  on the status and monitor cards rendered in the same neutral grey as healthy
+  values — on every client, because the fallback happened while building the
+  card, not while rendering it.
+- The map now resolves `success` to green and `error` to red, so those metrics
+  carry colored text and icons, matching the `green=success, red=error` legend
+  the code has always documented.
+
+### Changed — about 460 lines of duplicated code removed
+
+- Three cleanup passes, with the full test suite green after each: dead
+  helpers, write-only patch flags, unused i18n keys and no-op branches deleted;
+  isomorphic card-builder, Feishu-client, config and metrics blocks merged into
+  shared helpers; the seal, drain, clarify-dispatch and COMPLETE-hook paths
+  that had been copy-pasted per branch unified behind parameterized helpers.
+- Each unified path keeps its historical per-branch behavior explicitly — log
+  deduplication, dirty-flag clearing order, and result-key names are
+  parameterized, not silently aligned. Apart from the color fix above, card
+  JSON, API traffic and log output are unchanged.
+
 ## v1.37 (2026-10-22, personal fork)
 
 ### Fixed — background completions and priority follow-ups keep streaming cards
