@@ -451,6 +451,32 @@ class TestLongestBacktickRun:
 # --- 完整卡片构建 ---
 
 
+class TestCardWidthMode:
+    @pytest.mark.parametrize("transport", ["streaming", "interactive"])
+    @pytest.mark.parametrize(
+        "text_sizes",
+        [
+            {},
+            {"body": "large"},
+            {"body": {"default": "normal", "pc": "small", "mobile": "large"}},
+        ],
+        ids=["default-size", "scalar-size", "device-sizes"],
+    )
+    def test_cards_fill_available_width(
+        self, transport: str, text_sizes: dict[str, str | dict[str, str]],
+    ) -> None:
+        if transport == "streaming":
+            card = build_streaming_card_v2(text_sizes=text_sizes)
+        else:
+            card = build_interactive_card_v2(
+                elements=[_streaming_element(content="Wide table", text_sizes=text_sizes)],
+                summary="Wide table",
+                text_sizes=text_sizes,
+            )
+
+        assert card["config"]["width_mode"] == "fill"
+
+
 class TestBuildStreamingCardV2:
     def test_structure(self) -> None:
         card = build_streaming_card_v2()
@@ -458,7 +484,7 @@ class TestBuildStreamingCardV2:
         assert card["config"]["streaming_mode"] is True
         assert card["body"]["elements"]
 
-    def test_unconfigured_text_sizes_preserve_existing_json(self) -> None:
+    def test_unconfigured_text_sizes_preserve_default_styles(self) -> None:
         card = build_streaming_card_v2()
         assert "style" not in card["config"]
         answer = next(

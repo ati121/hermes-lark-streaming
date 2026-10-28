@@ -90,6 +90,7 @@ def build_streaming_card_v2(
     card: dict[str, Any] = {
         "schema": "2.0",
         "config": {
+            "width_mode": "fill",
             "streaming_mode": True,
             "streaming_config": {
                 "print_frequency_ms": {"default": 70},
@@ -124,6 +125,7 @@ def build_interactive_card_v2(
     card: dict[str, Any] = {
         "schema": "2.0",
         "config": {
+            "width_mode": "fill",
             "update_multi": True,
             "locales": _LOCALES,
             "summary": _build_summary(summary),

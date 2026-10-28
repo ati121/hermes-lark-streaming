@@ -4,6 +4,19 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.39 (2026-10-28, personal fork)
+
+### Changed - reply cards fill the available chat width
+
+- Set `config.width_mode` to `fill` for both CardKit streaming cards and
+  ordinary interactive reply cards. Wider chat windows can use the available
+  space instead of keeping the default fixed card width and clipping tables.
+- Apply the same width mode with default, scalar and device-specific text
+  sizes; font sizes and card content are unchanged. No new configuration is
+  required, and historical cards are not rewritten.
+- Add six regression cases covering both transports and all three text-size
+  configurations.
+
 ## v1.38 (2026-10-24, personal fork)
 
 ### Fixed — status and monitor cards show their real colors again

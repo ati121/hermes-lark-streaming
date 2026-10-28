@@ -196,6 +196,15 @@ message_id —— 没有 start 钩子，也就不会建新卡。
 向聊天发送流式卡片；后台进程的 completion ID 不会用作飞书回复锚点，思考和页脚仍走正常
 卡片样式。
 
+### 卡片宽度
+
+v1.39 起，回复卡片的 CardKit 流式和普通 interactive 两种传输统一设置
+`config.width_mode: fill`，随聊天区域的可用宽度展开，避免窗口拉宽后卡片仍保持
+默认固定宽度。实际宽度和边距由飞书客户端决定，特别宽的表格仍可能需要横向滚动。
+
+无需新增配置，也不改变字号。更新插件并重启网关后，新生成的卡片生效；历史卡片
+不会自动重写。
+
 ### `text_sizes`（PC/手机端独立字号）
 
 完整形式如下：
@@ -220,7 +229,8 @@ hermes_lark_streaming:
 缺少 `pc`/`mobile` 时继承 `default`；缺少 `default` 时使用角色默认值：
 `body=normal`、`reasoning=small`、`tool/notice/footer=x-small`。
 
-未配置 `text_sizes` 时，Card JSON 必须保持原样。配置启用后，飞书使用普通
+未配置 `text_sizes` 时，不添加 `config.style`，正文和其他角色保持默认字号；
+卡片宽度仍使用统一的 `fill` 模式。配置启用后，飞书使用普通
 interactive IM 卡片的整卡更新路径来可靠应用设备字号别名。字号配置在卡片创建时
 快照，同一张卡片整个流式生命周期固定不变；`/aowen config reload` 只影响新卡片。
 

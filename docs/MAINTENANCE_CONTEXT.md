@@ -33,6 +33,8 @@
 - 设备映射使用 `hls_*` CardKit 样式别名，并在普通 IM 交互卡片传输中生效。
 - 卡片创建时把字号配置写入 `CardSession.text_sizes`，同一张卡片的整个流式生命周期
   使用同一份快照；配置 reload 只影响新卡片。
+- 回复卡片的流式和普通 interactive 构建路径统一设置 `config.width_mode: fill`，
+  使用聊天区域可用宽度，不依赖是否配置字号。
 - 文档、测试和安装脚本指向当前 GitHub 仓库；不保留上游的私有邮箱、群链接、Gitee
   部署路径、凭据、Token、日志或服务器信息。
 
@@ -44,8 +46,8 @@
 
 修改卡片渲染、配置读取或控制器传递时必须保持：
 
-1. 未配置 `hermes_lark_streaming.text_sizes` 时，生成的 Card JSON 必须与修改前完全
-   一致（尤其不能无条件添加 `config.style`）。
+1. 未配置 `hermes_lark_streaming.text_sizes` 时，正文和其他角色保持默认字号，不能
+   无条件添加 `config.style`；回复卡片宽度独立于字号配置，统一使用 `fill`。
 2. 同一张卡片从创建到完成、异常、终止和重试的所有渲染路径都使用同一份字号快照。
 3. `text_sizes` 的角色、设备键和字号值必须经过 `normalize_text_sizes` 校验；非法值
    报出包含精确配置路径的 `ValueError`。
@@ -60,7 +62,7 @@
 - `controller/linear_mixin.py`：卡片创建时快照配置及 interactive 传输选择。
 - `state/session.py`：`CardSession.text_sizes` 生命周期字段。
 - `tests/test_config.py`：配置校验、继承和默认值。
-- `tests/test_cardkit.py`：无配置 JSON 不变、设备别名和各角色渲染。
+- `tests/test_cardkit.py`：无配置默认字号、设备别名、各角色渲染和卡片宽度。
 - `tests/test_controller.py`：快照传递和整卡更新路径。
 - `docs/AGENT_GUIDE.md`、`README.md`：公开使用说明。
 
