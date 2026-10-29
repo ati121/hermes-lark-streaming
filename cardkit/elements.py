@@ -1082,6 +1082,7 @@ def _build_tool_step_output(
 def _tool_status_info(status: str) -> str:
     return {
         "running": "orange-300",
+        "pending": "orange-300",
         "success": "green",
         "error": "red",
     }.get(status, "grey")

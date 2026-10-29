@@ -4,6 +4,41 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.41 (2026-10-30, personal fork)
+
+### Fixed — Magpie image MCP rows no longer report a pending render as success
+
+- Magpie's `generate_image` returns `The image is still being made` plus
+  `_meta.usemagpie.ai/pending` when the upstream takes longer than its 20 s
+  wait; `isError` is false, so Hermes reports a normal completion. Read the
+  result text and mark that row `pending` (orange) instead of `success`
+  (green). Only `Generated with …` or `MEDIA:` / files metadata counts as a
+  delivered image.
+- Keep 🎨 on the live status row while a generation is pending, and keep the
+  row when a side tool (`read_file`, `terminal`, …) lands in the same batch.
+- `tool.completed` carries the full result in its `result` keyword while
+  `preview` is `None`; forward that text for Magpie rows (and for errors on
+  every tool) so the pending/success markers are visible to the tracker.
+  Tool errors now render red with their message.
+- Magpie labels name the family only: `magpie · GPT · 生成图片`,
+  `magpie · 等待生成结果`, `magpie · 生成视频`; GPT-family models all collapse
+  to `GPT`, and the rows no longer append a duration parenthesis.
+
+### Fixed — Hindsight labels match the tools the plugin registers
+
+- `hindsight_recall` now reads `Hindsight · 记忆检索` (multi-strategy search,
+  not a literal look-back), and `hindsight_reflect` reads
+  `Hindsight · 记忆反思`, matching Hindsight's official `反思` term.
+- Drop the `hindsight_operation` label: the plugin registers only
+  retain/recall/reflect; `_run_hindsight_operation` is an internal method,
+  not a tool name.
+
+### Tests
+
+- Full default suite: 1,722 passed.
+- New regression cases cover pending/status-row behaviour, Magpie result
+  forwarding, tool-error colours and the Hindsight labels.
+
 ## v1.40 (2026-10-30, personal fork)
 
 ### Changed — Magpie MCP image tools render as generation steps

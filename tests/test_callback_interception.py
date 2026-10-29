@@ -792,3 +792,55 @@ class TestToolArgsForwarding:
             agent.tool_progress_callback("tool.completed", "terminal", None, None, duration=1.0, is_error=False)
 
             assert mock_ctrl.on_tool_update.call_args.kwargs["tool_args"] is None
+
+    def test_tool_completed_forwards_magpie_result_text(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+            _maybe_wrap_callbacks(agent)
+
+            agent.tool_progress_callback(
+                "tool.completed",
+                "mcp__magpie_image__generate_image",
+                None,
+                None,
+                duration=20.0,
+                is_error=False,
+                result={
+                    "result": "The image is still being made (20 s so far).",
+                    "_meta": {"usemagpie.ai/pending": "img_1"},
+                },
+            )
+
+            kwargs = mock_ctrl.on_tool_update.call_args.kwargs
+            assert kwargs["status"] == "completed"
+            assert "still being made" in kwargs["detail"]
+
+    def test_tool_completed_marks_error(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+            _maybe_wrap_callbacks(agent)
+
+            agent.tool_progress_callback(
+                "tool.completed", "terminal", None, None, duration=1.0, is_error=True, result="boom"
+            )
+
+            kwargs = mock_ctrl.on_tool_update.call_args.kwargs
+            assert kwargs["status"] == "error"
+            assert kwargs["detail"] == "boom"
+
+    def test_tool_completed_keeps_preview_for_other_tools(self):
+        mock_ctrl = _make_mock_ctrl()
+        with patch("hermes_lark_streaming.patching.hooks.get_controller", return_value=mock_ctrl):
+            _set_msg_ctx()
+            agent = FakeAgent()
+            _maybe_wrap_callbacks(agent)
+
+            agent.tool_progress_callback(
+                "tool.completed", "terminal", "done", None, duration=1.0, is_error=False, result="x" * 9000
+            )
+
+            assert mock_ctrl.on_tool_update.call_args.kwargs["detail"] == "done"

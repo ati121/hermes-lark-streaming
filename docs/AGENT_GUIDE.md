@@ -307,7 +307,7 @@ Octopus 使用已加载插件的模型解析逻辑，包含环境变量、插件
 
 ## 记忆工具显示
 
-状态行按记忆来源使用不同图标，所有文案都带上来源名称。Hindsight 的四个工具映射
+状态行按记忆来源使用不同图标，所有文案都带上来源名称。Hindsight 的三个工具映射
 统一用 👁️，OpenViking 的状态行和六个工具统一使用官方帆船图标；Hermes 内置记忆用 🧠，会话检索用 🔎。
 工具面板同步使用带来源的中英文名称。
 OpenViking 图片随插件打包，由各 bot 的飞书客户端上传并缓存；上传不可用时回退到标准检索图标。
@@ -341,16 +341,18 @@ Hermes 在模型调用前自动预取 OpenViking 记忆时，统一显示
 |------|--------|------|
 | `memory` | 🧠 Hermes · 内置记忆 | 新增、替换或删除内置记忆 |
 | `session_search` | 🔎 Hermes · 会话检索 | 检索历史会话 |
-| `hindsight_retain` | 👁️ Hindsight · 记忆写入 | 写入长期记忆 |
-| `hindsight_recall` | 👁️ Hindsight · 记忆回溯 | 检索历史记忆 |
-| `hindsight_reflect` | 👁️ Hindsight · 记忆推演 | 综合已有记忆进行推演 |
-| `hindsight_operation` | 👁️ Hindsight · 记忆操作 | 其他记忆操作的显示映射 |
+| `hindsight_retain` | 👁️ Hindsight · 记忆写入 | 写入长期记忆，自动抽取事实和实体 |
+| `hindsight_recall` | 👁️ Hindsight · 记忆检索 | 语义、关键词和实体图多策略检索 |
+| `hindsight_reflect` | 👁️ Hindsight · 记忆反思 | 跨记忆综合出答案（LLM），官方术语为“反思” |
 | `viking_search` | OpenViking · 检索记忆 | 语义检索记忆库，支持 auto/fast/deep 模式 |
 | `viking_read` | OpenViking · 读取记忆 | 按摘要、概览或全文读取指定内容；URI 在 `viking://resources/` 下时显示为 OpenViking · 知识库 |
 | `viking_browse` | OpenViking · 浏览记忆库 | 查看目录、层级或条目元信息；路径在 `viking://resources/` 下时显示为 OpenViking · 浏览知识库 |
 | `viking_remember` | OpenViking · 记住信息 | 提交长期信息，由 OpenViking 提炼、合并或跳过 |
 | `viking_forget` | OpenViking · 删除记忆 | 按精确 URI 删除一条指定记忆 |
 | `viking_add_resource` | OpenViking · 导入资料 | 导入网址、本地文件或目录并建立索引 |
+
+Hindsight 插件当前只注册 `hindsight_retain` / `hindsight_recall` / `hindsight_reflect`；
+`hindsight_operation` 是客户端内部方法，不是工具名，卡片不再为它保留专门标签。
 
 OpenViking 的六个工具名对应 [Hermes OpenViking 工具定义](https://github.com/NousResearch/hermes-agent/blob/b9271bcb34e1a8b8fe0eeaef0ef4a6e1f93ba543/plugins/memory/openviking/__init__.py#L377-L450)。
 
@@ -393,12 +395,17 @@ emoji 必须写在粗体**外面**：飞书会丢弃混入 emoji 的粗体段，
 MCP 工具（`mcp__server__tool`）默认保持英文小写拼接显示，这是设计如此，不做翻译。
 例外是 Magpie 的图片 MCP：`mcp__magpie_image__generate_image`、`generation_result`、
 `generate_video`（服务器名写成 `magpie` 的别名也算）走生图标签，状态行和面板显示
-🎨 `magpie · GPT · 生成图片`、🎨 `magpie · 获取生成结果`、🎬 `magpie · 生成视频`。
+🎨 `magpie · GPT · 生成图片`、🎨 `magpie · 等待生成结果`、🎬 `magpie · 生成视频`。
 `generate_image` / `generate_video` 支持可选的 `model` 参数（`provider/model` 或路由组，
-如 `group/gpt-image-2.5`），标签优先按这次调用传的模型取家族名（GPT、Flux、MiniMax 等）；
-没传时才用 Magpie 的 Settings → Images 默认模型。当前部署图片默认
-`group/gpt-image-2.5`、视频默认 MiniMax-H3，对应 `state/tooluse.py` 里的
-`_MAGPIE_DEFAULT_IMAGE_FAMILY` / `_MAGPIE_DEFAULT_VIDEO_FAMILY`，换默认模型时改这两个常量。
+如 `group/gpt-image-2.5`），标签只取家族名：GPT Image 系列统一写 GPT，不显示 provider
+或具体版本；其他家族（Flux、MiniMax 等）同样只写家族名。没传 `model` 时才用 Magpie 的
+Settings → Images 默认模型。当前部署图片默认 `group/gpt-image-2.5`、视频默认 MiniMax-H3，
+对应 `state/tooluse.py` 里的 `_MAGPIE_DEFAULT_IMAGE_FAMILY` / `_MAGPIE_DEFAULT_VIDEO_FAMILY`。
+注意 `generate_image` 在 20 秒内没画完时会返回 pending（`The image is still being made`），
+不是成功；只有 `generation_result` 轮询到 `Generated with …` 或 `MEDIA:` / 文件 URL 才算成功。
+pending 行用橙色，状态行继续显示 🎨。Hermes 的 `tool.completed` 事件把完整结果放在
+`result` 关键字参数里（preview 为 `None`），插件对 Magpie 工具转发这份文本用于判定；
+没有命中 pending/success 标记时仍按原来的“调用完成即成功”处理。
 
 自装的命令行工具经 `terminal` 调用时，Hermes 上报的工具名是 `terminal`，卡片会显示
 🖥️ 终端命令。想让它以自己的名字出现，在 `state/tooluse.py` 里加规则：

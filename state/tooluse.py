@@ -38,7 +38,7 @@ from typing import Any
 @dataclass
 class ToolStep:
     name: str
-    status: str  # running | success | error
+    status: str  # running | pending | success | error
     detail: str = ""
     output: str = ""
     error: str = ""
@@ -153,9 +153,8 @@ _TOOL_SPECS: dict[str, tuple[str, str, str, str | None, bool]] = {
     "memory": ("Hermes · 内置记忆", "Hermes · Built-in memory", "time_outlined", None, False),
     "session_search": ("Hermes · 会话检索", "Hermes · Search sessions", "doc-search_outlined", "search", False),
     "hindsight_retain": ("Hindsight · 记忆写入", "Hindsight · Retain memory", "time_outlined", None, True),
-    "hindsight_recall": ("Hindsight · 记忆回溯", "Hindsight · Recall memory", "time_outlined", "search", False),
-    "hindsight_reflect": ("Hindsight · 记忆推演", "Hindsight · Reflect on memory", "time_outlined", "search", False),
-    "hindsight_operation": ("Hindsight · 记忆操作", "Hindsight · Memory operation", "time_outlined", None, False),
+    "hindsight_recall": ("Hindsight · 记忆检索", "Hindsight · Recall memory", "time_outlined", "search", False),
+    "hindsight_reflect": ("Hindsight · 记忆反思", "Hindsight · Reflect on memory", "time_outlined", "search", False),
     # OpenViking memory provider — Hermes exposes six literal viking_* names.
     # Search/read/browse also cover knowledge resources in the memory store.
     "viking_search": ("OpenViking · 检索记忆", "OpenViking · Search memory", "doc-search_outlined", None, False),
@@ -403,7 +402,7 @@ def _magpie_mcp_spec(name: str | None, args: dict[str, Any] | None = None) -> tu
         return None
     tool = match.group("tool")
     if tool == "generation_result":
-        return "magpie · 获取生成结果", "magpie · Fetch generation result", "🎨"
+        return "magpie · 等待生成结果", "magpie · Wait for generation", "🎨"
     model = str((args or {}).get("model") or "").strip()
     family = _magpie_model_family(model)
     if not model:
@@ -411,6 +410,27 @@ def _magpie_mcp_spec(name: str | None, args: dict[str, Any] | None = None) -> tu
     if tool == "generate_video":
         return _magpie_label("生成视频", "Generate video", family, "🎬")
     return _magpie_label("生成图片", "Generate image", family, "🎨")
+
+
+# Magpie answers a generate call that outlived its 20 s wait with an id and
+# ``isError=false``, and generation_result with the same shape while the
+# image is still being drawn. Hermes therefore reports both as a completed
+# tool, which used to turn a pending render into a green success. The text
+# is the only signal the progress callback carries, so read it.
+_MAGPIE_PENDING_MARKERS = ("still being made", "usemagpie.ai/pending")
+_MAGPIE_SUCCESS_MARKERS = ("generated with", "usemagpie.ai/files", "media:")
+
+
+def _magpie_media_status(name: str | None, output: str | None) -> str | None:
+    """Status a Magpie tool result implies: ``pending``, ``success`` or None."""
+    if not name or _magpie_mcp_spec(name) is None:
+        return None
+    text = (output or "").lower()
+    if any(marker in text for marker in _MAGPIE_PENDING_MARKERS):
+        return "pending"
+    if any(marker in text for marker in _MAGPIE_SUCCESS_MARKERS):
+        return "success"
+    return None
 
 # ── Terminal programs that deserve a row of their own ─────────────────────
 # Hermes reports a CLI the owner installed as a tool through ``terminal``,
@@ -816,7 +836,6 @@ _TOOL_EMOJI_BY_NAME: dict[str, str] = {
     "hindsight_retain": "👁️",
     "hindsight_recall": "👁️",
     "hindsight_reflect": "👁️",
-    "hindsight_operation": "👁️",
     "viking_search": "📖",
     "viking_read": "📖",
     "viking_browse": "📖",
@@ -1159,8 +1178,8 @@ class ToolUseTracker:
     def _status_step(self) -> ToolStep | None:
         """Step the live spinner row reports.
 
-        A *running* generation step beats anything recorded later: one batch
-        can carry ``read_file`` or a shell command next to
+        A *running or pending* generation step beats anything recorded later:
+        one batch can carry ``read_file`` or a shell command next to
         ``image_generate``, and the side tool is appended after it, so the
         sticky "latest step" rule used to replace 🎨 GPT · 生成图片 with
         📄 读取文件 for the whole render. Every other case — including a
@@ -1172,7 +1191,7 @@ class ToolUseTracker:
         if not steps:
             return None
         for step in reversed(steps):
-            if step.status != "running":
+            if step.status not in ("running", "pending"):
                 continue
             if _tool_emoji(step.name, step.detail, step.args) in _GENERATION_EMOJI:
                 return step
@@ -1238,13 +1257,16 @@ class ToolUseTracker:
         sanitizer = desc.get("sanitizer") if desc else None
         output = _clip_tool_output(output)
         error = _clip_tool_output(error)
+        status = "error" if error else "success"
+        if not error:
+            status = _magpie_media_status(name, output) or status
         # Hermes is not consistent about casing between the started and
         # completed events. A strict comparison left the started row stuck at
         # "running" forever, which also pinned the spinner to that tool.
         target = _normalize_tool_name(name)
         for step in reversed(self._session.steps):
             if _normalize_tool_name(step.name) == target and step.status == "running":
-                step.status = "error" if error else "success"
+                step.status = status
                 step.error = error
                 step.output = output
                 step.elapsed_ms = (time.time() - step.started_at) * 1000 if step.started_at is not None else 0.0
@@ -1260,7 +1282,7 @@ class ToolUseTracker:
         self._session.steps.append(
             ToolStep(
                 name=name,
-                status="error" if error else "success",
+                status=status,
                 detail=error or output,
                 output=output,
                 error=error,
@@ -1285,7 +1307,10 @@ class ToolUseTracker:
                     "timeout": ("Memory retrieval timed out", "记忆检索超时"),
                 }.get(outcome, ("Memory retrieval failed", "记忆检索失败"))
                 base_title, base_title_zh = f"OpenViking · {en}", f"OpenViking · {zh}"
-            if s.elapsed_ms > 0:
+            if s.elapsed_ms > 0 and _magpie_mcp_spec(s.name) is None:
+                # Magpie rows stay as the plain family label: a pending render
+                # has no finished duration, and the footer already carries the
+                # turn's total elapsed.
                 suffix = f" ({_format_duration_label(s.elapsed_ms)})"
                 base_title += suffix
                 base_title_zh += suffix

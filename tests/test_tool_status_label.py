@@ -11,6 +11,7 @@ from hermes_lark_streaming.cardkit import (
     _LOADING_ELEMENT_ID,
     _loading_element,
     _loading_status_text,
+    _tool_status_info,
     build_panel_header,
     _build_tool_step_title,
 )
@@ -233,16 +234,20 @@ class TestProcessManageIsProcessesNotFlows:
 
 
 class TestHindsightMemoryTools:
-    """Hindsight's three operations, with the memory provider in each label."""
+    """Hindsight's three real tools, with the memory provider in each label."""
 
     def test_all_three_named_after_memory(self) -> None:
         assert _tool_display_names("hindsight_retain")[1] == "Hindsight · 记忆写入"
-        assert _tool_display_names("hindsight_recall")[1] == "Hindsight · 记忆回溯"
-        assert _tool_display_names("hindsight_reflect")[1] == "Hindsight · 记忆推演"
+        assert _tool_display_names("hindsight_recall")[1] == "Hindsight · 记忆检索"
+        assert _tool_display_names("hindsight_reflect")[1] == "Hindsight · 记忆反思"
 
     def test_all_three_present(self) -> None:
         for name in ("hindsight_retain", "hindsight_recall", "hindsight_reflect"):
             assert name in _TOOL_SPECS
+
+    def test_operation_is_not_a_registered_tool(self) -> None:
+        """The current plugin registers retain/recall/reflect only."""
+        assert _resolve_tool_descriptor("hindsight_operation") is None
 
 
 class TestMcpToolNames:
@@ -270,6 +275,12 @@ class TestMcpToolNames:
         assert _tool_display_names(name, args={"model": "lupi/flux-2"})[1] == "magpie · Flux · 生成图片"
         assert _tool_display_names(name, args={"model": "custom/unknown-drawer"})[1] == "magpie · 生成图片"
 
+    def test_magpie_gpt_family_never_shows_the_full_model(self) -> None:
+        name = "mcp__magpie_image__generate_image"
+        for model in ("qkmss/gpt-image-2.5-sunburst", "lupi/gpt-image-2.5-sunburst", "openai/gpt-image-1"):
+            title = _tool_display_names(name, args={"model": model})[1]
+            assert title == "magpie · GPT · 生成图片"
+
     def test_magpie_omitted_model_falls_back_to_the_configured_default(self) -> None:
         name = "mcp__magpie_image__generate_image"
         assert _tool_display_names(name)[1] == "magpie · GPT · 生成图片"
@@ -285,7 +296,7 @@ class TestMcpToolNames:
             "magpie · MiniMax · 生成视频"
         )
         assert _tool_emoji("mcp__magpie_image__generate_video", args={"model": "MiniMax-H3"}) == "🎬"
-        assert _tool_display_names("mcp__magpie_image__generation_result")[1] == "magpie · 获取生成结果"
+        assert _tool_display_names("mcp__magpie_image__generation_result")[1] == "magpie · 等待生成结果"
         assert _tool_emoji("mcp__magpie_image__generation_result") == "🎨"
 
     def test_magpie_generation_stays_on_the_status_row_next_to_a_side_tool(self) -> None:
@@ -294,6 +305,53 @@ class TestMcpToolNames:
         tracker.record_start("read_file")
         assert tracker.status_tool_emoji == "🎨"
         assert tracker.status_tool_names[1] == "magpie · GPT · 生成图片"
+
+    def test_magpie_pending_answer_is_not_success(self) -> None:
+        name = "mcp__magpie_image__generate_image"
+        tracker = ToolUseTracker()
+        tracker.record_start(name, args={"prompt": "a cat"})
+        tracker.record_end(
+            name,
+            output='{"result": "The image is still being made (20 s so far; it can take a few minutes). "'
+            'It goes on without this call.", "_meta": {"usemagpie.ai/pending": "img_1"}}',
+        )
+        row = tracker.build_display_steps()[0]
+        assert row["status"] == "pending"
+        assert _tool_status_info(row["status"]) == "orange-300"
+        assert row["title_zh"] == "magpie · GPT · 生成图片"
+        assert "(" not in row["title_zh"]
+        assert "qkmss" not in row["title_zh"]
+
+    def test_magpie_pending_generation_keeps_the_status_row(self) -> None:
+        name = "mcp__magpie_image__generate_image"
+        tracker = ToolUseTracker()
+        tracker.record_start(name, args={"prompt": "a cat"})
+        tracker.record_end(name, output='{"result": "The image is still being made", "_meta": {"usemagpie.ai/pending": "img_1"}}')
+        tracker.record_start("read_file")
+        assert tracker.status_tool_emoji == "🎨"
+        assert tracker.status_tool_names[1].startswith("magpie · GPT · 生成图片")
+
+    def test_magpie_generation_result_pending_then_success(self) -> None:
+        name = "mcp__magpie_image__generation_result"
+        tracker = ToolUseTracker()
+        tracker.record_start(name, args={"id": "img_1"})
+        tracker.record_end(
+            name,
+            output='{"result": "The image is still being made", "_meta": {"usemagpie.ai/pending": "img_1"}}',
+        )
+        assert tracker.build_display_steps()[0]["status"] == "pending"
+
+        tracker.record_start(name, args={"id": "img_1"})
+        tracker.record_end(
+            name,
+            output='{"result": "Generated with qkmss/gpt-image-2.5-sunburst. ... '
+            'MEDIA:/opt/data/x.png", "_meta": {"usemagpie.ai/files": [{"url": "http://x/x.png"}]}}',
+        )
+        row = tracker.build_display_steps()[-1]
+        assert row["status"] == "success"
+        assert row["title_zh"] == "magpie · 等待生成结果"
+        assert "(" not in row["title_zh"]
+        assert "qkmss" not in row["title_zh"]
 
 
 class TestLegacyAliasFallbackStillWorks:

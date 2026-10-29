@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from . import (
@@ -13,6 +14,39 @@ from . import (
 )
 from .memory import _maybe_wrap_memory_prefetch
 from .usage import _maybe_wrap_api_usage, _totals_for_context
+
+
+_TOOL_RESULT_TEXT_MAX = 8000
+
+
+def _tool_result_text(result: Any) -> str:
+    """Best-effort text from a completed tool result.
+
+    MCP tools return text in ``result`` or in ``content[].text``; image
+    content carries base64 in other keys, which must not crowd the text out
+    of the cap. Fall back to JSON for plain dict/list results.
+    """
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result[:_TOOL_RESULT_TEXT_MAX]
+    if isinstance(result, dict):
+        parts: list[str] = []
+        for key in ("result", "text", "error", "message"):
+            value = result.get(key)
+            if isinstance(value, str) and value:
+                parts.append(value)
+        content = result.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+        if parts:
+            return "\n".join(parts)[:_TOOL_RESULT_TEXT_MAX]
+    try:
+        return json.dumps(result, ensure_ascii=False, default=str)[:_TOOL_RESULT_TEXT_MAX]
+    except (TypeError, ValueError):
+        return str(result)[:_TOOL_RESULT_TEXT_MAX]
 
 def _eid_from_context(ctx: Any) -> str | None:
     if not isinstance(ctx, dict):
@@ -396,11 +430,30 @@ def _maybe_wrap_callbacks(agent) -> None:
                             )
                         except (ImportError, AttributeError, OSError, ValueError, TypeError, RuntimeError):
                             _logger.debug("HLS: image model label unavailable", exc_info=True)
+                    _tool_status = "started" if event_type == "tool.started" else "completed"
+                    _tool_detail = preview or ""
+                    if event_type == "tool.completed":
+                        # tool.completed carries the full result in kwargs and
+                        # passes None as the preview. Magpie needs the text to
+                        # tell a pending render from a delivered image; other
+                        # tools keep the existing preview-only rendering,
+                        # except errors, whose message lives in the result.
+                        if kwargs.get("is_error"):
+                            _tool_status = "error"
+                            _tool_detail = _tool_result_text(kwargs.get("result")) or _tool_detail
+                        else:
+                            try:
+                                from ..state.tooluse import _magpie_mcp_spec
+
+                                if _magpie_mcp_spec(tool_name) is not None:
+                                    _tool_detail = _tool_result_text(kwargs.get("result")) or _tool_detail
+                            except (ImportError, AttributeError, TypeError, ValueError):
+                                _logger.debug("HLS: magpie result text unavailable", exc_info=True)
                     if on_tool_updated(
                         message_id=_eid,
                         tool_name=tool_name or "",
-                        status="started" if event_type == "tool.started" else "completed",
-                        detail=preview or "",
+                        status=_tool_status,
+                        detail=_tool_detail,
                         tool_args=_tool_args,
                     ):
                         return
