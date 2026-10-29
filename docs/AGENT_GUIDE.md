@@ -390,7 +390,15 @@ emoji 必须写在粗体**外面**：飞书会丢弃混入 emoji 的粗体段，
 `browser_vault_*` 必须逐个列出精确名：`_TOOL_DESCRIPTORS` 的前缀别名
 `browser` 会抢先匹配，把它们全部塌缩成一行 "Browser"。
 
-MCP 工具（`mcp__server__tool`）保持英文小写拼接显示，这是设计如此，不做翻译。
+MCP 工具（`mcp__server__tool`）默认保持英文小写拼接显示，这是设计如此，不做翻译。
+例外是 Magpie 的图片 MCP：`mcp__magpie_image__generate_image`、`generation_result`、
+`generate_video`（服务器名写成 `magpie` 的别名也算）走生图标签，状态行和面板显示
+🎨 `magpie · GPT · 生成图片`、🎨 `magpie · 获取生成结果`、🎬 `magpie · 生成视频`。
+`generate_image` / `generate_video` 支持可选的 `model` 参数（`provider/model` 或路由组，
+如 `group/gpt-image-2.5`），标签优先按这次调用传的模型取家族名（GPT、Flux、MiniMax 等）；
+没传时才用 Magpie 的 Settings → Images 默认模型。当前部署图片默认
+`group/gpt-image-2.5`、视频默认 MiniMax-H3，对应 `state/tooluse.py` 里的
+`_MAGPIE_DEFAULT_IMAGE_FAMILY` / `_MAGPIE_DEFAULT_VIDEO_FAMILY`，换默认模型时改这两个常量。
 
 自装的命令行工具经 `terminal` 调用时，Hermes 上报的工具名是 `terminal`，卡片会显示
 🖥️ 终端命令。想让它以自己的名字出现，在 `state/tooluse.py` 里加规则：

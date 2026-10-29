@@ -12,6 +12,7 @@ __all__ = [
     "_fenced_block",
     "_format_duration_label",
     "_humanize_tool_name",
+    "_magpie_mcp_spec",
     "_redact_paths",
     "_resolve_tool_descriptor",
     "_sanitize_detail",
@@ -339,6 +340,77 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
 
 def _normalize_tool_name(name: str) -> str:
     return name.strip().lower().replace("-", "_")
+
+# ── Magpie MCP image channel ───────────────────────────────────────────────
+# Magpie exposes its image pipeline as MCP tools, so Hermes hands us names
+# like ``mcp__magpie_image__generate_image``. Without a rule those render as
+# the generic 🔧 "magpie image · generate image" row. The tool takes an
+# optional ``model`` argument (``provider/model``, or a routing group) that
+# Hermes passes through in the started-args dict; reduce it to the family
+# the card names, the way native image_generate does. When the call omits
+# it, Magpie's Settings → Images model draws — the default constants below
+# mirror this deployment (image ``group/gpt-image-2.5``, video MiniMax-H3).
+# Accept both the ``magpie_image`` server and the shorter ``magpie`` alias.
+_MAGPIE_MCP_IMAGE_RE = re.compile(
+    r"^mcp__magpie(?:[_-]image)?__(?P<tool>generate_image|generation_result|generate_video)$"
+)
+_MAGPIE_DEFAULT_IMAGE_FAMILY = "GPT"
+_MAGPIE_DEFAULT_VIDEO_FAMILY = "MiniMax"
+_MAGPIE_MODEL_FAMILIES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"gpt[-_ .]?image"), "GPT"),
+    (re.compile(r"dall[-_ .]?e"), "DALL·E"),
+    (re.compile(r"zimage"), "Zimage"),
+    (re.compile(r"seedream"), "Seedream"),
+    (re.compile(r"qwen[-_ .]?image"), "Qwen"),
+    (re.compile(r"nano[-_ .]?banana|gemini"), "Gemini"),
+    (re.compile(r"flux"), "Flux"),
+    (re.compile(r"grok"), "Grok"),
+    (re.compile(r"minimax"), "MiniMax"),
+    (re.compile(r"hunyuan"), "Hunyuan"),
+    (re.compile(r"\bwan[0-9._-]"), "Wan"),
+    (re.compile(r"kling"), "Kling"),
+    (re.compile(r"sora"), "Sora"),
+    (re.compile(r"veo"), "Veo"),
+    (re.compile(r"ideogram"), "Ideogram"),
+    (re.compile(r"recraft"), "Recraft"),
+    (re.compile(r"imagen"), "Imagen"),
+    (re.compile(r"stable[-_ .]?diffusion|sdxl"), "Stable Diffusion"),
+)
+
+
+def _magpie_model_family(model: Any) -> str:
+    """Short family name for a Magpie ``provider/model`` reference."""
+    leaf = str(model or "").strip().rsplit("/", 1)[-1].lower()
+    if not leaf:
+        return ""
+    for pattern, family in _MAGPIE_MODEL_FAMILIES:
+        if pattern.search(leaf):
+            return family
+    return ""
+
+
+def _magpie_label(action_zh: str, action_en: str, family: str, emoji: str) -> tuple[str, str, str]:
+    prefix = f"magpie · {family}" if family else "magpie"
+    return f"{prefix} · {action_zh}", f"{prefix} · {action_en}", emoji
+
+
+def _magpie_mcp_spec(name: str | None, args: dict[str, Any] | None = None) -> tuple[str, str, str] | None:
+    """``(zh, en, emoji)`` for Magpie's MCP image/video tools."""
+    if not name:
+        return None
+    match = _MAGPIE_MCP_IMAGE_RE.match(_normalize_tool_name(name))
+    if match is None:
+        return None
+    tool = match.group("tool")
+    if tool == "generation_result":
+        return "magpie · 获取生成结果", "magpie · Fetch generation result", "🎨"
+    model = str((args or {}).get("model") or "").strip()
+    family = _magpie_model_family(model)
+    if not model:
+        family = _MAGPIE_DEFAULT_VIDEO_FAMILY if tool == "generate_video" else _MAGPIE_DEFAULT_IMAGE_FAMILY
+    if tool == "generate_video":
+        return _magpie_label("生成视频", "Generate video", family, "🎬")
+    return _magpie_label("生成图片", "Generate image", family, "🎨")
 
 # ── Terminal programs that deserve a row of their own ─────────────────────
 # Hermes reports a CLI the owner installed as a tool through ``terminal``,
@@ -883,6 +955,9 @@ def _tool_emoji(name: str | None, detail: str | None = None, args: dict[str, Any
     knowledge = _viking_knowledge_spec(name, detail, args)
     if knowledge is not None:
         return knowledge[2]
+    magpie = _magpie_mcp_spec(name, args)
+    if magpie is not None:
+        return magpie[2]
     direct = _TOOL_EMOJI_BY_NAME.get(_normalize_tool_name(name))
     if direct:
         return direct
@@ -926,6 +1001,16 @@ def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
     spec = _TOOL_SPECS.get(normalized)
     if spec is not None:
         return _spec_to_descriptor(normalized, spec)
+    magpie = _magpie_mcp_spec(normalized)
+    if magpie is not None:
+        return {
+            "aliases": [normalized],
+            "icon": "report_outlined",
+            "title": magpie[1],
+            "title_zh": magpie[0],
+            "sanitizer": None,
+            "no_result": True,
+        }
     for desc in _TOOL_DESCRIPTORS:
         for alias in desc["aliases"]:
             if normalized == alias or normalized.startswith(f"{alias}_"):
@@ -957,6 +1042,9 @@ def _tool_display_names(name: str | None, detail: str | None = None, args: dict[
         model = str(args.get("model") or "").strip().lower()
         if re.fullmatch(r"(?:[a-z0-9_.-]+/)*gpt[-_ ]image(?:[-_. ][a-z0-9]+)*", model):
             return "GPT · Generate image", "GPT · 生成图片"
+    magpie = _magpie_mcp_spec(name, args)
+    if magpie is not None:
+        return magpie[1], magpie[0]
     aliased = _terminal_program_spec(name, detail, args)
     if aliased is not None:
         _zh, _en, _emoji = aliased[1]

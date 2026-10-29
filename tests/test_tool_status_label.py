@@ -255,6 +255,46 @@ class TestMcpToolNames:
         en, zh = _tool_display_names("mcp__grok_search_rs__web_search")
         assert en == zh
 
+    def test_magpie_image_mcp_uses_the_native_generation_label(self) -> None:
+        name = "mcp__magpie_image__generate_image"
+        assert _tool_display_names(name, args={"model": "group/gpt-image-2.5"}) == (
+            "magpie · GPT · Generate image",
+            "magpie · GPT · 生成图片",
+        )
+        assert _tool_emoji(name, args={"model": "group/gpt-image-2.5"}) == "🎨"
+        assert _resolve_tool_descriptor(name)["no_result"] is True
+
+    def test_magpie_image_model_family_comes_from_the_call(self) -> None:
+        name = "mcp__magpie_image__generate_image"
+        assert _tool_display_names(name, args={"model": "openai/gpt-image-1"})[1] == "magpie · GPT · 生成图片"
+        assert _tool_display_names(name, args={"model": "lupi/flux-2"})[1] == "magpie · Flux · 生成图片"
+        assert _tool_display_names(name, args={"model": "custom/unknown-drawer"})[1] == "magpie · 生成图片"
+
+    def test_magpie_omitted_model_falls_back_to_the_configured_default(self) -> None:
+        name = "mcp__magpie_image__generate_image"
+        assert _tool_display_names(name)[1] == "magpie · GPT · 生成图片"
+        assert _tool_display_names(name, args={"prompt": "a cat"})[1] == "magpie · GPT · 生成图片"
+
+    def test_magpie_short_server_name_is_covered(self) -> None:
+        name = "mcp__magpie__generate_image"
+        assert _tool_display_names(name)[1] == "magpie · GPT · 生成图片"
+        assert _tool_emoji(name) == "🎨"
+
+    def test_magpie_video_and_poll_rows_keep_the_generation_family(self) -> None:
+        assert _tool_display_names("mcp__magpie_image__generate_video", args={"model": "MiniMax-H3"})[1] == (
+            "magpie · MiniMax · 生成视频"
+        )
+        assert _tool_emoji("mcp__magpie_image__generate_video", args={"model": "MiniMax-H3"}) == "🎬"
+        assert _tool_display_names("mcp__magpie_image__generation_result")[1] == "magpie · 获取生成结果"
+        assert _tool_emoji("mcp__magpie_image__generation_result") == "🎨"
+
+    def test_magpie_generation_stays_on_the_status_row_next_to_a_side_tool(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("mcp__magpie_image__generate_image", args={"model": "group/gpt-image-2.5"})
+        tracker.record_start("read_file")
+        assert tracker.status_tool_emoji == "🎨"
+        assert tracker.status_tool_names[1] == "magpie · GPT · 生成图片"
+
 
 class TestLegacyAliasFallbackStillWorks:
     """The old alias table must keep resolving names not in the exact specs."""

@@ -4,6 +4,25 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.40 (2026-10-30, personal fork)
+
+### Changed — Magpie MCP image tools render as generation steps
+
+- Recognise Magpie's MCP image channel (`mcp__magpie_image__generate_image`,
+  `mcp__magpie_image__generation_result`, `mcp__magpie_image__generate_video`,
+  plus the shorter `mcp__magpie__*` server alias) instead of the generic
+  🔧 "magpie image · generate image" row.
+- Show 🎨 `magpie · GPT · 生成图片`, 🎨 `magpie · 获取生成结果` and
+  🎬 `magpie · 生成视频`. The model family is read from the optional `model`
+  argument (`provider/model` or a routing group such as
+  `group/gpt-image-2.5`); when the call omits it, the label falls back to the
+  deployment defaults (GPT for images, MiniMax for videos).
+- Keep 🎨 generation steps on the live status row when a side tool
+  (`read_file`, `terminal`, …) is recorded in the same batch, matching the
+  native `image_generate` behaviour.
+- Add six regression cases covering model families, the omitted-model
+  fallback, video/poll rows and status-row stickiness.
+
 ## v1.39 (2026-10-28, personal fork)
 
 ### Changed - reply cards fill the available chat width
