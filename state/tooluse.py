@@ -444,6 +444,60 @@ _TERMINAL_PROGRAM_SPECS: dict[str, tuple[str, str, str]] = {
     "gh": ("GitHub", "GitHub", "🐙"),
 }
 
+# ParseHub (``ph``) aggregates a share link from the social platforms it knows
+# and can pull the media down in the same call. Hermes reports it through
+# ``terminal``, so the whole pipeline used to render as one 🖥️ 终端命令 row and
+# the card never said whether it parsed or downloaded (老大 2026-11-02).
+# Titles split by subcommand; the spider is the brand mark for every ph row.
+_PARSEHUB_PROGRAMS = frozenset({"ph", "parsehub"})
+_PARSEHUB_DEFAULT_SPEC: tuple[str, str, str] = ("ParseHub", "ParseHub", "🕷️")
+_PARSEHUB_HELP_FLAGS = frozenset({"-h", "--help"})
+_PARSEHUB_ACTIONS: tuple[tuple[frozenset[str], tuple[str, str, str]], ...] = (
+    (
+        frozenset({"d", "dl", "download"}),
+        ("ParseHub · 解析并下载", "ParseHub · Parse and download", "🕷️"),
+    ),
+    (frozenset({"p", "parse"}), ("ParseHub · 解析链接", "ParseHub · Parse link", "🕷️")),
+    (frozenset({"ls", "platforms"}), ("ParseHub · 支持平台", "ParseHub · Platforms", "🗂️")),
+    (frozenset({"set"}), ("ParseHub · 平台设置", "ParseHub · Platform settings", "⚙️")),
+)
+
+
+_PARSEHUB_VERBS = frozenset().union(*(aliases for aliases, _spec in _PARSEHUB_ACTIONS))
+
+
+def _strip_parsehub_verb(detail: str) -> str:
+    """Drop the subcommand the title already states, so the row reads once.
+
+    ``ph ls`` renders as "ParseHub · 支持平台 / ls"; the verb in the detail is
+    the same word the title just spent, so it goes. Text after it survives.
+    """
+    head, _sep, tail = (detail or "").lstrip().partition(" ")
+    if head.lower() in _PARSEHUB_VERBS:
+        return tail.lstrip()
+    return detail
+
+
+def _parsehub_spec(rest: list[str]) -> tuple[str, str, str]:
+    """``(zh, en, emoji)`` for one ``ph`` call, keyed by its subcommand.
+
+    ``rest`` is the argument list after the program name. Flags are skipped so
+    ``ph -v d link`` still names the download; an unrecognised or absent verb
+    keeps the plain ParseHub row, because the CLI prints its help for those.
+    """
+    if any(token in _PARSEHUB_HELP_FLAGS for token in rest):
+        return "ParseHub · 查看帮助", "ParseHub · Help", "📖"
+    words = [token for token in rest if not token.startswith("-")]
+    if not words:
+        # Bare ``ph`` / ``ph -v`` print usage or the version, not a parse.
+        return "ParseHub · 查看帮助", "ParseHub · Help", "📖"
+    verb = words[0].lower()
+    for aliases, spec in _PARSEHUB_ACTIONS:
+        if verb in aliases:
+            return spec
+    return _PARSEHUB_DEFAULT_SPEC
+
+
 # ``gh`` is the GitHub CLI, but some of its calls never leave the machine.
 # Those rows stay 🖥️ 终端命令 so 🐙 means "this talked to GitHub", not merely
 # "this ran gh" (老大 2026-10-18).
@@ -683,6 +737,8 @@ def _terminal_program_spec_for_command(command: str) -> tuple[list[str], tuple[s
     for entry, rest in _command_invocations(command):
         # The script (if any) is the more specific name; try it first.
         for candidate in reversed(entry):
+            if candidate.lower() in _PARSEHUB_PROGRAMS:
+                return entry, _parsehub_spec(rest)
             spec = _lookup_terminal_program(candidate)
             if spec is None:
                 continue
@@ -1326,6 +1382,8 @@ class ToolUseTracker:
                     detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0], variables))
                 else:
                     detail = _strip_leading_program(detail, aliased[0], variables)
+                if any(token.lower() in _PARSEHUB_PROGRAMS for token in aliased[0]):
+                    detail = _strip_parsehub_verb(detail)
             steps.append(
                 {
                     "name": s.name,

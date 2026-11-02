@@ -4,6 +4,32 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.42 (2026-11-02, personal fork)
+
+### Changed — ParseHub (`ph`) rows render as themselves
+
+- `ph` / `parsehub` runs through `terminal`, so every parse/download row read
+  🖥️ 终端命令 and the card never said which half of the pipeline ran.
+  Resolve the program from the command line the way `smart-search` and `gh`
+  already are, and label it 🕷️ ParseHub.
+- Titles follow the subcommand: `ph d|dl|download` → 🕷️
+  ParseHub · 解析并下载, `ph p|parse` → 🕷️ ParseHub · 解析链接,
+  bare `ph` or a share text → 🕷️ ParseHub, `ph ls|platforms` →
+  🗂️ ParseHub · 支持平台, `ph set …` → ⚙️
+  ParseHub · 平台设置, `ph -h|--help|-v` → 📖 ParseHub · 查看帮助.
+- Drop the subcommand from the detail line once the title carries it (`ph ls`
+  no longer repeats "ls") and keep the argument tail (`'<link>' -o <dir>`,
+  `proxy xhs …`). Paths stay basename-only, as for every command row.
+- Matching stays strict: `echo ph`, `grep ph notes.txt`, `photoshop` and `phx`
+  all remain 🖥️ 终端命令.
+
+### Tests
+
+- Full default suite: 1,752 passed.
+- New `tests/test_parsehub_label.py` covers the subcommand titles, the
+  detail de-duplication, the spinner label and the look-alike commands that
+  must not be promoted.
+
 ## v1.41 (2026-10-30, personal fork)
 
 ### Fixed — Magpie image MCP rows no longer report a pending render as success

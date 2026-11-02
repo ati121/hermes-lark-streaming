@@ -421,6 +421,10 @@ pending 行用橙色，状态行继续显示 🎨。Hermes 的 `tool.completed` 
   由 `feishu/branding.py` 按 bot 上传并缓存 `img_key`（与 OpenViking 同一套机制，
   上传失败回退 `setting_outlined`）。新增品牌图标时在 `_ASSETS` 和 `_BRAND_ICONS`
   各加一条即可。
+- ParseHub（`ph` / `parsehub`）走独立解析：`_PARSEHUB_PROGRAMS` 命中程序名，
+  `_parsehub_spec` 按子命令分标题（🕷️ 解析并下载 / 解析链接 / ParseHub，
+  🗂️ 支持平台，⚙️ 平台设置，📖 查看帮助）。子命令已在标题里表达，
+  detail 由 `_strip_parsehub_verb` 摘掉首个动词避免重复，参数尾部保留。
 - 品牌图标在面板工具行里走 `div.icon`；在状态行里必须走 `column_set`。飞书
   `div.icon` 只能放一个图标对象（没有数组形式），`lark_md` 也不支持行内图片
   （官方明确写「不支持在 text 元素的 lark_md 类型中使用」），所以「动画 + 品牌」
