@@ -17,6 +17,7 @@ from ..cardkit import (
     _loading_element,
     _loading_hint_element,
     _streaming_element,
+    build_answer_elements,
     build_interactive_card_v2,
     build_preservative_seal_actions,
     build_streaming_card_v2,
@@ -299,7 +300,7 @@ def _simulated_seal_body(
     """
     elements: list[dict[str, Any]] = [panel]
     if state is not None and state.answer_text:
-        elements.append({"tag": "markdown", "content": state.answer_text})
+        elements.append(build_answer_elements(state.answer_text)[0])
     else:
         elements.append({"tag": "markdown", "content": " "})
     for action in seal_actions:
@@ -438,7 +439,7 @@ class UnifiedControllerMixin:
             ))
 
         if state is not None and state.answer_text:
-            elements.append(_streaming_element(
+            elements.extend(build_answer_elements(
                 content=render_answer_markdown(state.answer_text, final=final),
                 element_id=ANSWER_ELEMENT_ID,
                 text_sizes=session.text_sizes,
@@ -1242,9 +1243,20 @@ class UnifiedControllerMixin:
             # v1.3.1 fix: Do NOT skip this step even when the answer was already fully
             # guard) is a minor visual issue; content truncation is a P0 data-loss bug.
             if state.answer_text and "answer" in session._creation_stages:
-                actions.append(_answer_update_action(
+                answer_elements = build_answer_elements(
                     render_answer_markdown(state.answer_text, final=True),
-                ))
+                    text_sizes=session.text_sizes,
+                )
+                actions.append(_answer_update_action(answer_elements[0]["content"]))
+                if len(answer_elements) > 1:
+                    actions.append({
+                        "action": "add_elements",
+                        "params": {
+                            "type": "insert_after",
+                            "target_element_id": ANSWER_ELEMENT_ID,
+                            "elements": answer_elements[1:],
+                        },
+                    })
         actions.extend(
             build_preservative_seal_actions(
                 partial=partial,

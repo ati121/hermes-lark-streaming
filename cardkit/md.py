@@ -37,6 +37,7 @@ __all__ = [
     "escape_markdown_asterisks",
     "optimize_markdown_style",
     "render_answer_markdown",
+    "split_table_spacing_blocks",
 ]
 
 def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
@@ -170,6 +171,74 @@ def render_answer_markdown(text: str, *, final: bool = False, table_limit: int =
         return " "
     rendered = _downgrade_tables(optimize_markdown_style(text), limit=table_limit) if final else text
     return escape_markdown_asterisks(rendered) or " "
+
+
+def split_table_spacing_blocks(text: str) -> list[str]:
+    """Convert blank lines beside pipe tables into separate layout blocks.
+
+    Feishu collapses these blank lines inside one Markdown element. Keep the
+    original text when no table boundary needs spacing, including fenced code.
+    """
+    if "|" not in text:
+        return [text]
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    boundaries: set[tuple[int, int]] = set()
+    fence_char = ""
+    fence_length = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        if fence:
+            run, suffix = fence.groups()
+            if not fence_char:
+                fence_char, fence_length = run[0], len(run)
+            elif run[0] == fence_char and len(run) >= fence_length and not suffix.strip():
+                fence_char, fence_length = "", 0
+            index += 1
+            continue
+        if fence_char or index + 1 >= len(lines):
+            index += 1
+            continue
+        header = line.strip()
+        delimiter = lines[index + 1].strip()
+        cells = delimiter.strip("|").split("|")
+        if (
+            len(line) - len(line.lstrip(" ")) > 3
+            or not header.startswith("|")
+            or not delimiter.startswith("|")
+            or not all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+        ):
+            index += 1
+            continue
+        start = offsets[index]
+        end_index = index + 2
+        while end_index < len(lines) and lines[end_index].lstrip(" ").startswith("|"):
+            end_index += 1
+        end = offsets[end_index] - (len(lines[end_index - 1]) - len(lines[end_index - 1].rstrip("\r\n")))
+        before = re.search(r"(?:\r?\n[ \t]*){2,}$", text[:start])
+        if before and text[:before.start()].strip():
+            boundaries.add((before.start(), start))
+        after = re.match(r"(?:[ \t]*\r?\n){2,}", text[end:])
+        if after and text[end + after.end():].strip():
+            boundaries.add((end, end + after.end()))
+        index = end_index
+    if not boundaries:
+        return [text]
+    blocks: list[str] = []
+    cursor = 0
+    for start, end in sorted(boundaries):
+        if start < cursor:
+            continue
+        if text[cursor:start].strip():
+            blocks.append(text[cursor:start])
+        cursor = end
+    if text[cursor:].strip():
+        blocks.append(text[cursor:])
+    return blocks or [text]
 
 
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:

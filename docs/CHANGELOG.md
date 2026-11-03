@@ -4,6 +4,27 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.44 (2026-11-03, personal fork)
+
+### Fixed — visible spacing around tables
+
+- v1.43 preserved whitespace-only stream chunks, but Feishu still collapsed
+  the blank lines around tables inside one Markdown element. Split those
+  boundaries into separate Markdown elements with an explicit 16px top margin.
+- Apply the layout during interactive streaming and completion, at CardKit
+  entity seal, and in static answer fallback cards. Keep device text sizes.
+- Only add spacing where the answer contains a blank line; preserve ordinary
+  line breaks, fenced code examples, table content and non-table paragraphs.
+- Count the additional answer elements in the seal's element-budget check.
+
+### Tests
+
+- Full default suite: 1,776 passed.
+- Regression coverage checks table boundaries, adjacent tables, fenced code,
+  CRLF, incomplete input, device text sizes and both card transports.
+- Feishu accepted the unsent card structure and CardKit seal batch update.
+  Client-visible spacing still needs an actual client rendering check.
+
 ## v1.43 (2026-11-03, personal fork)
 
 ### Fixed — preserve blank lines around tables in streamed answers

@@ -1733,13 +1733,13 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         session._seal_recovery_fallback_text = _fallback_text
         try:
             if _fallback_text.strip():
-                from ..cardkit import _streaming_element, build_interactive_card_v2
+                from ..cardkit import build_answer_elements, build_interactive_card_v2
                 from ..cardkit.md import render_answer_markdown
                 session.fallback_card = build_interactive_card_v2(
-                    elements=[_streaming_element(
+                    elements=build_answer_elements(
                         content=render_answer_markdown(_fallback_text, final=True),
                         text_sizes=session.text_sizes,
-                    )],
+                    ),
                     summary=_fallback_text[:120],
                     text_sizes=session.text_sizes,
                 )

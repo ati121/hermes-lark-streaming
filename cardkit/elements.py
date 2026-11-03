@@ -22,6 +22,7 @@ __all__ = [
     '_extract_images_from_markdown',
     '_collapsible_panel',
     '_streaming_element',
+    'build_answer_elements',
     '_loading_element',
     '_loading_status_cell',
     '_loading_status_text',
@@ -351,6 +352,28 @@ def _streaming_element(
         "margin": "0px 0px 0px 0px",
         "element_id": element_id,
     }
+
+def build_answer_elements(
+    content: str,
+    *,
+    element_id: str = ANSWER_ELEMENT_ID,
+    text_sizes: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Use real element margins for blank lines around Markdown tables."""
+    from .md import split_table_spacing_blocks
+
+    elements = []
+    for index, block in enumerate(split_table_spacing_blocks(content)):
+        element = _streaming_element(
+            content=block,
+            element_id=element_id if index == 0 else f"{element_id[:14]}_{index}",
+            text_sizes=text_sizes,
+        )
+        if index:
+            element["margin"] = "16px 0px 0px 0px"
+        elements.append(element)
+    return elements
+
 
 def _loading_status_text(
     label: tuple[str, str] | None = None,

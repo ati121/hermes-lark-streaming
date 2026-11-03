@@ -783,11 +783,39 @@ class TestLinearDispatch:
         assert session.unified_state.answer_text == expected
         for final in (False, True):
             card = ctrl._build_interactive_linear_card(session, final=final)
-            answer = next(
+            answer = [
                 element for element in card["body"]["elements"]
-                if element.get("element_id") == ANSWER_ELEMENT_ID
-            )
-            assert answer["content"] == expected
+                if element.get("element_id", "").startswith(ANSWER_ELEMENT_ID)
+            ]
+            assert [element["content"] for element in answer] == ["Before table", table, "After table"]
+            assert answer[0]["margin"] == "0px 0px 0px 0px"
+            assert all(element["margin"] == "16px 0px 0px 0px" for element in answer[1:])
+
+    def test_cardkit_seal_uses_explicit_table_spacing(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_cardkit_table_spacing", linear=True)
+        session._creation_stages.add("answer")
+        table = "| Item | Value |\n| --- | --- |\n| A | B |"
+        session.unified_state.answer_text = f"Before\n\n{table}\n\nAfter"
+        actions = ctrl._build_seal_actions(
+            session, session.unified_state, footer_data=None, partial=False,
+            is_error=False, is_aborted=False, error_message="",
+            footer_fields=None, footer_show_label=False, trim_label="test",
+        )
+        answer_update = next(
+            action for action in actions
+            if action.get("action") == "partial_update_element"
+            and action["params"]["element_id"] == ANSWER_ELEMENT_ID
+        )
+        assert answer_update["params"]["partial_element"]["content"] == "Before"
+        additions = next(
+            action["params"] for action in actions
+            if action.get("action") == "add_elements"
+            and action["params"]["target_element_id"] == ANSWER_ELEMENT_ID
+        )
+        assert additions["type"] == "insert_after"
+        assert [element["content"] for element in additions["elements"]] == [table, "After"]
+        assert all(element["margin"] == "16px 0px 0px 0px" for element in additions["elements"])
 
     def test_linear_thinking_dispatches(self) -> None:
         ctrl = _setup_ctrl()
