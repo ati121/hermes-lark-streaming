@@ -754,7 +754,40 @@ class TestLinearDispatch:
             ctrl.on_answer(message_id="msg_whitespace_answer", text="\n")
 
         assert session._response_phase == "thinking"
+        assert session.unified_state is not None
+        assert session.unified_state.answer_text == "\n"
+        assert session.unified_state.answer_dirty is True
         schedule.assert_called_once_with(session, force=True)
+
+    @pytest.mark.parametrize("chunking", ["whole", "boundaries", "lines", "characters"])
+    def test_answer_stream_keeps_blank_lines_around_table(self, chunking: str) -> None:
+        """One blank line must survive regardless of provider chunk boundaries."""
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_table_blank_lines", linear=True)
+        ctrl._sessions[session.message_id] = session
+        table = "| Item | Value |\n| --- | --- |\n| A | B |"
+        chunks = ["Before table", "\n\n", table, "\n\n", "After table"]
+        expected = "".join(chunks)
+        if chunking == "whole":
+            chunks = [expected]
+        elif chunking == "lines":
+            chunks = expected.splitlines(keepends=True)
+        elif chunking == "characters":
+            chunks = list(expected)
+
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            for chunk in chunks:
+                ctrl.on_answer(message_id=session.message_id, text=chunk)
+
+        assert session.unified_state is not None
+        assert session.unified_state.answer_text == expected
+        for final in (False, True):
+            card = ctrl._build_interactive_linear_card(session, final=final)
+            answer = next(
+                element for element in card["body"]["elements"]
+                if element.get("element_id") == ANSWER_ELEMENT_ID
+            )
+            assert answer["content"] == expected
 
     def test_linear_thinking_dispatches(self) -> None:
         ctrl = _setup_ctrl()

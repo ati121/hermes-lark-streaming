@@ -1276,6 +1276,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     session._response_phase = "thinking"
 
                 if not answer_text.strip():
+                    # Whitespace-only chunks carry Markdown paragraph/table boundaries.
+                    if answer_text and session.unified_state is not None:
+                        session.unified_state.on_answer_delta(answer_text)
                     self._schedule_linear_flush(session, force=phase_changed)
                     return
 

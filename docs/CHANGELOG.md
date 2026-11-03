@@ -4,6 +4,25 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.43 (2026-11-03, personal fork)
+
+### Fixed — preserve blank lines around tables in streamed answers
+
+- Keep whitespace-only answer chunks instead of dropping them before they
+  reach the accumulated answer. A provider sending a newline or space in its
+  own chunk no longer joins a table to the preceding or following paragraph.
+- Preserve a single blank line before and after a table in both streaming
+  and final card content, regardless of provider chunk boundaries. Existing
+  final Markdown normalization still collapses extra blank lines to one.
+- Keep reasoning-marker handling and upstream activity status behavior.
+
+### Tests
+
+- Full default suite: 1,756 passed.
+- Regression coverage includes whole-answer, table-boundary, line and
+  character chunks, plus whitespace-only answer accumulation and both
+  streaming and final interactive card content.
+
 ## v1.42 (2026-11-02, personal fork)
 
 ### Changed — ParseHub (`ph`) rows render as themselves
