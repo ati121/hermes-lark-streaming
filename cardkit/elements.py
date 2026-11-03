@@ -1367,6 +1367,17 @@ def _render_footer_field(
             data.get("speed_output_tokens", 0) or 0,
             data.get("speed_request_seconds", 0) or 0,
         )
+        measured = data.get("speed_requests", 0)
+        requests = data.get("speed_total_requests", 0)
+        if (
+            val
+            and isinstance(measured, int)
+            and not isinstance(measured, bool)
+            and isinstance(requests, int)
+            and not isinstance(requests, bool)
+            and 0 < measured < requests
+        ):
+            val = f"{val} ({measured}/{requests})"
         if val:
             return _labelled("speed", val, show_label)
         return None, None
@@ -1396,7 +1407,12 @@ def _render_footer_field(
 
     if name == "api_calls":
         # A queued continuation can return only its final run's count.
-        v = data.get("speed_total_requests", 0) or data.get("api_calls", 0) or 0
+        v = (
+            data.get("speed_api_requests", 0)
+            or data.get("speed_total_requests", 0)
+            or data.get("api_calls", 0)
+            or 0
+        )
         if v:
             en_val, zh_val = _T["api_calls"]
             return f"{en_val} {v}", f"{zh_val} {v}"

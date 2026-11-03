@@ -903,6 +903,35 @@ class TestSpeedFooterField:
         assert en == "Speed 50 t/s"
         assert zh == "速度 50 t/s"
 
+    def test_partial_coverage_is_shown(self) -> None:
+        en, zh = _speed({
+            "speed_output_tokens": 500,
+            "speed_request_seconds": 10.0,
+            "speed_requests": 9,
+            "speed_total_requests": 10,
+        })
+        assert en == "50 t/s (9/10)"
+        assert zh == "50 t/s (9/10)"
+
+    def test_complete_coverage_adds_no_suffix(self) -> None:
+        en, _ = _speed({
+            "speed_output_tokens": 500,
+            "speed_request_seconds": 10.0,
+            "speed_requests": 10,
+            "speed_total_requests": 10,
+        })
+        assert en == "50 t/s"
+
+    def test_api_count_prefers_current_turn_count(self) -> None:
+        data = {
+            "api_calls": 5,
+            "speed_api_requests": 2,
+            "speed_total_requests": 14,
+        }
+        assert _render_footer_field(
+            "api_calls", data, is_error=False, is_aborted=False, show_label=False,
+        )[0] == "API 2"
+
     def test_speed_in_build_footer_elements(self) -> None:
         """speed 字段在 _build_footer_elements 中正常渲染."""
         result = _build_footer_elements(

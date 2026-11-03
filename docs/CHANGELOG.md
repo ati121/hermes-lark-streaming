@@ -4,6 +4,38 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.45 (2026-11-04, personal fork)
+
+### Fixed — session-level weighted decode speed
+
+- Aggregate `speed` across every main-model request in the same Hermes
+  session, matching DeepSeek Harness: total measured output tokens divided by
+  total provider decode seconds. Tool rounds and user turns in one session now
+  contribute to the same weighted rate.
+- Keep the lifetime session totals across context compaction. A compaction
+  starts a fresh `speed_recent_*` window, while the card's primary speed remains
+  the whole-session average. Compaction and other auxiliary model calls are
+  excluded from both windows.
+- Count the provider's complete output (including reasoning) over the complete
+  provider stream window. Remove the old reasoning-only window rewrite and
+  subtraction from the numerator.
+- Continue displaying a usable weighted rate when some requests lack reliable
+  samples, and label its coverage as `(measured/total)` (for example,
+  `91 t/s (9/10)`). The suffix appears only for an incomplete sample set.
+- Keep the footer `API` count scoped to the current turn through
+  `speed_api_requests`, instead of showing the lifetime session request count.
+  Forward every `speed_*` field from completion into the card footer.
+- Bound the process-wide session speed table to 64 least-recently-used sessions.
+  A session still keeps only one entry across turns and compactions.
+
+### Tests
+
+- Full default suite: 1,784 passed.
+- Targeted speed, decode, CardKit and controller suite: 399 passed.
+- Added coverage for cross-turn session weighting, partial-sample display,
+  auxiliary-call exclusion, compaction window reset, current-turn API counts,
+  arbitrary `speed_*` footer propagation and LRU eviction.
+
 ## v1.44 (2026-11-03, personal fork)
 
 ### Fixed — visible spacing around tables

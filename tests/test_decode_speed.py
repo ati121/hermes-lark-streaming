@@ -38,17 +38,17 @@ def test_decode_excludes_prefill_and_host_teardown():
 
 
 @pytest.mark.parametrize(("events", "end", "usage", "expected"), [
-    ([(1, 0, 10, 0), (8, 10, 0, 0), (9, 10, 0, 0), (10, 10, 0, 0)], 10, _usage(1500, 1100), (400, 2)),
+    ([(1, 0, 10, 0), (8, 10, 0, 0), (9, 10, 0, 0), (10, 10, 0, 0)], 10, _usage(1500, 1100), (1500, 9)),
     ([(1, 0, 10, 0), (3, 0, 10, 0), (5, 0, 0, 10)], 5, _usage(800, 700), (800, 4)),
     ([(1, 0, 0, 10), (3, 0, 0, 10), (5, 0, 0, 10)], 5, _usage(800), (800, 4)),
-    ([(1, 0, 0, 10), (3, 0, 0, 10), (5, 0, 0, 10)], 5, _usage(800, 700), (None, 0)),
+    ([(1, 0, 0, 10), (3, 0, 0, 10), (5, 0, 0, 10)], 5, _usage(800, 700), (800, 4)),
     ([(8, 10, 0, 0)], 8.5, _usage(800), (None, 0)),
     ([(1, 1, 0, 0), (9, 99, 0, 0)], 10, _usage(800), (None, 0)),
     ([(1, 0, 10, 0), (11, 50, 0, 0), (11.2, 50, 0, 0)], 11.2, _usage(550, 20), (None, 0)),
     ([(1, 10, 0, 0), (1.05, 10, 0, 0)], 1.05, _usage(100), (None, 0)),
     ([(1, 10, 0, 0), (2, 10, 0, 0)], 2, _usage(10001), (None, 0)),
 ])
-def test_reasoning_tool_and_buffered_streams(events, end, usage, expected):
+def test_full_output_and_provider_stream_window(events, end, usage, expected):
     assert _timing(events, end).decode(usage) == expected
 
 
@@ -144,7 +144,10 @@ def test_provider_measurement_survives_executor_prefetch_and_ui_delay(monkeypatc
         _msg_ctx.reset(token)
 
 
-def test_api_count_uses_same_turn_accumulator_as_speed():
-    data = {"api_calls": 1, "speed_total_requests": 14}
-    assert _render_footer_field("api_calls", data, False, False, False)[0] == "API 14"
+def test_api_count_prefers_current_turn_over_session_total():
+    data = {"api_calls": 1, "speed_api_requests": 2, "speed_total_requests": 14}
+    assert _render_footer_field("api_calls", data, False, False, False)[0] == "API 2"
+    assert _render_footer_field(
+        "api_calls", {"api_calls": 1, "speed_total_requests": 14}, False, False, False,
+    )[0] == "API 14"
     assert _render_footer_field("api_calls", {"api_calls": 3}, False, False, False)[0] == "API 3"

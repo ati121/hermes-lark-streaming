@@ -24,9 +24,14 @@ from hermes_lark_streaming.patching.gateway import (
     _wrap_run_background_task,
 )
 from hermes_lark_streaming.patching.usage import (
+    _SESSION_SPEED_LIMIT,
     RequestTotals,
+    _attach_session_speed,
+    _clear_session_speed,
     _maybe_wrap_api_usage,
     _output_tokens,
+    _reset_compaction_speed,
+    _session_speed,
     _snapshot_usage,
     _speed_footer,
     _totals_for_context,
@@ -41,6 +46,13 @@ def _chat_usage(output=135, reasoning=678, total=839):
         "completion_tokens_details": {"reasoning_tokens": reasoning},
         "total_tokens": total,
     }
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_speed():
+    _clear_session_speed()
+    yield
+    _clear_session_speed()
 
 
 @pytest.fixture
@@ -132,7 +144,7 @@ def test_capture_preserves_response_and_provider_usage(make_agent, method):
     assert _call(agent, 1, 4, method) is agent.response
     assert agent.calls == [({}, {})]
     usage["completion_tokens"] = 1
-    assert totals.footer()["speed_output_tokens"] == 135
+    assert totals.footer()["speed_output_tokens"] == 813
     assert totals.footer()["speed_request_seconds"] == 3
     assert agent._last_turn_usage == {"output_tokens": 9999}
 
@@ -151,6 +163,95 @@ def test_weighted_average_includes_all_requests_not_tool_wait(make_agent):
         "speed_requests": 2, "speed_total_requests": 2,
     }
     assert _speed(footer) == "91 t/s"  # Not mean(50, 100) = 75.
+
+
+def test_session_rate_weights_every_top_level_turn(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    first_ctx = {"message_id": "session-turn-1", "event_message_id": "session-turn-1"}
+    _msg_ctx.set(first_ctx)
+    _attach_session_speed(first_ctx, agent.session_id)
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+
+    second_ctx = {"message_id": "session-turn-2", "event_message_id": "session-turn-2"}
+    _msg_ctx.set(second_ctx)
+    _attach_session_speed(second_ctx, agent.session_id)
+    agent.response = SimpleNamespace(
+        usage=_chat_usage(output=900, reasoning=0, total=926)
+    )
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 10, 19)
+
+    footer = _speed_footer(second_ctx)
+    assert footer["speed_output_tokens"] == 1000
+    assert footer["speed_request_seconds"] == 11
+    assert footer["speed_requests"] == 2
+    assert footer["speed_total_requests"] == 2
+    assert footer["speed_api_requests"] == 1
+    assert footer["speed_turn_output_tokens"] == 900
+    assert footer["speed_turn_request_seconds"] == 9
+    assert _speed(footer) == "91 t/s"
+
+
+def test_session_speed_table_evicts_least_recently_used():
+    for index in range(_SESSION_SPEED_LIMIT):
+        _attach_session_speed({}, f"session-{index}")
+    _attach_session_speed({}, "session-0")
+    _attach_session_speed({}, f"session-{_SESSION_SPEED_LIMIT}")
+
+    assert len(_session_speed) == _SESSION_SPEED_LIMIT
+    assert "session-0" in _session_speed
+    assert "session-1" not in _session_speed
+    assert f"session-{_SESSION_SPEED_LIMIT}" in _session_speed
+
+
+@pytest.mark.parametrize("auxiliary", [
+    {"call_role": "auxiliary:compression"},
+    {"metadata": {"call_role": "compaction"}},
+])
+def test_auxiliary_requests_never_enter_speed_samples(make_agent, auxiliary):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    ctx = {"message_id": "auxiliary", "event_message_id": "auxiliary"}
+    _msg_ctx.set(ctx)
+    _attach_session_speed(ctx, agent.session_id)
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    agent.response = SimpleNamespace(
+        usage=_chat_usage(output=900, reasoning=0, total=926)
+    )
+    _call(agent, 10, 19, **auxiliary)
+
+    footer = _speed_footer(ctx)
+    assert footer["speed_output_tokens"] == 100
+    assert footer["speed_request_seconds"] == 2
+    assert footer["speed_requests"] == 1
+    assert footer["speed_total_requests"] == 1
+
+
+def test_compaction_resets_recent_window_only(make_agent):
+    agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    ctx = {"message_id": "compacted", "event_message_id": "compacted"}
+    _msg_ctx.set(ctx)
+    _attach_session_speed(ctx, agent.session_id)
+    _maybe_wrap_callbacks(agent)
+    _call(agent, 1, 3)
+    _reset_compaction_speed(agent.session_id)
+
+    agent.response = SimpleNamespace(
+        usage=_chat_usage(output=900, reasoning=0, total=926)
+    )
+    _call(agent, 10, 19)
+
+    footer = _speed_footer(ctx)
+    assert footer["speed_output_tokens"] == 1000
+    assert footer["speed_request_seconds"] == 11
+    assert footer["speed_requests"] == 2
+    assert footer["speed_total_requests"] == 2
+    assert footer["speed_recent_output_tokens"] == 900
+    assert footer["speed_recent_request_seconds"] == 9
+    assert footer["speed_recent_requests"] == 1
+    assert footer["speed_recent_total_requests"] == 1
+    assert _speed(footer) == "91 t/s"
 
 
 def test_cached_agent_resets_only_when_turn_changes(make_agent):
@@ -173,7 +274,7 @@ def test_cached_agent_resets_only_when_turn_changes(make_agent):
 
 
 @pytest.mark.parametrize("outcome", ["missing", "exception", "unreadable"])
-def test_incomplete_turn_never_presents_a_subset_as_all_requests(make_agent, outcome):
+def test_incomplete_request_uses_measured_subset_with_coverage(make_agent, outcome):
     agent = make_agent(_chat_usage(reasoning=0, total=161))
     _maybe_wrap_callbacks(agent)
     _call(agent, 1, 3)
@@ -191,8 +292,11 @@ def test_incomplete_turn_never_presents_a_subset_as_all_requests(make_agent, out
         agent.response = Unreadable() if outcome == "unreadable" else SimpleNamespace(usage=None)
         assert _call(agent, 4, 6) is agent.response
     footer = _speed_footer(_msg_ctx.get())
-    assert footer == {"speed_requests": 1, "speed_total_requests": 2}
-    assert _speed(footer) is None
+    assert footer == {
+        "speed_output_tokens": 135, "speed_request_seconds": 2.0,
+        "speed_requests": 1, "speed_total_requests": 2,
+    }
+    assert _speed(footer) == "68 t/s (1/2)"
 
 
 def test_old_canonical_usage_is_not_a_current_turn_measurement(make_agent):
@@ -260,8 +364,11 @@ def test_nonstream_request_does_not_use_full_request_latency(make_agent):
     agent.nonstream = True
     _call(agent, 10, 15, method="_interruptible_api_call")
     footer = _speed_footer(_msg_ctx.get())
-    assert footer == {"speed_requests": 1, "speed_total_requests": 2}
-    assert _speed(footer) is None
+    assert footer == {
+        "speed_output_tokens": 100, "speed_request_seconds": 2.0,
+        "speed_requests": 1, "speed_total_requests": 2,
+    }
+    assert _speed(footer) == "50 t/s (1/2)"
 
 
 @pytest.mark.asyncio
@@ -458,15 +565,16 @@ def test_zero_output_request_has_no_decode_window(make_agent):
     _call(agent, 10, 13)
     footer = _speed_footer(_msg_ctx.get())
     assert footer["speed_total_requests"] == 2
-    assert "speed_request_seconds" not in footer
-    assert _speed(footer) is None  # Zero-output requests have no decode window.
+    assert footer["speed_output_tokens"] == 100
+    assert footer["speed_request_seconds"] == 3.0
+    assert _speed(footer) == "33 t/s (1/2)"
 
 
 @pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
-def test_unusable_request_clock_never_displays_partial_average(seconds):
+def test_unusable_request_clock_is_excluded_from_partial_average(seconds):
     totals = RequestTotals()
     totals.start()
     totals.record(100, 2)
     totals.start()
     totals.record(100, seconds)
-    assert _speed(totals.footer()) is None
+    assert _speed(totals.footer()) == "50 t/s (1/2)"

@@ -19,7 +19,7 @@ from . import (
     _session_contexts_lock,
 )
 from .adapter import _send_result
-from .usage import _speed_footer, _totals_for_context
+from .usage import _attach_session_speed, _speed_footer, _totals_for_context
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
 
@@ -539,6 +539,8 @@ def _wrap_run_agent(orig: Callable) -> Callable:
             else:
                 ctx["event_message_id"] = effective_event_message_id
             _totals_for_context(ctx)
+            if _interrupt_depth == 0:
+                _attach_session_speed(ctx, str(session_id or ""))
             # Copy to thread-local for thread-pool workers
             _thread_local_ctx.data = dict(ctx)
 

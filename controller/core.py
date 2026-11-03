@@ -1603,14 +1603,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             "model": model,
             **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
-            **{
-                key: tokens[key]
-                for key in (
-                    "speed_output_tokens", "speed_request_seconds",
-                    "speed_requests", "speed_total_requests",
-                )
-                if tokens and key in tokens
-            },
+            **({
+                key: value for key, value in tokens.items()
+                if key.startswith("speed_")
+            } if tokens else {}),
             **({"cache_read_tokens": tokens.get("cache_read_tokens")} if tokens and tokens.get("cache_read_tokens") else {}),
             **({"cache_write_tokens": tokens.get("cache_write_tokens")} if tokens and tokens.get("cache_write_tokens") else {}),
             **({"context_used": context.get("used_tokens")} if context else {}),

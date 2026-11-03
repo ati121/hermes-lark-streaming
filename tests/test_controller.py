@@ -863,12 +863,15 @@ class TestLinearDispatch:
                 tokens={
                     "output_tokens": 9000, "speed_output_tokens": 300,
                     "speed_request_seconds": 10.0, "speed_requests": 2,
-                    "speed_total_requests": 2,
+                    "speed_total_requests": 2, "speed_api_requests": 1,
+                    "speed_recent_output_tokens": 200,
                 },
             )
         assert session.footer["duration"] == 100.0
         assert session.footer["speed_request_seconds"] == 10.0
         assert session.footer["speed_requests"] == 2
+        assert session.footer["speed_api_requests"] == 1
+        assert session.footer["speed_recent_output_tokens"] == 200
         assert _render_footer_field(
             "speed", session.footer, is_error=False, is_aborted=False, show_label=False,
         ) == ("30 t/s", "30 t/s")
