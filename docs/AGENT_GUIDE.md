@@ -128,7 +128,8 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 会被静默跳过。
 
 `speed` 默认开启，显示**当前 Hermes 会话内所有主模型请求的加权生成速度**（如
-`50 t/s`），与 DeepSeek Harness 的整段会话口径一致。不想要可以从 `fields` 里去掉。
+`50 t/s`），沿用 DeepSeek Harness 的整段会话加权方式，并对隐藏 reasoning 做更严格
+的剔除。不想要可以从 `fields` 里去掉。
 
 - 公式：`会话内各请求可测生成 token 的合计 / 对应生成窗口秒数的合计`。不是各次
   t/s 的算术平均值，也不是单轮速度；同一会话的多个用户回合、工具调用前后的请求
@@ -139,10 +140,12 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 - 计时直接观察 Hermes Relay 的提供方原始流，在正文缓冲、工具文本抑制和卡片回调
   之前记录；从首个有效内容到提供方流结束，不计首字等待、预填、客户端收尾、
   工具执行或请求间空闲。role-only、空包、usage 包不作为首字。
-- 提供方报告的总输出 token（含 reasoning）作为分子，生成窗口使用完整主模型流。
-  提供方把 reasoning 单列时先按原始总数校正，避免重复计数；不修改正常用量或费用。
-- 小于 100ms、超过 10,000 t/s、明显缓冲后突发下发、非流式、只有一次内容下发或
-  缺少原始流观测接口的请求没有可靠样本，不用整次请求耗时伪装成解码速度。
+- 提供方把 reasoning 单列且流里也有正文时，只计算“总输出 - reasoning”，窗口从
+  第一段正文开始；隐藏 thinking 只计入 token 数、不留在流里的，不会被拿去除以很短
+  的正文窗口。没有正文但 reasoning 可见时，从首段 reasoning 开始计时；reasoning
+  计数存在却完全不可见的请求没有可靠速度。不修改正常用量或费用。
+- 完整解码窗口必须超过 1 秒；小于等于 1 秒、超过 10,000 t/s、明显缓冲后突发下发、
+  非流式、只有一次内容下发或缺少原始流观测接口的请求没有可靠样本，不显示速度。
 - 部分请求没有可靠样本时，仍用可测请求计算并标注覆盖率，如 `91 t/s (9/10)`；
   只有 `measured < total` 时才显示括号。日志 `HLS: speed partial` 和
   `HLS: speed measured` 记录作用域、覆盖率、合计 token 和生成秒数，DEBUG 日志
@@ -561,7 +564,7 @@ grep -oE "capability_check plugin=[^ ]+" "$HERMES_HOME/logs/agent.log" | sort -u
 | Schema 错误（300315） | 检查 CardKit v2 卡片结构和字号值是否合法 |
 | 流式卡片卡住 / 230020 | 确认使用 v1.30 或更新版本；限流时会合并刷新并尝试封口修复，仍失败则先发静态结果卡；确认消息未被删除/撤回，增大 TTL 不能解除飞书限流 |
 | 字号未变化 | 确认 `text_sizes` 缩进、角色/字号合法；旧卡片不会被新配置改变 |
-| 速度时有时无 | 检查 `HLS: speed hidden`：`incomplete_requests` 表示本轮有失败、缺失 usage、计时无效或未结束的请求，`measured/requests` 是已完整测量/全部请求数；整段下发本身不会隐藏速度 |
+| 速度时有时无 | 检查 `HLS: speed partial` / `HLS: speed measured`：`measured/requests` 是覆盖率，卡片对应显示 `(measured/requests)`；正文解码窗口不超过 1 秒、隐藏 reasoning 无可见计时、缺失 usage、非流式或突发缓冲请求不会计入速度 |
 | 卡片退化为纯文本 / 230002 | 多 Profile 场景先看上面「多 Profile 网关」：同一条消息的 `feishu inbound ids`、`HLS: session created` 是否各只有 1 次 |
 | 改了但没效果 | 先看上面「陷阱：`hermes plugins install` 的中断残留」：`ls -a` 每个 home 的 `plugins/`，有 `.install-*` 就隔离掉再重启 |
 | Profile 用错 bot | 核对 `FeishuClient initialized` 的 `app_id`/`home` 对应该 Profile |

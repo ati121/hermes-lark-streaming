@@ -38,17 +38,19 @@ def test_decode_excludes_prefill_and_host_teardown():
 
 
 @pytest.mark.parametrize(("events", "end", "usage", "expected"), [
-    ([(1, 0, 10, 0), (8, 10, 0, 0), (9, 10, 0, 0), (10, 10, 0, 0)], 10, _usage(1500, 1100), (1500, 9)),
+    ([(1, 0, 10, 0), (8, 10, 0, 0), (9, 10, 0, 0), (10, 10, 0, 0)], 10, _usage(1500, 1100), (400, 2)),
+    ([(8, 10, 0, 0), (9, 10, 0, 0), (10, 10, 0, 0)], 10, _usage(500, 400), (100, 2)),
     ([(1, 0, 10, 0), (3, 0, 10, 0), (5, 0, 0, 10)], 5, _usage(800, 700), (800, 4)),
     ([(1, 0, 0, 10), (3, 0, 0, 10), (5, 0, 0, 10)], 5, _usage(800), (800, 4)),
-    ([(1, 0, 0, 10), (3, 0, 0, 10), (5, 0, 0, 10)], 5, _usage(800, 700), (800, 4)),
+    ([(1, 0, 0, 10), (3, 0, 0, 10), (5, 0, 0, 10)], 5, _usage(800, 700), (None, 0)),
     ([(8, 10, 0, 0)], 8.5, _usage(800), (None, 0)),
+    ([(1, 10, 0, 0), (1.9, 10, 0, 0)], 1.9, _usage(20), (None, 0)),
     ([(1, 1, 0, 0), (9, 99, 0, 0)], 10, _usage(800), (None, 0)),
     ([(1, 0, 10, 0), (11, 50, 0, 0), (11.2, 50, 0, 0)], 11.2, _usage(550, 20), (None, 0)),
     ([(1, 10, 0, 0), (1.05, 10, 0, 0)], 1.05, _usage(100), (None, 0)),
     ([(1, 10, 0, 0), (2, 10, 0, 0)], 2, _usage(10001), (None, 0)),
 ])
-def test_full_output_and_provider_stream_window(events, end, usage, expected):
+def test_reasoning_aware_speed_and_minimum_window(events, end, usage, expected):
     assert _timing(events, end).decode(usage) == expected
 
 

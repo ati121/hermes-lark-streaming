@@ -26,6 +26,8 @@ _observer_lock = shared_object("speed.observer_lock", Lock)
 _session_speed = shared_object("speed.session_totals", OrderedDict)
 _session_speed_lock = shared_object("speed.session_totals.lock", Lock)
 _SESSION_SPEED_LIMIT = 64
+_MIN_DECODE_SECONDS = 1.0
+_MAX_DECODE_TPS = 10000.0
 
 
 def _field(value: Any, name: str) -> Any:
@@ -174,15 +176,32 @@ class StreamTiming:
         output = _output_tokens(usage)
         if output is None or self.first is None or self.ended is None or self.overflow or self.streams != 1:
             return None, 0.0
+        reasoning = _count((usage or {}).get("reasoning_tokens")) or 0
+        first_text = next((at for at, text, _, _ in self.events if text), None)
+        first_reasoning = next((at for at, _, think, _ in self.events if think), None)
         start = self.first
+        events = self.events
+        if reasoning:
+            if reasoning > output:
+                return None, 0.0
+            if first_text is not None:
+                output -= reasoning
+                start = first_text
+                events = [(at, text, 0, 0) for at, text, _, _ in self.events if text]
+            elif first_reasoning is not None:
+                start = first_reasoning
+            else:
+                return None, 0.0
+        if output <= 0:
+            return None, 0.0
         seconds = self.ended - start
-        if seconds < 0.1 or output <= 0 or output > 10000 * seconds:
+        if seconds <= _MIN_DECODE_SECONDS or output > _MAX_DECODE_TPS * seconds:
             return None, 0.0
         # Magpie's 10%-90% content flow detects a buffered burst, not decode.
-        size = sum(text + think + tool for _, text, think, tool in self.events)
+        size = sum(text + think + tool for _, text, think, tool in events)
         lower = upper = None
         consumed = 0
-        for at, text, think, tool in self.events:
+        for at, text, think, tool in events:
             consumed += text + think + tool
             if lower is None and consumed >= size * 0.1:
                 lower = at

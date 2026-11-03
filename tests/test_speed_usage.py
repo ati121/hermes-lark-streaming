@@ -144,8 +144,9 @@ def test_capture_preserves_response_and_provider_usage(make_agent, method):
     assert _call(agent, 1, 4, method) is agent.response
     assert agent.calls == [({}, {})]
     usage["completion_tokens"] = 1
-    assert totals.footer()["speed_output_tokens"] == 813
+    assert totals.footer()["speed_output_tokens"] == 135
     assert totals.footer()["speed_request_seconds"] == 3
+    assert _speed(totals.footer()) == "45 t/s"
     assert agent._last_turn_usage == {"output_tokens": 9999}
 
 

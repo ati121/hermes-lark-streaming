@@ -4,6 +4,32 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.46 (2026-11-04, personal fork)
+
+### Fixed — hidden reasoning no longer inflates Gemini speed
+
+- Hermes' Gemini adapter reports `completion_tokens` as visible candidates plus
+  hidden `thoughtsTokenCount`, while hidden thinking usually has no streamed
+  content. v1.45 divided that full count by the much shorter visible stream and
+  could display implausibly high rates such as 400+ t/s.
+- For reasoning responses with visible text, count only
+  `output_tokens - reasoning_tokens` and start the decode window at the first
+  visible text. If there is no text but paced reasoning is visible, time the
+  output from the first reasoning chunk. Hidden reasoning with no observable
+  timing contributes no sample.
+- Require a decode window longer than one second. Windows at or below one second,
+  buffered bursts, and samples above 10,000 t/s remain excluded.
+- Keep session-level weighting, compaction windows, coverage labels and
+  auxiliary-call filtering from v1.45 unchanged.
+
+### Tests
+
+- Full default suite: 1,786 passed.
+- Targeted speed, decode, CardKit and controller suite: 401 passed.
+- Added a Hermes/Gemini-shaped usage regression where 400 hidden reasoning
+  tokens no longer enter the speed numerator, plus the one-second minimum-window
+  boundary and hidden-reasoning cases.
+
 ## v1.45 (2026-11-04, personal fork)
 
 ### Fixed — session-level weighted decode speed
