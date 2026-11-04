@@ -100,6 +100,6 @@ def test_bullets_in_prose_tables_escaped_text_and_rules_stay_literal() -> None:
 def test_static_cards_use_native_lists_too(builder) -> None:
     source = "• **第一项**\n• 第二项\n\n```text\n• 示例\n```"
     card = builder(source)
-    assert card["body"]["elements"][0]["content"] == (
-        "- **第一项**\n- 第二项\n\n```text\n• 示例\n```"
-    )
+    assert [el["content"] for el in card["body"]["elements"]] == [
+        "- **第一项**\n- 第二项", "```text\n• 示例\n```",
+    ]

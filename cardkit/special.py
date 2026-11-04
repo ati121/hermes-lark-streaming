@@ -15,6 +15,7 @@ from .md import (
     _split_long_text,
     escape_markdown_asterisks,
     optimize_markdown_style,
+    split_answer_spacing_blocks,
 )
 
 __all__ = [
@@ -97,6 +98,17 @@ def _static_markdown_chunks(content: str) -> list[str]:
     return [escape_markdown_asterisks(chunk) for chunk in _split_long_text(normalized) if chunk.strip()]
 
 
+def _static_markdown_elements(content: str) -> list[dict[str, Any]]:
+    elements: list[dict[str, Any]] = []
+    for chunk in _static_markdown_chunks(content):
+        for index, block in enumerate(split_answer_spacing_blocks(chunk)):
+            element: dict[str, Any] = {"tag": "markdown", "content": block}
+            if index:
+                element["margin"] = "16px 0px 0px 0px"
+            elements.append(element)
+    return elements
+
+
 def _static_card_shell(elements: list[dict], *, streaming_mode: bool | None = None) -> dict[str, Any]:
     """schema-2.0 static card shell. streaming_mode=None keeps the key absent
     (cron/gateway cards omit it; clarify cards pin it to False)."""
@@ -127,7 +139,7 @@ def build_cron_card(content: str) -> dict[str, Any]:
     """Cron 推送用的极简静态卡片 — schema 2.0，仅 markdown 内容."""
     if not content.strip():
         return _static_card_shell([])
-    elements = [{"tag": "markdown", "content": chunk} for chunk in _static_markdown_chunks(content)]
+    elements = _static_markdown_elements(content)
     card = _static_card_shell(elements)
     summary = _build_summary(content)
     if summary["content"]:
@@ -151,7 +163,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
         })
 
     if content.strip():
-        elements.extend({"tag": "markdown", "content": chunk} for chunk in _static_markdown_chunks(content))
+        elements.extend(_static_markdown_elements(content))
 
     card = _static_card_shell(elements)
 

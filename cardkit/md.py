@@ -36,6 +36,8 @@ _RE_TABLE_DELIMITER = re.compile(r"^ {0,3}\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _RE_LIST_MARKER = re.compile(r"^([ \t]*)([-+*•●▪◦]|[0-9]{1,9}[.)])([ \t]+)(\S.*)$")
 _RE_LIST_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 _RE_THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_RE_BLOCK_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)")
+_MAX_ANSWER_SPACING_BLOCKS = 64
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -46,6 +48,8 @@ __all__ = [
     "escape_markdown_asterisks",
     "optimize_markdown_style",
     "render_answer_markdown",
+    "split_answer_spacing_blocks",
+    "split_list_spacing_blocks",
     "split_table_spacing_blocks",
 ]
 
@@ -290,6 +294,106 @@ def _normalize_list_markers(text: str) -> str:
     return "".join(result)
 
 
+def _split_spacing_blocks(text: str, boundaries: set[tuple[int, int]]) -> list[str]:
+    if not boundaries:
+        return [text]
+    blocks: list[str] = []
+    cursor = 0
+    for start, end in sorted(boundaries):
+        if start < cursor:
+            continue
+        if text[cursor:start].strip():
+            blocks.append(text[cursor:start])
+        cursor = end
+    if text[cursor:].strip():
+        blocks.append(text[cursor:])
+    return blocks or [text]
+
+
+def split_list_spacing_blocks(text: str) -> list[str]:
+    """Give blank lines after a top-level list a real card layout boundary.
+
+    Blank lines between items, nested lists, continuation paragraphs and code
+    inside an item stay in the same Markdown element. A single newline never
+    introduces an extra margin. Fenced/indented code is not a list.
+    """
+    boundaries: set[tuple[int, int]] = set()
+    # The top-level item's marker and content columns (nested items do not
+    # change these). They distinguish an item continuation from a new section.
+    list_indent: tuple[int, int] | None = None
+    fence_char = ""
+    fence_length = 0
+    spans = iter(_inline_code_ranges(text))
+    span = next(spans, None)
+    blank_start: int | None = None
+    last_end = 0
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        start = offset
+        offset += len(line)
+        body = line.rstrip("\r\n")
+        prefix = body[:len(body) - len(body.lstrip(" \t"))]
+        indent = len(prefix.expandtabs(4))
+        position = start + len(prefix)
+        while span is not None and span[1] <= position:
+            span = next(spans, None)
+        in_span = span is not None and span[0] <= position < span[1]
+        fence = _RE_LIST_FENCE.match(body)
+        if fence and in_span and span[0] == position:
+            # A line-start fence takes precedence over the inline tokenizer's
+            # pairing of its opening/closing backtick runs.
+            in_span = False
+        if fence_char:
+            if fence:
+                run, suffix = fence.groups()
+                if run[0] == fence_char and len(run) >= fence_length and not suffix.strip():
+                    fence_char, fence_length = "", 0
+            last_end, blank_start = start + len(body), None
+            continue
+        if not body.strip():
+            if blank_start is None:
+                blank_start = last_end
+            continue
+
+        item = _RE_LIST_MARKER.match(body)
+        if _RE_THEMATIC_BREAK.fullmatch(body) or in_span:
+            item = None
+        # At a blank-line boundary, a dedented non-item starts a new section.
+        # Blank lines before another item or its indented body are internal.
+        if list_indent is not None and not in_span and indent < list_indent[1]:
+            if item is None:
+                if blank_start is not None:
+                    boundaries.add((blank_start, start))
+                    list_indent = None
+                elif fence or _RE_BLOCK_HEADING.match(body) or _RE_THEMATIC_BREAK.fullmatch(body):
+                    list_indent = None
+            elif indent <= list_indent[0]:
+                list_indent = None
+        if item is not None and not in_span and list_indent is None and indent <= 3:
+            marker, gap = item.group(2, 3)
+            list_indent = (indent, len((prefix + marker + gap).expandtabs(4)))
+        if fence and not in_span and (indent <= 3 or (
+            list_indent is not None and indent < list_indent[1] + 4
+        )):
+            run, _ = fence.groups()
+            fence_char, fence_length = run[0], len(run)
+        last_end, blank_start = start + len(body), None
+    return _split_spacing_blocks(text, boundaries)
+
+
+def split_answer_spacing_blocks(text: str) -> list[str]:
+    """Combine table and list spacing, sharing one element budget."""
+    blocks = [block for table in split_table_spacing_blocks(text)
+              for block in split_list_spacing_blocks(table)]
+    if len(blocks) > _MAX_ANSWER_SPACING_BLOCKS:
+        # Preserve all remaining text in one element rather than overflowing
+        # Feishu's 200-tag limit on answers containing many short sections.
+        blocks = blocks[:_MAX_ANSWER_SPACING_BLOCKS - 1] + [
+            "\n\n".join(blocks[_MAX_ANSWER_SPACING_BLOCKS - 1:]),
+        ]
+    return blocks
+
+
 def split_table_spacing_blocks(text: str) -> list[str]:
     """Convert blank lines beside pipe tables into separate layout blocks.
 
@@ -343,19 +447,7 @@ def split_table_spacing_blocks(text: str) -> list[str]:
         if after and text[end + after.end():].strip():
             boundaries.add((end, end + after.end()))
         index = end_index
-    if not boundaries:
-        return [text]
-    blocks: list[str] = []
-    cursor = 0
-    for start, end in sorted(boundaries):
-        if start < cursor:
-            continue
-        if text[cursor:start].strip():
-            blocks.append(text[cursor:start])
-        cursor = end
-    if text[cursor:].strip():
-        blocks.append(text[cursor:])
-    return blocks or [text]
+    return _split_spacing_blocks(text, boundaries)
 
 
 def _longest_backtick_run(value: str) -> int:

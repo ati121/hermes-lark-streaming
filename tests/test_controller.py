@@ -817,6 +817,49 @@ class TestLinearDispatch:
         assert [element["content"] for element in additions["elements"]] == [table, "After"]
         assert all(element["margin"] == "16px 0px 0px 0px" for element in additions["elements"])
 
+    @pytest.mark.parametrize("chunking", ["whole", "boundaries", "characters"])
+    def test_interactive_stream_preserves_spacing_after_list(self, chunking: str) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_list_spacing", linear=True)
+        ctrl._sessions[session.message_id] = session
+        items = "• 第一项\n• 第二项"
+        section = "📌 **说明**\n\n说明正文"
+        chunks = [items, "\n\n", section]
+        if chunking == "whole":
+            chunks = ["".join(chunks)]
+        elif chunking == "characters":
+            chunks = list("".join(chunks))
+        with patch.object(ctrl, "_schedule_linear_flush"):
+            for chunk in chunks:
+                ctrl.on_answer(message_id=session.message_id, text=chunk)
+        for final in (False, True):
+            card = ctrl._build_interactive_linear_card(session, final=final)
+            answer = [el for el in card["body"]["elements"]
+                      if el.get("element_id", "").startswith(ANSWER_ELEMENT_ID)]
+            assert [el["content"] for el in answer] == ["- 第一项\n- 第二项", section]
+            assert answer[1]["margin"] == "16px 0px 0px 0px"
+
+    def test_cardkit_seal_inserts_list_spacing_without_changing_answer_tag(self) -> None:
+        ctrl = _setup_ctrl(linear=True)
+        session = _make_session("msg_cardkit_list_spacing", linear=True)
+        session._creation_stages.add("answer")
+        session.unified_state.answer_text = "• 项目\n\n📌 **说明**\n\n说明正文"
+        actions = ctrl._build_seal_actions(
+            session, session.unified_state, footer_data=None, partial=False,
+            is_error=False, is_aborted=False, error_message="",
+            footer_fields=None, footer_show_label=False, trim_label="test",
+        )
+        update = next(a["params"]["partial_element"] for a in actions
+                      if a["action"] == "partial_update_element"
+                      and a["params"]["element_id"] == ANSWER_ELEMENT_ID)
+        assert update == {"content": "- 项目"}
+        additions = next(a["params"] for a in actions
+                         if a["action"] == "add_elements"
+                         and a["params"]["target_element_id"] == ANSWER_ELEMENT_ID)
+        assert additions["type"] == "insert_after"
+        assert additions["elements"][0]["content"] == "📌 **说明**\n\n说明正文"
+        assert additions["elements"][0]["margin"] == "16px 0px 0px 0px"
+
     def test_linear_thinking_dispatches(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_t", linear=True)

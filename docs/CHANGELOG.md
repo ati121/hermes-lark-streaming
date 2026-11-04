@@ -4,6 +4,31 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.50 (2026-11-04, personal fork)
+
+### Fixed — spacing after lists
+
+- A blank line after a top-level list is now a real 16px margin between
+  Markdown elements, so the next heading or paragraph does not stick to the
+  final item. Preserve blank lines inside items, nested lists, continuation
+  paragraphs and code; a single newline does not add a margin.
+- Interactive streaming and completed cards, CardKit sealing, cron cards and
+  gateway static cards share the spacing rules. Existing table spacing stays
+  intact and does not double the margin at a list/table boundary.
+- Cap answer spacing at 64 elements, keeping the remaining text together when
+  an answer contains many small sections, to leave room for the panel/footer.
+
+### Tests
+
+- Added regression coverage for list/heading boundaries, nested content, code
+  examples, CRLF, table combinations, device sizes, streaming chunk boundaries,
+  CardKit seal actions, static cards and the spacing element budget.
+- Full suite: **1,908 passed**. Wheel install, metadata, import and spacing smoke
+  checks passed; no new changed-file Ruff diagnostics, and `git diff --check`
+  passed. Hermes Plugin Guard allowed the complete candidate tree with a clean
+  scan. The real Feishu API accepted creation, five spacing blocks and sealing
+  of an unsent synthetic card. Client appearance still needs visual testing.
+
 ## v1.49 (2026-11-04, personal fork)
 
 ### Fixed — installation scanner compatibility

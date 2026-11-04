@@ -359,11 +359,11 @@ def build_answer_elements(
     element_id: str = ANSWER_ELEMENT_ID,
     text_sizes: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Use real element margins for blank lines around Markdown tables."""
-    from .md import split_table_spacing_blocks
+    """Use real margins for blank lines around tables and after lists."""
+    from .md import split_answer_spacing_blocks
 
     elements = []
-    for index, block in enumerate(split_table_spacing_blocks(content)):
+    for index, block in enumerate(split_answer_spacing_blocks(content)):
         element = _streaming_element(
             content=block,
             element_id=element_id if index == 0 else f"{element_id[:14]}_{index}",
