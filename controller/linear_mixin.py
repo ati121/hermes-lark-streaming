@@ -286,6 +286,17 @@ def _only_preparation_records(session: CardSession) -> bool:
     )
 
 
+def _insert_before_action(target_element_id: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": target_element_id,
+            "elements": elements,
+        },
+    }
+
+
 def _simulated_seal_body(
     panel: dict[str, Any],
     state: UnifiedLinearState | None,
@@ -493,6 +504,12 @@ class UnifiedControllerMixin:
 
     async def _do_create_linear_card(self, session: CardSession) -> None:
         """Create the initial placeholder card — loading hint only, no panel."""
+        if session.state == CREATING:
+            # A duplicate trigger (concurrency-seal reuse path) while the first
+            # create is still in flight. That create owns ``_card_ready``;
+            # setting it here with card_id still None let completion fall back
+            # to a plain reply and orphan the card that landed afterwards.
+            return
         if session.state != IDLE:
             # Completion can claim the session before this coroutine is
             # dequeued. Signal readiness anyway: the completion path blocks on
@@ -718,51 +735,7 @@ class UnifiedControllerMixin:
         assert self._client is not None
 
         if session.interactive_mode:
-            if not session.card_msg_id:
-                return
-            session.flush.set_cooldown(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
-            try:
-                with session._stream_lock:
-                    pending_panel = state.panel_dirty
-                    pending_answer = state.answer_dirty
-                    pending_tools = state.tool_steps_dirty
-                    card = self._build_interactive_linear_card(session)
-                    state.panel_dirty = False
-                    state.answer_dirty = False
-                    state.tool_steps_dirty = False
-                await self._client.update_card(session.card_msg_id, card)
-            except asyncio.CancelledError:
-                with session._stream_lock:
-                    state.panel_dirty = state.panel_dirty or pending_panel
-                    state.answer_dirty = state.answer_dirty or pending_answer
-                    state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
-                raise
-            except Exception as e:
-                with session._stream_lock:
-                    state.panel_dirty = state.panel_dirty or pending_panel
-                    state.answer_dirty = state.answer_dirty or pending_answer
-                    state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
-                _logger.warning(
-                    "interactive card update failed: %s msg=%s",
-                    e, (session.card_msg_id or "?")[:12],
-                )
-                if isinstance(e, FeishuAPIError) and e.code == IM_FREQUENCY_LIMIT:
-                    # Coalesce all updates rejected by IM frequency limits and
-                    # retry only after the provider's rejection window cools.
-                    session.flush.set_cooldown(_INTERACTIVE_COOLDOWN_SEC)
-                elif isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
-                    session.guard.terminate("interactive_flush", err=e)
-                    session.flush.mark_completed()
-                    return
-                self._schedule_linear_flush(session, force=True)
-                return
-            if state.panel_visible:
-                session._creation_stages.add("panel")
-            if state.answer_text:
-                session._creation_stages.add("answer")
-            session._creation_stages.add("hint_removed")
-            if state.has_dirty:
-                self._schedule_linear_flush(session)
+            await self._flush_interactive(session, state)
             return
 
         # Before the phase work: every phase below has early returns, so a call
@@ -770,125 +743,190 @@ class UnifiedControllerMixin:
         await self._sync_loading_context(session)
         await self._sync_loading_label(session)
 
-        actions: list[dict[str, Any]] = []
-
         # Bug fix (v1.0.5): Split Phase 2 into two sub-paths:
         # The answer element must be created in BOTH paths so the answer text can be
         if "answer" not in session._creation_stages and (state.panel_visible or state.answer_dirty or state.answer_text):
-            new_elements: list[dict[str, Any]] = []
+            if not await self._flush_phase2(session, state):
+                return
+        await self._flush_phase3(session, state)
 
-            # ── Path A: Has reasoning or tools → add unified panel ──
-            if state.panel_visible:
-                new_elements.append(self._build_session_panel(session, state))
-
-            # ── Path A & B: Always add answer streaming element ──
-            new_elements.append(_streaming_element(
-                element_id=ANSWER_ELEMENT_ID,
-                text_sizes=session.text_sizes,
-            ))
-
-            # Insert above the hint when it exists, otherwise above the spinner
-            # — the hint is absent whenever the card opened mid-stream, and the
-            # spinner row outlives every other placeholder.
-            _anchor = (
-                _LOADING_HINT_ELEMENT_ID
-                if _LOADING_HINT_ELEMENT_ID in session.existing_elements
-                else _LOADING_ELEMENT_ID
+    async def _flush_interactive(self, session: CardSession, state: UnifiedLinearState) -> None:
+        """Whole-card IM PATCH: one update_card per flush, rebuilt from state."""
+        assert self._client is not None
+        if not session.card_msg_id:
+            return
+        session.flush.set_cooldown(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
+        try:
+            with session._stream_lock:
+                pending_panel = state.panel_dirty
+                pending_answer = state.answer_dirty
+                pending_tools = state.tool_steps_dirty
+                card = self._build_interactive_linear_card(session)
+                state.panel_dirty = False
+                state.answer_dirty = False
+                state.tool_steps_dirty = False
+            await self._client.update_card(session.card_msg_id, card)
+        except asyncio.CancelledError:
+            with session._stream_lock:
+                state.panel_dirty = state.panel_dirty or pending_panel
+                state.answer_dirty = state.answer_dirty or pending_answer
+                state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
+            raise
+        except Exception as e:
+            with session._stream_lock:
+                state.panel_dirty = state.panel_dirty or pending_panel
+                state.answer_dirty = state.answer_dirty or pending_answer
+                state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
+            _logger.warning(
+                "interactive card update failed: %s msg=%s",
+                e, (session.card_msg_id or "?")[:12],
             )
-            actions.append({
-                "action": "add_elements",
-                "params": {
-                    "type": "insert_before",
-                    "target_element_id": _anchor,
-                    "elements": new_elements,
-                },
-            })
-            # Delete loading hint
-            _keep_preparation_hint = _only_preparation_records(session)
-            if _LOADING_HINT_ELEMENT_ID in session.existing_elements and not _keep_preparation_hint:
-                actions.append({
-                    "action": "delete_elements",
-                    "params": {"element_ids": [_LOADING_HINT_ELEMENT_ID]},
-                })
-            # Note: panel_dirty and tool_steps_dirty are cleared AFTER
+            if isinstance(e, FeishuAPIError) and e.code == IM_FREQUENCY_LIMIT:
+                # Coalesce all updates rejected by IM frequency limits and
+                # retry only after the provider's rejection window cools.
+                session.flush.set_cooldown(_INTERACTIVE_COOLDOWN_SEC)
+            elif isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
+                session.guard.terminate("interactive_flush", err=e)
+                session.flush.mark_completed()
+                return
+            self._schedule_linear_flush(session, force=True)
+            return
+        if state.panel_visible:
+            session._creation_stages.add("panel")
+        if state.answer_text:
+            session._creation_stages.add("answer")
+        session._creation_stages.add("hint_removed")
+        if state.has_dirty:
+            self._schedule_linear_flush(session)
 
-            # ── Execute Phase 2 batch_update ──
-            if actions:
-                _has_panel = state.panel_visible
-                _phase2_snapshot = _take_panel_dirty(state)
-                session.sequence += 1
-                try:
-                    await self._client.cardkit_batch_update(
-                        session.card_id, actions, sequence=session.sequence,
+    async def _flush_phase2(self, session: CardSession, state: UnifiedLinearState) -> bool:
+        """Phase 2: create the panel + answer elements, then stream the answer.
+
+        Returns True when dirty data is left for Phase 3 in the same cycle.
+        """
+        assert self._client is not None
+        actions: list[dict[str, Any]] = []
+        new_elements: list[dict[str, Any]] = []
+
+        # ── Path A: Has reasoning or tools → add unified panel ──
+        if state.panel_visible:
+            new_elements.append(self._build_session_panel(session, state))
+
+        # ── Path A & B: Always add answer streaming element ──
+        new_elements.append(_streaming_element(
+            element_id=ANSWER_ELEMENT_ID,
+            text_sizes=session.text_sizes,
+        ))
+
+        # Insert above the hint when it exists, otherwise above the spinner
+        # — the hint is absent whenever the card opened mid-stream, and the
+        # spinner row outlives every other placeholder.
+        _anchor = (
+            _LOADING_HINT_ELEMENT_ID
+            if _LOADING_HINT_ELEMENT_ID in session.existing_elements
+            else _LOADING_ELEMENT_ID
+        )
+        actions.append({
+            "action": "add_elements",
+            "params": {
+                "type": "insert_before",
+                "target_element_id": _anchor,
+                "elements": new_elements,
+            },
+        })
+        # Delete loading hint
+        _keep_preparation_hint = _only_preparation_records(session)
+        if _LOADING_HINT_ELEMENT_ID in session.existing_elements and not _keep_preparation_hint:
+            actions.append({
+                "action": "delete_elements",
+                "params": {"element_ids": [_LOADING_HINT_ELEMENT_ID]},
+            })
+        # Note: panel_dirty and tool_steps_dirty are cleared AFTER
+
+        # ── Execute Phase 2 batch_update ──
+        if actions:
+            _has_panel = state.panel_visible
+            _phase2_snapshot = _take_panel_dirty(state)
+            session.sequence += 1
+            try:
+                await self._client.cardkit_batch_update(
+                    session.card_id, actions, sequence=session.sequence,
+                )
+                # Update tracking after success
+                session._creation_stages.add("answer")
+                if not _keep_preparation_hint:
+                    session._creation_stages.add("hint_removed")
+                session.existing_elements.add(ANSWER_ELEMENT_ID)
+                if _has_panel:
+                    session._creation_stages.add("panel")
+                    session.existing_elements.add(UNIFIED_PANEL_ELEMENT_ID)
+                if not _keep_preparation_hint:
+                    session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+            except FeishuAPIError as e:
+                if e.code == CARDKIT_STREAMING_CLOSED:
+                    self._flush_streaming_closed(session)
+                    return False
+                if is_schema_error(e):
+                    # Permanent: the snapshot is dropped, not restored.
+                    _logger.error(
+                        "unified flush phase 2 SCHEMA ERROR (permanent): %s — detail: %s card=%s",
+                        e, e.extract_schema_detail(), session.card_id[:12],
                     )
-                    # Update tracking after success
-                    session._creation_stages.add("answer")
-                    if not _keep_preparation_hint:
-                        session._creation_stages.add("hint_removed")
-                    session.existing_elements.add(ANSWER_ELEMENT_ID)
-                    if _has_panel:
-                        session._creation_stages.add("panel")
-                        session.existing_elements.add(UNIFIED_PANEL_ELEMENT_ID)
-                    if not _keep_preparation_hint:
-                        session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
-                except FeishuAPIError as e:
-                    if e.code == CARDKIT_STREAMING_CLOSED:
-                        self._flush_streaming_closed(session)
-                        return
-                    if is_schema_error(e):
-                        # Permanent: the snapshot is dropped, not restored.
-                        _logger.error(
-                            "unified flush phase 2 SCHEMA ERROR (permanent): %s — detail: %s card=%s",
-                            e, e.extract_schema_detail(), session.card_id[:12],
-                        )
-                        state.answer_dirty = False
-                        return
-                    elif is_element_not_found_error(e):
-                        _logger.warning(
-                            "unified flush phase 2 element not found (non-fatal): %s card=%s",
-                            e, session.card_id[:12],
-                        )
-                        session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
-                        state.answer_dirty = False
-                        return
-                    else:
-                        # v1.3.3 fix (P0): transient API error (rate limit, auth
-                        _logger.warning(
-                            "unified flush phase 2 batch_update failed: %s — "
-                            "resetting _first_flush_done for retry, card=%s",
-                            e, session.card_id[:12] if session.card_id else "?",
-                        )
-                        _restore_panel_dirty(state, _phase2_snapshot)
-                        session._first_flush_done = False
-                        return
-                except asyncio.CancelledError:
-                    # v1.3.4 fix (P1): CancelledError 是 BaseException 子类，
-                    _restore_panel_dirty(state, _phase2_snapshot)
-                    session._first_flush_done = False
-                    raise
-                except Exception as e:
-                    # v1.3.3 fix (P0): catch non-FeishuAPIError exceptions (network
-                    # forever" bug.
+                    state.answer_dirty = False
+                    return False
+                elif is_element_not_found_error(e):
                     _logger.warning(
-                        "unified flush phase 2 non-API exception: %s — "
+                        "unified flush phase 2 element not found (non-fatal): %s card=%s",
+                        e, session.card_id[:12],
+                    )
+                    session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+                    state.answer_dirty = False
+                    return False
+                else:
+                    # v1.3.3 fix (P0): transient API error (rate limit, auth
+                    _logger.warning(
+                        "unified flush phase 2 batch_update failed: %s — "
                         "resetting _first_flush_done for retry, card=%s",
                         e, session.card_id[:12] if session.card_id else "?",
-                        exc_info=True,
                     )
+                    _restore_panel_dirty(state, _phase2_snapshot)
                     session._first_flush_done = False
-                    return
+                    return False
+            except asyncio.CancelledError:
+                # v1.3.4 fix (P1): CancelledError 是 BaseException 子类，
+                _restore_panel_dirty(state, _phase2_snapshot)
+                session._first_flush_done = False
+                raise
+            except Exception as e:
+                # v1.3.3 fix (P0): catch non-FeishuAPIError exceptions (network
+                # forever" bug.
+                _logger.warning(
+                    "unified flush phase 2 non-API exception: %s — "
+                    "resetting _first_flush_done for retry, card=%s",
+                    e, session.card_id[:12] if session.card_id else "?",
+                    exc_info=True,
+                )
+                _restore_panel_dirty(state, _phase2_snapshot)
+                session._first_flush_done = False
+                return False
 
-            # Note: skip markdown optimization during streaming for performance;
-            content = _take_answer_flush_snapshot(session, state)
-            if content is not None and not await _write_answer_stream(
-                self._client, session, state, content,
-            ):
-                return
+        # Note: skip markdown optimization during streaming for performance;
+        content = _take_answer_flush_snapshot(session, state)
+        if content is not None and not await _write_answer_stream(
+            self._client, session, state, content,
+        ):
+            return False
 
-            if not state.panel_dirty and not state.tool_steps_dirty and not state.answer_dirty:
-                return  # Phase 2 done, nothing more to do
+        if not state.panel_dirty and not state.tool_steps_dirty and not state.answer_dirty:
+            return False  # Phase 2 done, nothing more to do
+        return True
 
-        # ── Phase 3: Update existing panel + stream answer ──
+    async def _flush_phase3(self, session: CardSession, state: UnifiedLinearState) -> None:
+        """Phase 3: update/late-add the panel, drop the hint, stream the answer."""
+        assert self._client is not None
+        # Its own list: Phase 2's add_elements batch must never be replayed
+        # here when a delta lands while Phase 2 is on the wire.
+        actions: list[dict[str, Any]] = []
         if state.panel_dirty:
             if "panel" in session._creation_stages:
                 # Panel exists — update its content
@@ -972,6 +1010,16 @@ class UnifiedControllerMixin:
                     _restore_panel_dirty(state, _phase3_snapshot)
                     return
                 _logger.warning("unified flush batch_update failed: %s", e)
+                _restore_panel_dirty(state, _phase3_snapshot)
+                return
+            except asyncio.CancelledError:
+                _restore_panel_dirty(state, _phase3_snapshot)
+                raise
+            except Exception as e:
+                _logger.warning(
+                    "unified flush phase 3 non-API exception: %s card=%s",
+                    e, session.card_id[:12], exc_info=True,
+                )
                 _restore_panel_dirty(state, _phase3_snapshot)
                 return
 
@@ -1229,9 +1277,15 @@ class UnifiedControllerMixin:
         """
         actions: list[dict[str, Any]] = []
         panel: dict[str, Any] | None = None
+        panel_insert: dict[str, Any] | None = None
+        # The streaming flush is the only place that creates the panel/answer
+        # elements, and it stops at COMPLETING. A short reply that finished
+        # while the card was being created (or whose first Phase 2 failed)
+        # reaches here with no answer element, so the seal must add it.
+        can_insert = _LOADING_ELEMENT_ID in session.existing_elements
         if state is not None:
             # ── Bug fix (v1.0.5): Only update panel if it was created ──
-            if "panel" in session._creation_stages:
+            if "panel" in session._creation_stages or (state.panel_visible and can_insert):
                 panel = self._build_session_panel(
                     session, state,
                     current_reasoning_text="",
@@ -1239,7 +1293,14 @@ class UnifiedControllerMixin:
                     expanded=self._cfg.panel_expanded,
                     active_tool=None,
                 )
-                actions.append(_panel_update_action(panel))
+                if "panel" in session._creation_stages:
+                    actions.append(_panel_update_action(panel))
+                else:
+                    panel_insert = _insert_before_action(
+                        ANSWER_ELEMENT_ID if "answer" in session._creation_stages else _LOADING_ELEMENT_ID,
+                        [panel],
+                    )
+                    actions.append(panel_insert)
             # v1.3.1 fix: Do NOT skip this step even when the answer was already fully
             # guard) is a minor visual issue; content truncation is a P0 data-loss bug.
             if state.answer_text and "answer" in session._creation_stages:
@@ -1257,6 +1318,14 @@ class UnifiedControllerMixin:
                             "elements": answer_elements[1:],
                         },
                     })
+            elif state.answer_text and can_insert:
+                actions.append(_insert_before_action(
+                    _LOADING_ELEMENT_ID,
+                    build_answer_elements(
+                        render_answer_markdown(state.answer_text, final=True),
+                        text_sizes=session.text_sizes,
+                    ),
+                ))
         actions.extend(
             build_preservative_seal_actions(
                 partial=partial,
@@ -1272,8 +1341,12 @@ class UnifiedControllerMixin:
             )
         )
         if panel is not None:
+            # The simulated body already holds the panel; counting the
+            # insert action too would weigh it twice and over-trim.
             _trim_card_to_budget(
-                _simulated_seal_body(panel, state, actions),
+                _simulated_seal_body(
+                    panel, state, [a for a in actions if a is not panel_insert],
+                ),
                 text_sizes=session.text_sizes,
                 label=trim_label,
             )
@@ -1410,6 +1483,9 @@ class UnifiedControllerMixin:
         assert self._client is not None
         card_id = session.card_id
         assert card_id is not None
+        # The footer rows carry no element_id, so a retry that replays a
+        # delivered batch would show the footer twice.
+        seal_batch_sent = False
 
         try:
             # Before closing streaming, we MUST flush any remaining dirty
@@ -1430,8 +1506,10 @@ class UnifiedControllerMixin:
                             session, state,
                             total_elapsed_ms=_footer_elapsed_ms(footer_data),
                         )
-                    except FeishuAPIError as e:
-                        if e.code == CARDKIT_STREAMING_CLOSED:
+                    except Exception as e:
+                        # Network errors too: the seal batch below rewrites the
+                        # final panel, so a failed drain must not abort it.
+                        if isinstance(e, FeishuAPIError) and e.code == CARDKIT_STREAMING_CLOSED:
                             _logger.info("seal drain: streaming already closed, skipping panel flush")
                             session._streaming_closed = True
                         else:
@@ -1440,11 +1518,15 @@ class UnifiedControllerMixin:
                         state.tool_steps_dirty = False
 
                 # ── Flush remaining answer text ──
-                await self._drain_answer_text(
-                    session, state,
-                    source="seal drain", log_key="card", log_id=card_id[:12],
-                    skip_if_closed=True,
-                )
+                try:
+                    await self._drain_answer_text(
+                        session, state,
+                        source="seal drain", log_key="card", log_id=card_id[:12],
+                        skip_if_closed=True,
+                    )
+                except Exception as e:
+                    _logger.warning("seal drain answer failed: %s card=%s", e, card_id[:12])
+                    state.answer_dirty = False
 
             # ── Step 1: Update unified panel to final state (non-streaming) ──
             if state is not None:
@@ -1467,6 +1549,7 @@ class UnifiedControllerMixin:
                 await self._client.cardkit_batch_update(
                     card_id, seal_actions, sequence=session.sequence,
                 )
+            seal_batch_sent = True
 
             # When closing streaming, we MUST also update the card's summary
             # bug the user reported.
@@ -1521,7 +1604,7 @@ class UnifiedControllerMixin:
                 )
                 for retry in range(2):
                     try:
-                        retry_actions = self._build_seal_actions(
+                        retry_actions = [] if seal_batch_sent else self._build_seal_actions(
                             session, state,
                             footer_data=footer_data,
                             partial=partial,
@@ -1538,6 +1621,7 @@ class UnifiedControllerMixin:
                             await self._client.cardkit_batch_update(
                                 card_id, retry_actions, sequence=session.sequence,
                             )
+                        seal_batch_sent = True
 
                         # Close streaming AFTER batch_update
                         if not session._streaming_closed:
@@ -1561,7 +1645,19 @@ class UnifiedControllerMixin:
                         if retry_e.code == CARDKIT_STREAMING_CLOSED:
                             session._streaming_closed = True
                             return False
-                        raise
+                        # Re-raising here escaped the sibling ``except
+                        # Exception`` and left the session stuck in COMPLETING.
+                        _logger.warning(
+                            "preservative seal: retry %d failed card=%s: %s",
+                            retry + 1, card_id[:12], retry_e,
+                        )
+                        return False
+                    except Exception:
+                        _logger.warning(
+                            "preservative seal: retry %d failed card=%s",
+                            retry + 1, card_id[:12], exc_info=True,
+                        )
+                        return False
                 # All retries exhausted
                 _logger.warning(
                     "preservative seal: retry exhausted after sequence conflicts card=%s",
@@ -1572,6 +1668,7 @@ class UnifiedControllerMixin:
                 session._streaming_closed = True
             return False
         except Exception:
+            _logger.warning("preservative seal failed card=%s", card_id[:12], exc_info=True)
             return False
 
     async def _do_linear_complete(self, session: CardSession) -> bool:
@@ -1608,32 +1705,41 @@ class UnifiedControllerMixin:
             )
             assert self._client is not None
 
-            # ── Drain panel content ──
-            if state.panel_dirty and "panel" in session._creation_stages:
-                try:
-                    await self._flush_panel_once(session, state)
-                except FeishuAPIError as e:
-                    if e.code == CARDKIT_STREAMING_CLOSED:
-                        # v1.2.0 Y3: drain 阶段也用 _streaming_closed_logged 去重
-                        if session._streaming_closed_logged:
-                            _logger.debug("drain: streaming already closed (already logged)")
+            try:
+                # ── Drain panel content ──
+                if state.panel_dirty and "panel" in session._creation_stages:
+                    try:
+                        await self._flush_panel_once(session, state)
+                    except FeishuAPIError as e:
+                        if e.code == CARDKIT_STREAMING_CLOSED:
+                            # v1.2.0 Y3: drain 阶段也用 _streaming_closed_logged 去重
+                            if session._streaming_closed_logged:
+                                _logger.debug("drain: streaming already closed (already logged)")
+                            else:
+                                _logger.info("drain: streaming already closed, skipping")
+                                session._streaming_closed_logged = True
+                            session._streaming_closed = True
+                        elif is_schema_error(e):
+                            _logger.error("drain SCHEMA ERROR: %s — detail: %s", e, e.extract_schema_detail())
+                            state.panel_dirty = False
+                            state.tool_steps_dirty = False
                         else:
-                            _logger.info("drain: streaming already closed, skipping")
-                            session._streaming_closed_logged = True
-                        session._streaming_closed = True
-                    elif is_schema_error(e):
-                        _logger.error("drain SCHEMA ERROR: %s — detail: %s", e, e.extract_schema_detail())
-                        state.panel_dirty = False
-                        state.tool_steps_dirty = False
-                    else:
-                        _logger.warning("drain panel failed: %s", e)
+                            _logger.warning("drain panel failed: %s", e)
 
-            # ── Drain answer text ──
-            await self._drain_answer_text(
-                session, state,
-                source="drain", log_key="msg", log_id=(session.message_id or "?")[:12],
-                dedupe_closed_log=True, clear_only_on_ok=True,
-            )
+                # ── Drain answer text ──
+                await self._drain_answer_text(
+                    session, state,
+                    source="drain", log_key="msg", log_id=(session.message_id or "?")[:12],
+                    dedupe_closed_log=True, clear_only_on_ok=True,
+                )
+            except Exception as e:
+                # Exhausted network retries raise the raw exception. The seal
+                # rewrites panel and answer, so stop draining and seal.
+                _logger.warning(
+                    "linear complete: drain round %d failed, sealing anyway: %s msg=%s",
+                    _drain_round + 1, e, (session.message_id or "?")[:12],
+                )
+                break
 
             if _drain_round < _MAX_DRAIN_ROUNDS - 1:
                 await asyncio.sleep(_DRAIN_YIELD_SEC)

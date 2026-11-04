@@ -24,6 +24,7 @@ __all__ = [
     '_thread_local_ctx',
     '_logger',
     '_msg_ctx',
+    '_cron_delivery_ctx',
     '_started_msg_ids',
     '_started_msg_ids_lock',
     '_gateway_cards',
@@ -92,7 +93,6 @@ __all__ = [
     'on_message_aborted',
     'on_message_interrupted',
     'on_busy_superseded',
-    'on_cron_deliver',
     '_safe_hook',
 ]
 
@@ -125,6 +125,16 @@ _msg_ctx: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar
 # not per-copy — otherwise the winning copy registers a turn into its own
 # context and every other copy's wrapper sees an empty one.  See
 # ``runtime_globals``.
+# Set by the cron ``_deliver_result`` wrapper for the duration of one delivery.
+# Hermes schedules the live send onto the gateway loop with
+# ``run_coroutine_threadsafe``, which copies the scheduling thread's context, so
+# only that send sees it.  Replaces the old instance-level ``adapter.send`` swap,
+# which hijacked every concurrent send on the shared adapter.
+_cron_delivery_ctx: contextvars.ContextVar[dict[str, Any] | None] = shared_object(
+    "patching.cron_delivery_ctx",
+    lambda: contextvars.ContextVar("hermes_lark_streaming_cron_delivery", default=None),
+)
+
 _started_msg_ids: set[str] = shared_object("patching.started_msg_ids", set)
 _started_msg_ids_lock = shared_object("patching.started_msg_ids.lock", threading.Lock)
 
@@ -264,7 +274,6 @@ from .hooks import (  # noqa: E402
     on_message_aborted,
     on_message_interrupted,
     on_busy_superseded,
-    on_cron_deliver,
     _safe_hook,
 )
 
@@ -445,7 +454,7 @@ def _patch_feishu(compat: Any) -> bool:
             "hermes-lark-streaming: FeishuAdapter not available via HermesCompat yet"
         )
         return False
-    _feishu_patched = _apply_feishu_adapter_patches(FeishuAdapter, is_repatch=False)
+    _feishu_patched = _apply_feishu_adapter_patches(FeishuAdapter)
     return _feishu_patched
 
 
@@ -605,7 +614,7 @@ def apply_patches() -> None:
         layout,
     )
 
-def _apply_feishu_adapter_patches(FeishuAdapter, *, is_repatch: bool = False) -> bool:
+def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
     """Apply all FeishuAdapter method patches to the given class.
 
     Each Hermes profile loads its OWN feishu_platform directory plugin, so every
@@ -698,12 +707,18 @@ def _wrap_platform_registry_create_adapter(orig_create_adapter: Callable) -> Cal
         if cls_id in _patched_feishu_classes:
             return adapter
         try:
-            _apply_feishu_adapter_patches(cls, is_repatch=True)
-            _logger.info(
-                "HLS: FeishuAdapter class patched at create_adapter hook "
-                "(class_id=%s, deferred loading intercepted, name=%s)",
-                cls_id, name,
-            )
+            if _apply_feishu_adapter_patches(cls):
+                _logger.info(
+                    "HLS: FeishuAdapter class patched at create_adapter hook "
+                    "(class_id=%s, deferred loading intercepted, name=%s)",
+                    cls_id, name,
+                )
+            else:
+                _logger.warning(
+                    "HLS: create_adapter hook could not patch FeishuAdapter "
+                    "(class_id=%s name=%s)",
+                    cls_id, name,
+                )
         except Exception as e:
             _logger.warning(
                 "HLS: create_adapter hook patch failed (class_id=%s name=%s): %s",

@@ -12,14 +12,17 @@ _MAX_CRON_TABLES = 5   # 静态卡片：5表降级阈值（飞书 Card 2.0 单�
 _MAX_CHUNK_CHARS = 2400
 
 # ── Pre-compiled regex patterns (P2-01: avoid recompilation on every call) ──
-_RE_FENCED_CODE = re.compile(r'```[\s\S]*?```')
+# Closed ``` / ~~~ fences anywhere, plus a fence opened at line start that is
+# still unclosed: mid-stream (or after a cut-off reply) everything after the
+# opener is code, so its ``*`` must not be escaped.
+_RE_FENCED_CODE = re.compile(r'(`{3,}|~{3,})[\s\S]*?\1|(?:^|(?<=\n)) {0,3}(?:`{3,}|~{3,})[\s\S]*\Z')
 _RE_INLINE_CODE = re.compile(r'`[^`]+`')
 _RE_BOLD = re.compile(r'\*{2,3}(?!\s)((?:(?!\*{2,3}).)+?)(?<!\s)\*{2,3}', re.DOTALL)
 _RE_VALID_ITALIC = re.compile(r'(?<![a-zA-Z0-9_])\*(?!\s)((?:(?!\*).)+?)(?<!\s)\*', re.DOTALL)
 _RE_UNPAIRED_ASTERISK = re.compile(r'(?<!\\)\*(?=[^\s*])')
 _RE_TABLE_ROW = re.compile(r"\|.+\|\n\|[-:| ]+\|[\s\S]*?(?=\n\n|\n(?!\|)|$)")
 _RE_IMAGE_REF = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
-_RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,})([^\n]*)\n[\s\S]*?\n\2(?=\n|$)")
+_RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,}|~{3,})([^\n`]*)\n[\s\S]*?(?:\n\2(?=\n|$)|\Z)")
 _RE_H1_TO_H3 = re.compile(r"^#{1,3} ", re.MULTILINE)
 _RE_HEADING_DEMOTE = re.compile(r"^#{2,6} (.+)$", re.MULTILINE)
 _RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
@@ -27,6 +30,9 @@ _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 _RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
 # v1.3.0: placeholder pattern for restoring protected code/bold/italic blocks
 _RE_PROTECTED_PLACEHOLDER = re.compile(r'\x00P(\d+)P\x00')
+_RE_BACKTICK_RUN = re.compile(r"`+")
+_RE_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_RE_TABLE_DELIMITER = re.compile(r"^ {0,3}\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -105,9 +111,15 @@ def escape_markdown_asterisks(text: str) -> str:
     # Step 4: 转义剩余 *（飞书可能误配对的）
     text = _RE_UNPAIRED_ASTERISK.sub(r'\\*', text)
 
+    # Single pass instead of one full-text replace per placeholder (that was
+    # O(P×N) and ran under the stream lock on every flush). A protected span
+    # can itself hold earlier placeholders (code inside bold), so restore
+    # recursively.
     if _protected:
-        for i in range(len(_protected) - 1, -1, -1):
-            text = text.replace(f'\x00P{i}P\x00', _protected[i])
+        def _restore(m: re.Match) -> str:
+            return _RE_PROTECTED_PLACEHOLDER.sub(_restore, _protected[int(m.group(1))])
+
+        text = _RE_PROTECTED_PLACEHOLDER.sub(_restore, text)
 
     # Null bytes render as boxes (□) in Feishu and must never reach the API.
     if '\x00' in text:
@@ -138,12 +150,12 @@ def optimize_markdown_style(text: str) -> str:
             r = _RE_HEADING_DEMOTE.sub(r'##### \1', r)
             r = _RE_H1_DEMOTE.sub(r'#### \1', r)
 
-        # 3. 还原代码块
+        # 3. 压缩多余空行（在还原前进行，代码块内的空行保持原样）
+        r = _RE_MULTI_NEWLINE.sub("\n\n", r)
+
+        # 4. 还原代码块
         for i, block in enumerate(code_blocks):
             r = r.replace(f"{mark}{i}___", block)
-
-        # 4. 压缩多余空行
-        r = _RE_MULTI_NEWLINE.sub("\n\n", r)
 
         # 5. 剥离无效图片 key
         r = _strip_invalid_image_keys(r)
@@ -241,20 +253,100 @@ def split_table_spacing_blocks(text: str) -> list[str]:
     return blocks or [text]
 
 
+def _longest_backtick_run(value: str) -> int:
+    return max((len(m) for m in _RE_BACKTICK_RUN.findall(value)), default=0)
+
+
+def _open_fence_at_end(text: str) -> str:
+    """Return the opener line of a code fence left open at the end of ``text``."""
+    opener = ""
+    fence_char, fence_length = "", 0
+    for line in text.split("\n"):
+        fence = _RE_FENCE_LINE.match(line.rstrip("\r"))
+        if not fence:
+            continue
+        run, suffix = fence.groups()
+        if not fence_char:
+            fence_char, fence_length, opener = run[0], len(run), line.strip()
+        elif run[0] == fence_char and len(run) >= fence_length and not suffix.strip():
+            fence_char, fence_length, opener = "", 0, ""
+    return opener
+
+
+def _is_table_line(line: str) -> bool:
+    return line.lstrip(" ").startswith("|")
+
+
+def _pick_cut(text: str, limit: int) -> int:
+    cut = text.rfind("\n\n", 0, limit)
+    if cut < limit // 2:
+        cut = text.rfind("\n", 0, limit)
+    if cut < limit // 2:
+        cut = limit
+    return cut
+
+
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
-    """将超长文本按段落/换行拆分为多个不超过 limit 字符的块."""
+    """将超长文本按段落/换行拆分为多个不超过 limit 字符的块.
+
+    Each chunk becomes its own markdown element, so a cut must not leave a
+    code fence or table half-open: a fence open at the cut is closed in this
+    chunk and reopened (same opener line, language kept) in the next; a cut
+    inside a table moves to before the table, or — for a table longer than one
+    chunk — falls between rows and repeats the header rows in the next chunk.
+    """
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
+    carry = ""  # fence opener / table header re-emitted at the next chunk head
     while text:
+        head = 0
+        if carry:
+            text = f"{carry}\n{text}"
+            head = len(carry) + 1
+            carry = ""
         if len(text) <= limit:
             chunks.append(text)
             break
-        cut = text.rfind("\n\n", 0, limit)
-        if cut < limit // 2:
-            cut = text.rfind("\n", 0, limit)
-        if cut < limit // 2:
-            cut = limit
-        chunks.append(text[:cut])
+        cut = _pick_cut(text, limit)
+        opener = _open_fence_at_end(text[:cut])
+        if opener:
+            close = re.match(r"`+|~+", opener).group(0)
+            # Reserve room for the closing fence so the chunk stays in budget.
+            cut = _pick_cut(text, limit - len(close) - 1)
+            opener = _open_fence_at_end(text[:cut])
+        if cut <= head:
+            cut = limit  # always make progress past the carried prefix
+        if opener:
+            close = re.match(r"`+|~+", opener).group(0)
+            body = text[:cut].rstrip("\n")
+            chunks.append(f"{body}\n{close}")
+            carry = opener
+        else:
+            line_start = text.rfind("\n", 0, cut) + 1
+            at_boundary = cut == len(text) or text[cut] == "\n"
+            current = text[line_start:cut]
+            following = text[cut + 1:].split("\n", 1)[0] if at_boundary else ""
+            in_table = _is_table_line(current) and (not at_boundary or _is_table_line(following))
+            if in_table:
+                table_start = line_start
+                while table_start > 0:
+                    prev_start = text.rfind("\n", 0, table_start - 1) + 1
+                    if not _is_table_line(text[prev_start:table_start - 1]):
+                        break
+                    table_start = prev_start
+                if table_start > head and text[:table_start].strip():
+                    cut = table_start
+                else:
+                    if not at_boundary and line_start - 1 > max(head, table_start):
+                        cut = line_start - 1  # never split a row mid-line
+                    rows = text[table_start:].split("\n", 2)
+                    if (
+                        len(rows) > 2
+                        and _RE_TABLE_DELIMITER.match(rows[1])
+                        and cut > table_start + len(rows[0]) + len(rows[1]) + 1
+                    ):
+                        carry = f"{rows[0]}\n{rows[1]}"
+            chunks.append(text[:cut].rstrip("\n"))
         text = text[cut:].lstrip("\n")
     return chunks

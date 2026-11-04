@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .. import __version__
 from ..state.phase import TERMINAL_PHASES
 from . import (
+    _cron_delivery_ctx,
     _msg_ctx,
     _started_msg_ids,
     _started_msg_ids_lock,
@@ -776,75 +777,24 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
 # ── Cron delivery wrapper ──────────────────────────────────────────
 
 def _wrap_cron_deliver(orig: Callable) -> Callable:
-    """Intercept cron ``_deliver_result`` and redirect Feishu deliveries to CardKit cards."""
+    """Intercept cron ``_deliver_result`` and redirect Feishu deliveries to CardKit cards.
+
+    The wrapper only marks the delivery through ``_cron_delivery_ctx``; the
+    class-level ``FeishuAdapter.send`` patch reads it and sends the card.  The
+    shared adapter instance is never touched, so sends from concurrent sessions
+    keep their normal path while a cron delivery is in flight.
+    """
 
     @functools.wraps(orig)
     def wrapper(job, content, adapters=None, loop=None, **kwargs):
-        # Only intercept when there are adapters with a Feishu/Lark platform
         if not adapters:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
 
-        feishu_adapter = None
-
-        try:
-            from gateway.config import Platform
-
-            for p in list(adapters.keys()):
-                pn = p.value.lower() if hasattr(p, "value") else str(p).lower()
-                if pn in ("feishu", "lark"):
-                    feishu_adapter = adapters[p]
-                    break
-        except (ImportError, AttributeError):
-            pass
-
-        if feishu_adapter is None:
-            return orig(job, content, adapters=adapters, loop=loop, **kwargs)
-
-        _logger.info(
-            "hermes-lark-streaming v%s: cron delivery intercepted, redirecting to card (job=%s)",
-            __version__,
-            job.get("id", "?")[:12],
-        )
-
-        # ── Temporarily replace Feishu adapter.send with card-sending version ──
-        original_send = feishu_adapter.send
-
-        async def _card_sending_send(chat_id, content, **send_kwargs):
-            """Redirect Feishu adapter.send to CardKit card delivery."""
-            try:
-                from ..controller import get_controller
-                ctrl = get_controller()
-                _logger.info(
-                    "cron _card_sending_send: ctrl.enabled=%s chat=%s content_len=%d",
-                    ctrl.enabled,
-                    chat_id[:12] if chat_id else "?",
-                    len(content) if content else 0,
-                )
-                if ctrl.enabled and content:
-                    await ctrl._do_cron_deliver(chat_id, content.strip())
-
-                    _logger.info(
-                        "hermes-lark-streaming v%s: cron card delivered: chat=%s",
-                        __version__,
-                        chat_id[:12],
-                    )
-                    # Return a success result so the original _deliver_result
-                    # thinks the send succeeded
-                    return _send_result(success=True)
-            except Exception:
-                pass
-
-            # Fallback: send plain text via the original adapter
-            return await original_send(chat_id, content, **send_kwargs)
-
-        feishu_adapter.send = _card_sending_send
-        # Use counter instead of boolean flag — same rationale as _hls_bg_sending.
-        feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) + 1
+        job_id = str(job.get("id", "?")) if isinstance(job, dict) else "?"
+        token = _cron_delivery_ctx.set({"job_id": job_id})
         try:
             return orig(job, content, adapters=adapters, loop=loop, **kwargs)
         finally:
-            feishu_adapter.send = original_send
-            # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency.
-            feishu_adapter._hls_cron_sending = getattr(feishu_adapter, '_hls_cron_sending', 0) - 1
+            _cron_delivery_ctx.reset(token)
 
     return wrapper

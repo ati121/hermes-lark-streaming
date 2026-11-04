@@ -247,7 +247,7 @@ class TestClarifyDispatchPatch:
         P._patched_feishu_classes.discard(id(cls))
 
         try:
-            result = P._apply_feishu_adapter_patches(cls, is_repatch=True)
+            result = P._apply_feishu_adapter_patches(cls)
             assert result is True, "patch should succeed"
             # The wrapper must be installed on the class (name check is robust
             # — _intercepted_send_clarify is the closure created by

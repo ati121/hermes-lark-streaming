@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+from ..cardkit.md import _longest_backtick_run
+
 
 @dataclass
 class ToolStep:
@@ -1169,7 +1171,7 @@ def _build_display_block(
     return _fenced_block("text", normalized) if normalized else None
 
 def _fenced_block(language: str, content: str) -> dict[str, Any]:
-    fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", content)), default=0) + 1)
+    fence = "`" * max(3, _longest_backtick_run(content) + 1)
     return {"language": language, "content": content, "fenced": f"{fence}{language}\n{content}\n{fence}"}
 
 

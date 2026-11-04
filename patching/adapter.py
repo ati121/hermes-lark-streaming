@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .. import __version__
 from . import (
+    _cron_delivery_ctx,
     _msg_ctx,
     _gateway_cards,
     _gateway_cards_lock,
@@ -51,6 +52,33 @@ def _classify_gateway_message(content: str) -> str:
         return "slash"
     return "system"
 
+async def _deliver_cron_card(chat_id: str, content: str) -> bool:
+    """Send one cron delivery as a CardKit card; False means "send plain text".
+
+    Only the card send itself is inside the ``try``: once it returns the card
+    is in the chat, and a later error must not trigger a duplicate text send.
+    """
+    try:
+        from ..controller import get_controller
+        ctrl = get_controller()
+        if not ctrl.enabled:
+            return False
+        await ctrl._do_cron_deliver(chat_id, content.strip())
+    except Exception:
+        _logger.warning(
+            "cron card delivery failed, falling back to text: chat=%s",
+            chat_id[:12] if chat_id else "?",
+            exc_info=True,
+        )
+        return False
+    _logger.info(
+        "hermes-lark-streaming v%s: cron card delivered: chat=%s",
+        __version__,
+        chat_id[:12] if chat_id else "?",
+    )
+    return True
+
+
 def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
     """Intercept ``FeishuAdapter.send()`` — convert text to gateway cards."""
     async def _intercepted_send(self_feishu, chat_id, content, reply_to=None, metadata=None, **kwargs):
@@ -59,7 +87,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
         _cls = type(self_feishu)
         if id(_cls) not in _patched_feishu_classes:
             from . import _apply_feishu_adapter_patches
-            _apply_feishu_adapter_patches(_cls, is_repatch=True)
+            _apply_feishu_adapter_patches(_cls)
 
         # ── EphemeralReply passthrough (v1.3.1 fix) ──
         # NOT duplicate agent replies. They must NEVER be suppressed by the
@@ -79,7 +107,13 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
 
         _text_content = content
 
-        if getattr(self_feishu, "_hls_cron_sending", 0) or getattr(self_feishu, "_hls_bg_sending", 0):
+        # ── Cron path: this send belongs to a cron ``_deliver_result`` ──
+        if _cron_delivery_ctx.get() is not None:
+            if await _deliver_cron_card(chat_id, content):
+                return _send_result(success=True)
+            return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+
+        if getattr(self_feishu, "_hls_bg_sending", 0):
             return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
 
         # ── Agent path: suppress duplicate text reply ──
@@ -271,7 +305,7 @@ def _wrap_feishu_adapter_edit(orig_edit: Callable) -> Callable:
                                     _gateway_cards[message_id]["category"] = category
                             return _send_result(success=True)
             except Exception:
-                pass
+                _logger.debug("gateway card edit failed, falling back to edit_message", exc_info=True)
 
         # ── Fallback: original edit_message ──
         _fallback_kwargs = {k: v for k, v in kwargs.items() if k != "metadata"}
@@ -330,7 +364,7 @@ def _wrap_feishu_adapter_add_reaction(orig_add_reaction: Callable) -> Callable:
                                 # Suppress the actual reaction — card shows status instead
                                 return _send_result(success=True)
                 except Exception:
-                    pass
+                    _logger.debug("gateway card status update failed, falling back to reaction", exc_info=True)
 
         # ── Fallback: original add_reaction ──
         return await orig_add_reaction(self_feishu, message_id, emoji, **kwargs)
@@ -369,7 +403,7 @@ def _wrap_feishu_adapter_delete_reaction(orig_delete_reaction: Callable) -> Call
                             if updated:
                                 return _send_result(success=True)
                 except Exception:
-                    pass
+                    _logger.debug("gateway card status clear failed, falling back to reaction", exc_info=True)
 
         # ── Fallback: original delete_reaction ──
         return await orig_delete_reaction(self_feishu, message_id, emoji, **kwargs)

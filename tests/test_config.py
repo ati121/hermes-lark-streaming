@@ -105,6 +105,15 @@ class TestFooterShowLabel:
         cfg = _make_config({"hermes_lark_streaming": {"footer": {}}})
         assert cfg.footer_show_label is False
 
+    def test_empty_footer_section_defaults_false(self) -> None:
+        # ``footer:`` with every child commented out parses as None.
+        cfg = _make_config({"hermes_lark_streaming": {"footer": None}})
+        assert cfg.footer_show_label is False
+
+    def test_non_dict_footer_defaults_false(self) -> None:
+        cfg = _make_config({"hermes_lark_streaming": {"footer": ["show_label"]}})
+        assert cfg.footer_show_label is False
+
 
 class TestTextSizes:
     def test_scalar_and_device_mapping(self) -> None:
@@ -599,6 +608,14 @@ class TestProfileBoundConfig:
         assert cfg_b.enabled is False
         assert cfg_a.feishu_app_id == "cli_a"
         assert cfg_b.feishu_app_id == "cli_b"
+
+    def test_non_mapping_root_degrades_to_empty(self, tmp_path: Path) -> None:
+        home = tmp_path / "list_root"
+        home.mkdir()
+        (home / "config.yaml").write_text("- a\n- b\n", encoding="utf-8")
+        cfg = Config(home)
+        assert cfg.footer_show_label is False
+        assert cfg.feishu_app_id == ""
 
     def test_bound_home_bypasses_singleton(self, tmp_path: Path) -> None:
         """绑定 home 的实例不共享单例, 否则两个 profile 会互相串配置."""

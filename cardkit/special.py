@@ -5,12 +5,14 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-from .i18n import _LOCALES, _T, _i18n
+from .cards import _build_summary
 from .elements import _escape_md
+from .i18n import _LOCALES, _T, _i18n
 from .md import (
     _MAX_CRON_TABLES,
     _downgrade_tables,
     _split_long_text,
+    escape_markdown_asterisks,
     optimize_markdown_style,
 )
 
@@ -82,9 +84,14 @@ def normalize_clarify_choices(choices: list[str] | None) -> list[str]:
             normalized.append(n)
     return normalized
 
-def _static_summary(content: str) -> str:
-    """One-line card summary — strips fences so the preview can't break."""
-    return content[:120].replace("\n", " ").replace("```", "").strip()
+def _static_markdown_chunks(content: str) -> list[str]:
+    """Normalised, fence/table-safe markdown chunks for a static card.
+
+    The asterisk escape runs per chunk, after splitting, so every chunk it
+    sees has balanced fences.
+    """
+    normalized = _downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)
+    return [escape_markdown_asterisks(chunk) for chunk in _split_long_text(normalized) if chunk.strip()]
 
 
 def _static_card_shell(elements: list[dict], *, streaming_mode: bool | None = None) -> dict[str, Any]:
@@ -117,15 +124,11 @@ def build_cron_card(content: str) -> dict[str, Any]:
     """Cron 推送用的极简静态卡片 — schema 2.0，仅 markdown 内容."""
     if not content.strip():
         return _static_card_shell([])
-    elements = [
-        {"tag": "markdown", "content": chunk}
-        for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES))
-        if chunk.strip()
-    ]
+    elements = [{"tag": "markdown", "content": chunk} for chunk in _static_markdown_chunks(content)]
     card = _static_card_shell(elements)
-    summary = _static_summary(content)
-    if summary:
-        card["config"]["summary"] = {"content": summary}
+    summary = _build_summary(content)
+    if summary["content"]:
+        card["config"]["summary"] = summary
     return card
 
 def build_gateway_card(content: str, *, category: str = "", status_label: str = "", status_emoji: str = "") -> dict[str, Any]:
@@ -145,15 +148,13 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
         })
 
     if content.strip():
-        for chunk in _split_long_text(_downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)):
-            if chunk.strip():
-                elements.append({"tag": "markdown", "content": chunk})
+        elements.extend({"tag": "markdown", "content": chunk} for chunk in _static_markdown_chunks(content))
 
     card = _static_card_shell(elements)
 
-    summary = _static_summary(content) if content.strip() else ""
-    if summary:
-        card["config"]["summary"] = {"content": summary}
+    summary = _build_summary(content)
+    if summary["content"]:
+        card["config"]["summary"] = summary
 
     return card
 

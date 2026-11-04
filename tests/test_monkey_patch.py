@@ -156,6 +156,188 @@ class TestCronDeliveryWrapper:
         assert result == "original_result"
 
 
+class TestCronDeliveryIsolation:
+    """Cron delivery marks only its own send; the shared adapter stays untouched."""
+
+    @staticmethod
+    def _make_adapter_class():
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching.adapter import _wrap_feishu_adapter_send
+
+        plain_sends: list[tuple[str, str]] = []
+
+        class FakeFeishuAdapter:
+            async def send(self, chat_id, content, reply_to=None, metadata=None, **kwargs):
+                plain_sends.append((chat_id, content))
+                return "plain"
+
+        FakeFeishuAdapter.send = _wrap_feishu_adapter_send(FakeFeishuAdapter.send)
+        P._patched_feishu_classes.add(id(FakeFeishuAdapter))
+        return FakeFeishuAdapter, plain_sends
+
+    @staticmethod
+    def _feishu_adapters(adapter):
+        platform = MagicMock()
+        platform.value = "feishu"
+        return {platform: adapter}
+
+    def test_wrapper_leaves_adapter_instance_untouched(self) -> None:
+        from hermes_lark_streaming.patching import _cron_delivery_ctx, _wrap_cron_deliver
+
+        class Adapter:
+            send = "sentinel"
+
+        adapter = Adapter()
+        seen = {}
+
+        def orig(job, content, adapters=None, loop=None, **kwargs):
+            seen["ctx"] = _cron_delivery_ctx.get()
+            seen["send"] = adapter.send
+            return "orig_result"
+
+        result = _wrap_cron_deliver(orig)({"id": "job-1"}, "report", adapters=self._feishu_adapters(adapter))
+
+        assert result == "orig_result"
+        assert seen == {"ctx": {"job_id": "job-1"}, "send": "sentinel"}
+        assert _cron_delivery_ctx.get() is None
+        assert vars(adapter) == {}
+
+    def test_concurrent_session_send_is_not_hijacked(self) -> None:
+        """While a cron send is in flight, another session's send keeps its path."""
+        import asyncio
+        import threading
+
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _wrap_cron_deliver
+
+        FakeFeishuAdapter, plain_sends = self._make_adapter_class()
+        adapter = FakeFeishuAdapter()
+        adapters = self._feishu_adapters(adapter)
+
+        loop = asyncio.new_event_loop()
+        loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+        loop_thread.start()
+
+        cards: list[tuple[str, str]] = []
+        cron_started = threading.Event()
+        release_cron = threading.Event()
+
+        async def _do_cron_deliver(chat_id, content):
+            cards.append((chat_id, content))
+            cron_started.set()
+            await asyncio.get_running_loop().run_in_executor(None, release_cron.wait, 5)
+
+        ctrl = MagicMock()
+        ctrl.enabled = True
+        ctrl._do_cron_deliver = _do_cron_deliver
+        ctrl._sess_get.return_value = None
+
+        def orig(job, content, adapters=None, loop=None, **kwargs):
+            target = next(iter(adapters.values()))
+            return asyncio.run_coroutine_threadsafe(target.send("cron_chat", content), loop).result(5)
+
+        async def other_session_send():
+            P._msg_ctx.set({"event_message_id": "om_other", "card_sent": False})
+            return await adapter.send("user_chat", "agent reply")
+
+        cron_result = {}
+        try:
+            with patch("hermes_lark_streaming.controller.get_controller", return_value=ctrl):
+                cron_thread = threading.Thread(
+                    target=lambda: cron_result.setdefault(
+                        "value",
+                        _wrap_cron_deliver(orig)({"id": "job-1"}, "report", adapters=adapters, loop=loop),
+                    ),
+                )
+                cron_thread.start()
+                assert cron_started.wait(5)
+
+                other = asyncio.run_coroutine_threadsafe(other_session_send(), loop).result(5)
+
+                release_cron.set()
+                cron_thread.join(5)
+        finally:
+            release_cron.set()
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(5)
+            loop.close()
+            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+
+        assert other == "plain"
+        assert plain_sends == [("user_chat", "agent reply")]
+        assert cards == [("cron_chat", "report")]
+        assert "value" in cron_result
+        assert "send" not in vars(adapter)
+
+    @pytest.mark.asyncio
+    async def test_card_failure_falls_back_to_text(self) -> None:
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _cron_delivery_ctx
+
+        FakeFeishuAdapter, plain_sends = self._make_adapter_class()
+        ctrl = MagicMock()
+        ctrl.enabled = True
+
+        async def _boom(chat_id, content):
+            raise RuntimeError("card api down")
+
+        ctrl._do_cron_deliver = _boom
+        token = _cron_delivery_ctx.set({"job_id": "job-1"})
+        try:
+            with patch("hermes_lark_streaming.controller.get_controller", return_value=ctrl):
+                result = await FakeFeishuAdapter().send("cron_chat", "report")
+        finally:
+            _cron_delivery_ctx.reset(token)
+            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+
+        assert result == "plain"
+        assert plain_sends == [("cron_chat", "report")]
+
+    @pytest.mark.asyncio
+    async def test_card_success_suppresses_text(self) -> None:
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _cron_delivery_ctx
+
+        FakeFeishuAdapter, plain_sends = self._make_adapter_class()
+        cards: list[tuple[str, str]] = []
+        ctrl = MagicMock()
+        ctrl.enabled = True
+
+        async def _deliver(chat_id, content):
+            cards.append((chat_id, content))
+
+        ctrl._do_cron_deliver = _deliver
+        token = _cron_delivery_ctx.set({"job_id": "job-1"})
+        try:
+            with patch("hermes_lark_streaming.controller.get_controller", return_value=ctrl):
+                await FakeFeishuAdapter().send("cron_chat", "  report\n")
+        finally:
+            _cron_delivery_ctx.reset(token)
+            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+
+        assert cards == [("cron_chat", "report")]
+        assert plain_sends == []
+
+    @pytest.mark.asyncio
+    async def test_disabled_controller_sends_text(self) -> None:
+        from hermes_lark_streaming import patching as P
+        from hermes_lark_streaming.patching import _cron_delivery_ctx
+
+        FakeFeishuAdapter, plain_sends = self._make_adapter_class()
+        ctrl = MagicMock()
+        ctrl.enabled = False
+        token = _cron_delivery_ctx.set({"job_id": "job-1"})
+        try:
+            with patch("hermes_lark_streaming.controller.get_controller", return_value=ctrl):
+                await FakeFeishuAdapter().send("cron_chat", "report")
+        finally:
+            _cron_delivery_ctx.reset(token)
+            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+
+        assert plain_sends == [("cron_chat", "report")]
+        ctrl._do_cron_deliver.assert_not_called()
+
+
 # ── Context cleanup and interrupt fix tests ──
 
 
@@ -579,7 +761,7 @@ class TestOnDemandRepatchV150:
         repatch_called = {"yes": False, "cls": None}
         orig_apply = P._apply_feishu_adapter_patches
 
-        def fake_apply(cls, *, is_repatch=False):
+        def fake_apply(cls):
             repatch_called["yes"] = True
             repatch_called["cls"] = cls
             P._patched_feishu_classes.add(id(cls))
@@ -619,7 +801,7 @@ class TestOnDemandRepatchV150:
         repatch_called = {"yes": False}
         orig_apply = P._apply_feishu_adapter_patches
 
-        def fake_apply(cls, *, is_repatch=False):
+        def fake_apply(cls):
             repatch_called["yes"] = True
             return True
 
@@ -667,7 +849,7 @@ class TestCreateAdapterHookV160:
         repatch_called = {"yes": False, "cls": None}
         orig_apply = P._apply_feishu_adapter_patches
 
-        def fake_apply(cls, *, is_repatch=False):
+        def fake_apply(cls):
             repatch_called["yes"] = True
             repatch_called["cls"] = cls
             P._patched_feishu_classes.add(id(cls))
@@ -701,7 +883,7 @@ class TestCreateAdapterHookV160:
         repatch_called = {"yes": False}
         orig_apply = P._apply_feishu_adapter_patches
 
-        def fake_apply(cls, *, is_repatch=False):
+        def fake_apply(cls):
             repatch_called["yes"] = True
             return True
 
@@ -730,7 +912,7 @@ class TestCreateAdapterHookV160:
         repatch_called = {"yes": False}
         orig_apply = P._apply_feishu_adapter_patches
 
-        def fake_apply(cls, *, is_repatch=False):
+        def fake_apply(cls):
             repatch_called["yes"] = True
             return True
 
@@ -771,7 +953,7 @@ class TestCreateAdapterHookV160:
         repatch_called = {"yes": False}
         orig_apply = P._apply_feishu_adapter_patches
 
-        def fake_apply(cls, *, is_repatch=False):
+        def fake_apply(cls):
             repatch_called["yes"] = True
             P._patched_feishu_classes.add(id(cls))
             return True

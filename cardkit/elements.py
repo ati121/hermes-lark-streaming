@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .i18n import _T, _i18n, _t
+from .md import _longest_backtick_run
 
 __all__ = [
     'STREAMING_ELEMENT_ID',
@@ -59,7 +60,6 @@ __all__ = [
 
 _IMG_MD_PATTERN = re.compile(r"!\[([^\]]*)\]\((img_[^)\s]+)\)")
 _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
-_RE_BACKTICK_RUN = re.compile(r"`+")
 _RE_MD_SPECIAL = re.compile(r"([`*_{}\[\]<>])")
 # Folded-count rows. The panel builder writes the first two forms, the
 # element-limit safety net used to write only the third.
@@ -1026,7 +1026,7 @@ def _build_reasoning_round_title(
     else:
         color = "orange-300"
 
-    en_label, zh_label = _T["round_n"]
+    _, zh_label = _T["round_n"]
     text = zh_label.format(round_index)  # 用中文格式
     elapsed = _format_elapsed(elapsed_ms) if elapsed_ms > 0 else ""
     if elapsed:
@@ -1115,10 +1115,6 @@ def _format_code_block(content: str, language: str) -> str:
     fence = "`" * max(3, _longest_backtick_run(normalized) + 1)
     return f"{fence}{language}\n{normalized}\n{fence}"
 
-def _longest_backtick_run(value: str) -> int:
-    matches = _RE_BACKTICK_RUN.findall(value)
-    return max((len(m) for m in matches), default=0)
-
 def _escape_md(value: str) -> str:
     return _RE_MD_SPECIAL.sub(r"\\\1", value.replace("\\", "\\\\"))
 
@@ -1149,8 +1145,10 @@ def _build_error_panel(
 
         tech_detail = error_message.strip() if error_message else ""
         if tech_detail:
-            body_content = f"{friendly_zh}\n\n---\n**技术详情**\n```\n{tech_detail}\n```"
-            body_content_en = f"{friendly_en}\n\n---\n**Technical Details**\n```\n{tech_detail}\n```"
+            # The detail can itself contain ``` — fence it with a longer run.
+            detail_block = _format_code_block(tech_detail, "")
+            body_content = f"{friendly_zh}\n\n---\n**技术详情**\n{detail_block}"
+            body_content_en = f"{friendly_en}\n\n---\n**Technical Details**\n{detail_block}"
             body_i18n = _i18n(body_content_en, body_content)
         else:
             body_content = friendly_zh

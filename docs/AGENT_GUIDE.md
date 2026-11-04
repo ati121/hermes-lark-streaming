@@ -296,8 +296,10 @@ chunk 之间时按会话保持开合状态，正确分流。
 `pre_gateway_dispatch`、`on_feishu_normalize`、`on_message_started`、
 `on_message_completed`、`on_message_aborted`、`on_message_interrupted`、
 `on_busy_superseded`、`on_answer_delta`、`on_thinking_delta`、`on_reasoning_delta`、
-`on_tool_updated`、`on_memory_prefetch_updated`、`on_background_review_message`、
-`on_cron_deliver`。编号与职责见 [SKILL.md「Hook 索引」](SKILL.md#9-hook-索引)。
+`on_tool_updated`、`on_memory_prefetch_updated`、`on_background_review_message`。
+编号与职责见 [SKILL.md「Hook 索引」](SKILL.md#9-hook-索引)。Cron 推送不是钩子：
+`_deliver_result` 包装器在投递期间设置 `_cron_delivery_ctx`，由类级
+`FeishuAdapter.send` 补丁识别后发卡片。
 
 ## 入站图片预识别状态
 

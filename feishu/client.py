@@ -11,8 +11,6 @@ import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 import lark_oapi as lark
 from lark_oapi.api.cardkit.v1 import (
@@ -300,7 +298,7 @@ class FeishuClient:
             try:
                 log_id = response.get_log_id() or ""
             except Exception:
-                pass
+                _logger.debug("response.get_log_id failed", exc_info=True)
             if not log_id:
                 # SDK async 路径 bug 兜底：error 是 dict，含 log_id 字段
                 err = getattr(response, 'error', None)
@@ -308,8 +306,7 @@ class FeishuClient:
                     log_id = err.get("log_id", "") or ""
                 elif isinstance(err, str):
                     # error 可能是 JSON 字符串或含 log_id 的文本
-                    import re as _re
-                    m = _re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
+                    m = re.search(r'log_id["\']?\s*[:=]\s*["\']?([A-Za-z0-9]{20,})', err)
                     if m:
                         log_id = m.group(1)
             # v1.1.0: Record API error metrics
@@ -625,29 +622,6 @@ class FeishuClient:
             return str(resp.data.image_key)
         return None
 
-    async def upload_image(self, image_url: str) -> str | None:
-        """下载远程图片并上传到飞书，返回 img_key."""
-        try:
-            loop = asyncio.get_running_loop()
-            data = await loop.run_in_executor(
-                None,
-                self._download_image,
-                image_url,
-            )
-        except Exception:
-            _logger.debug("image upload failed for %s", image_url, exc_info=True)
-            return None
-
-        if data is None:
-            return None
-
-        # v1.3.2 fix (P1-03): wrap the upload call in try/except to match
-        try:
-            return await self._upload_image_file(io.BytesIO(data))
-        except Exception:
-            _logger.debug("image upload (API call) failed for %s", image_url, exc_info=True)
-            return None
-
     async def upload_local_image(self, image_path: str) -> str | None:
         """Upload a local image file to Feishu and return the img_key."""
         import os
@@ -661,17 +635,4 @@ class FeishuClient:
             return await self._upload_image_file(image_file)
         except Exception:
             _logger.debug("local image upload failed for %s", image_path, exc_info=True)
-            return None
-
-    @staticmethod
-    def _download_image(url: str, timeout: int = 15) -> bytes | None:
-        """同步下载图片（在线程池中运行）."""
-        try:
-            req = Request(url, headers={"User-Agent": "hermes-lark-streaming/1.0"})
-            with urlopen(req, timeout=timeout) as resp:
-                if resp.status != 200:
-                    return None
-                return bytes(resp.read())
-        except (URLError, OSError):
-            _logger.debug("image download failed: %s", url)
             return None

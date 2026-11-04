@@ -60,7 +60,9 @@ def shared_store(name: str) -> Any | None:
                 setattr(module, _ANCHOR_ATTR, store)
             except (AttributeError, TypeError):  # pragma: no cover - exotic module proxy
                 continue
-        bucket = store.get(name)
+        # ``setdefault`` is atomic under the GIL: two copies racing here must
+        # end up holding the same bucket, not one each.
+        bucket = store.setdefault(name, {})
         if not isinstance(bucket, dict):
             bucket = {}
             store[name] = bucket

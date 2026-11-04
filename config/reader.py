@@ -349,7 +349,9 @@ class Config:
     @property
     def footer_show_label(self) -> bool:
         sec = self._plugin_sec()
-        footer = sec.get("footer", {})
+        footer = sec.get("footer")
+        if not isinstance(footer, dict):
+            return False
         return _to_bool(footer.get("show_label", False))
 
     @property
@@ -452,7 +454,13 @@ class Config:
             return {}
         try:
             text = config_path.read_text(encoding="utf-8")
-            return yaml.safe_load(text) or {}
+            data = yaml.safe_load(text)
+            if data is None:
+                return {}
+            if not isinstance(data, dict):
+                _logger.warning("HLS: config root in %s%s is not a mapping, using empty config", config_path, context)
+                return {}
+            return data
         except yaml.YAMLError:
             _logger.warning("HLS: config YAML syntax error in %s%s, using empty config", config_path, context)
         except (OSError, UnicodeDecodeError):

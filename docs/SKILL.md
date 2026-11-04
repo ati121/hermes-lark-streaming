@@ -32,7 +32,7 @@
             ├─ reasoning_callback ──── [Hook 6: on_reasoning_delta]
             ├─ tool_progress_callback [Hook 3: on_tool_updated]
             └─ background_review_cb ── [Hook 7: on_background_review]
-Cron: _deliver_result ── [Hook 10: on_cron_deliver] (async)
+Cron: _deliver_result ── [_cron_delivery_ctx → FeishuAdapter.send 发卡片]
 Background: _run_background_task ── [Hook 1/2]
 ```
 
@@ -310,7 +310,7 @@ display:
 | 7 | `on_background_review_message` | sync | 后台审查通知 |
 | 8 | `on_message_aborted` | sync | 消息异常终止 |
 | 9 | `on_message_interrupted` | sync | 新消息打断旧消息 |
-| 10 | `on_cron_deliver` | **async** | Cron 推送卡片 |
+| 10 | ~~`on_cron_deliver`~~ | — | v1.47 移除。Cron 改由 `_deliver_result` 包装器设置 `_cron_delivery_ctx`，类级 `FeishuAdapter.send` 补丁据此发卡片，不再替换共享 adapter 实例的 `send` |
 | 11 | `on_busy_superseded` | sync | agent 忙时收到新消息（Hermes busy 入口，绕过 inbound 路径）：封口当前卡片，后续输出开新卡继续。同一条触发消息只处理一次；可以连续打断（每次开一张新卡，续写映射成链，v1.6.39）。内部事件会被过滤 |
 | — | `pre_gateway_dispatch` | sync→dict | Hermes 原生插件 hook（v1.1.0），实现在 `aowen/`。返回 `{"action":"skip"}` 阻止消息进入 agent，用于 /aowen 命令 |
 | — | `on_memory_prefetch_updated` | sync→bool | 记忆自动预取开始/结束（v1.6.22），由 `patching/memory.py` 触发 |

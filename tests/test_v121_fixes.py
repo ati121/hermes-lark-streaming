@@ -364,7 +364,7 @@ class TestUnavailableCacheLockThreadSafety:
 
 
 class TestCounterPattern:
-    """Test that the counter pattern for bg/cron flags works correctly."""
+    """Test that the counter pattern for the bg flag works correctly."""
 
     def test_counter_increment_decrement(self):
         class FakeAdapter:
@@ -388,16 +388,6 @@ class TestCounterPattern:
         # Zero — guard should see False
         assert not a._hls_bg_sending
 
-    def test_cron_counter(self):
-        class FakeAdapter:
-            pass
-
-        a = FakeAdapter()
-        a._hls_cron_sending = getattr(a, '_hls_cron_sending', 0) + 1
-        assert a._hls_cron_sending == 1
-        a._hls_cron_sending = getattr(a, '_hls_cron_sending', 1) - 1
-        assert a._hls_cron_sending == 0
-
     def test_guard_reads_counter(self):
         """Guard should treat counter > 0 as True, 0 as False."""
         class FakeAdapter:
@@ -405,11 +395,11 @@ class TestCounterPattern:
 
         a = FakeAdapter()
         # No flag set — getattr with default 0
-        result = getattr(a, "_hls_bg_sending", 0) or getattr(a, "_hls_cron_sending", 0)
+        result = getattr(a, "_hls_bg_sending", 0)
         assert not result  # 0 is falsy
 
         a._hls_bg_sending = 2
-        result = getattr(a, "_hls_bg_sending", 0) or getattr(a, "_hls_cron_sending", 0)
+        result = getattr(a, "_hls_bg_sending", 0)
         assert result  # > 0 is truthy
 
 

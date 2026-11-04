@@ -92,7 +92,7 @@ class HermesCompat:
             from importlib.metadata import version
             self.hermes_version = version("hermes-agent")
         except Exception:
-            pass
+            _logger.debug("HLS: hermes-agent distribution metadata unavailable", exc_info=True)
         
         # Try __version__ attribute
         if self.hermes_version == "unknown":
@@ -100,7 +100,7 @@ class HermesCompat:
                 import hermes_cli
                 self.hermes_version = getattr(hermes_cli, "__version__", "unknown")
             except Exception:
-                pass
+                _logger.debug("HLS: hermes_cli version unavailable", exc_info=True)
         
         _logger.info("HLS: Hermes version detected: %s", self.hermes_version)
     
@@ -127,8 +127,7 @@ class HermesCompat:
         else:
             _logger.debug("HLS: AIAgent not available yet")
         
-        # FeishuAdapter — 抽取到 _resolve_feishu_adapter()，
-        # 便于 resolve_feishu_adapter_class_fresh() 复用（v1.4.0: fix deferred loading patch miss）
+        # FeishuAdapter — 真身优先的多路径解析见 _resolve_feishu_adapter()
         self.feishu_adapter_class = self._resolve_feishu_adapter()
         
         # Cron scheduler
@@ -157,10 +156,6 @@ class HermesCompat:
                 return cls
         _logger.debug("HLS: FeishuAdapter not available via any import path")
         return None
-    
-    def resolve_feishu_adapter_class_fresh(self) -> Any | None:
-        """Re-resolve FeishuAdapter class without reusing cached state."""
-        return self._resolve_feishu_adapter()
     
     def _resolve_conversation_loop(self) -> None:
         """Resolve agent.conversation_loop, handling Apple Silicon namespace collision."""

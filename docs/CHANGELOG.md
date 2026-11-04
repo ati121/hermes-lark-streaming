@@ -4,6 +4,67 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.47 (2026-11-04, personal fork)
+
+### Fixed — card lifecycle
+
+- A reply that finished while the card was still being created (or whose first
+  Phase 2 batch failed) had no answer element, and the seal skipped the answer,
+  leaving a footer-only card that still counted as delivered. The seal now
+  inserts the missing panel and answer elements before the footer.
+- A delta landing while Phase 2 was on the wire made Phase 3 replay the Phase 2
+  `add_elements` batch. `_do_unified_flush` is now split into
+  `_flush_interactive`, `_flush_phase2` and `_flush_phase3`, each with its own
+  action list. Phase 2/3 non-API failures restore the panel dirty flags.
+- A duplicate `_do_create_linear_card` while the first create was in flight
+  signalled `_card_ready` with no `card_id`; completion then sent a fallback
+  reply and the late card spun forever. It now leaves readiness to the owner.
+- Seal hardening: network errors in the complete/seal drains no longer abort the
+  seal; a sequence-conflict retry no longer replays a delivered batch (which
+  duplicated the footer); a non-conflict retry error returns False instead of
+  escaping; seal failures are logged. An unexpected completion exception marks
+  the session terminal so it is pruned instead of staying COMPLETING.
+- `footer_show_label` no longer crashes on an empty `footer:` section, and a
+  non-mapping YAML root degrades to an empty config with a warning.
+
+### Fixed — Markdown
+
+- `escape_markdown_asterisks` restores placeholders in one regex pass instead
+  of one full-text replace per placeholder (100 KB bold-heavy text: ~500 ms to
+  ~13 ms under the stream lock).
+- `*` inside `~~~` fences and inside a fence still open mid-stream is no longer
+  escaped; blank lines inside code blocks are no longer collapsed.
+- Cron and gateway static cards split long text without breaking code fences
+  (closed and reopened with the language kept) or table rows (header repeated),
+  and now escape stray `*` per chunk like the streaming path. Their summary
+  gains `i18n_content`.
+- The error panel fences its technical detail with a fence longer than any
+  backtick run inside it.
+
+### Fixed — cron delivery isolation
+
+- Cron delivery no longer swaps `send` on the shared Feishu adapter instance.
+  The `_deliver_result` wrapper sets `_cron_delivery_ctx`; Hermes schedules the
+  send with a copy of that context, so only the cron send becomes a card and
+  concurrent sessions keep their normal path. A card that was sent is never
+  followed by a duplicate text send; card failures log and fall back to text.
+
+### Removed
+
+- Unused `FeishuClient.upload_image` / `_download_image` (unbounded download of
+  arbitrary URLs), the `on_cron_deliver` hook and `on_cron_deliver_async`,
+  `HermesCompat.resolve_feishu_adapter_class_fresh`, the unused `is_repatch`
+  parameter, always-false epoch guards and an unreachable `on_completed` branch.
+- Silent `except Exception: pass` blocks in the adapter patches now log at
+  debug; the create_adapter hook no longer logs "patched" when patching failed.
+
+### Tests
+
+- Full default suite: 1,815 passed.
+- Added `tests/test_seal_lifecycle.py` (10), `tests/test_markdown_fixes.py`
+  (19), cron isolation tests in `tests/test_monkey_patch.py` (5) and config
+  edge cases (3); removed 8 tests of the deleted cron hook.
+
 ## v1.46 (2026-11-04, personal fork)
 
 ### Fixed — hidden reasoning no longer inflates Gemini speed

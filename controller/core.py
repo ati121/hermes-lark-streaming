@@ -27,7 +27,6 @@ from .mixin import (
     ABORTED,
     COMPLETED,
     COMPLETING,
-    CREATION_FAILED,
     TERMINATED,
     ControllerMixin,
 )
@@ -847,13 +846,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         with session._stream_lock:
             if not session.accepts_stream_updates:
                 return
-            epoch = session.create_epoch
-            if session.is_stale_create(epoch):
-                _logger.debug(
-                    "on_compression_started: stale epoch, skipping msg=%s",
-                    (message_id or "?")[:12],
-                )
-                return
 
             # Hermes can emit a start heartbeat more than once.  Preserve the
             # original phase and avoid scheduling a CardKit update for every beat.
@@ -885,13 +877,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         with session._stream_lock:
             if not session.accepts_stream_updates:
-                return
-            epoch = session.create_epoch
-            if session.is_stale_create(epoch):
-                _logger.debug(
-                    "on_compression_completed: stale epoch, skipping msg=%s",
-                    (message_id or "?")[:12],
-                )
                 return
 
             # A first stream/reasoning/answer callback may have moved the session
@@ -931,13 +916,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         with session._stream_lock:
             if not session.accepts_stream_updates:
                 return
-            epoch = session.create_epoch
-            if session.is_stale_create(epoch):
-                _logger.debug(
-                    "on_model_activity: stale epoch, skipping msg=%s",
-                    (message_id or "?")[:12],
-                )
-                return
 
             previous_phase = session._response_phase
 
@@ -964,12 +942,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         with session._stream_lock:
             if not session.accepts_stream_updates:
-                return
-            # Epoch guard: if session entered terminal phase between lookup and
-            # here (concurrent message race), skip to prevent stale writes.
-            epoch = session.create_epoch
-            if session.is_stale_create(epoch):
-                _logger.debug("on_reasoning: stale epoch, skipping msg=%s", (message_id or "?")[:12])
                 return
 
             # Detecting model activity is independent from exposing chain-of-thought.
@@ -1191,11 +1163,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         with session._stream_lock:
             if not session.accepts_stream_updates:
                 return
-            # Epoch guard: prevent stale writes from previous message's callbacks
-            epoch = session.create_epoch
-            if session.is_stale_create(epoch):
-                _logger.debug("on_tool_update: stale epoch, skipping msg=%s", (message_id or "?")[:12])
-                return
 
             is_new_tool = status in ("running", "started", "tool.started")
             if is_new_tool:
@@ -1244,11 +1211,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     "HLS: late answer ignored after seal boundary msg=%s len=%d",
                     (message_id or "?")[:12], len(text or ""),
                 )
-                return
-            # Epoch guard: prevent stale writes from previous message's callbacks
-            epoch = session.create_epoch
-            if session.is_stale_create(epoch):
-                _logger.debug("on_answer: stale epoch, skipping msg=%s", (message_id or "?")[:12])
                 return
 
             # 2026-09-20 (老大要求): 流式文本里带的思考段（<think>/<thinking>/"Reasoning:"）
@@ -1531,12 +1493,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 return False
             message_id = redirected_id or message_id
 
-        # 卡片创建失败 → 交回 gateway 正常回复
-        if session.state in (CREATION_FAILED, TERMINATED):
-            _logger.info("on_completed: msg=%s state=%s, yielding to gateway", (message_id or "?")[:12], session.state)
-            self._cleanup(message_id)
-            return False
-
         # Reconcile the authoritative completion answer and enter COMPLETING
         # under the same lock used by worker-thread stream callbacks. This
         # prevents a stale length snapshot from appending the same final delta
@@ -1621,24 +1577,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
         self._complete_session(session)
         return True
-
-    async def on_cron_deliver_async(
-        self,
-        *,
-        chat_id: str,
-        content: str,
-        loop: asyncio.AbstractEventLoop,
-    ) -> bool:
-        """Cron 推送 — 包装为静态卡片发送，成功返回 True."""
-        if not self.enabled or not content or not chat_id:
-            return False
-        try:
-            await self._do_cron_deliver(chat_id, content)
-            _logger.info("cron card delivered: chat=%s len=%d", chat_id[:12], len(content))
-            return True
-        except Exception:
-            _logger.warning("cron card delivery failed", exc_info=True)
-            return False
 
     def defer_background_review(
         self,
@@ -1764,6 +1702,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 # The seal already scheduled its repair before failing here;
                 # it owns delivery now.
                 return
+            if not session.is_terminal_phase:
+                # Otherwise the session stays COMPLETING forever: only
+                # terminal sessions are pruned.
+                self._fail_creation(session, "_do_linear_complete_with_fallback")
+                self._release_session_data_safe(session, context="failed-complete ")
             session._seal_recovery_fallback_text = ""
             await self._send_card_or_text_fallback(
                 session, fallback_text=_fallback_text,
