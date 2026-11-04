@@ -4,6 +4,27 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.48 (2026-11-04, personal fork)
+
+### Fixed — native list indentation
+
+- Convert literal `•`, `●`, `▪` and `◦` bullets at the start of an item into
+  native Markdown lists, so Feishu handles hanging indentation when long items
+  wrap at different card widths. Keep existing Markdown markers, numbering,
+  nesting, emoji, bold text and links.
+- Apply the same normalization to streamed answers, sealed answers and
+  cron/gateway static cards without adding card elements or hard line breaks.
+- Leave bullets in fenced, inline and indented code, ordinary prose and table
+  cells untouched. Preserve CRLF line endings and multiline item text.
+
+### Tests
+
+- Full default suite: 1,836 passed.
+- Added 21 regression cases in `tests/test_list_indentation.py` for long items,
+  both answer render modes, nested lists, code examples and static cards.
+- Feishu client rendering remains to be tested after upgrading and restarting
+  the gateway; existing cards are not rewritten.
+
 ## v1.47 (2026-11-04, personal fork)
 
 ### Fixed — card lifecycle

@@ -11,6 +11,7 @@ from .i18n import _LOCALES, _T, _i18n
 from .md import (
     _MAX_CRON_TABLES,
     _downgrade_tables,
+    _normalize_list_markers,
     _split_long_text,
     escape_markdown_asterisks,
     optimize_markdown_style,
@@ -90,7 +91,9 @@ def _static_markdown_chunks(content: str) -> list[str]:
     The asterisk escape runs per chunk, after splitting, so every chunk it
     sees has balanced fences.
     """
-    normalized = _downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES)
+    normalized = _normalize_list_markers(
+        _downgrade_tables(optimize_markdown_style(content), limit=_MAX_CRON_TABLES),
+    )
     return [escape_markdown_asterisks(chunk) for chunk in _split_long_text(normalized) if chunk.strip()]
 
 

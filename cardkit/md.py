@@ -33,6 +33,10 @@ _RE_PROTECTED_PLACEHOLDER = re.compile(r'\x00P(\d+)P\x00')
 _RE_BACKTICK_RUN = re.compile(r"`+")
 _RE_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _RE_TABLE_DELIMITER = re.compile(r"^ {0,3}\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
+_RE_LIST_MARKER = re.compile(r"^([ \t]*)([-+*•●▪◦]|[0-9]{1,9}[.)])([ \t]+)(\S.*)$")
+_RE_LIST_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+_RE_THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
+_RE_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)")
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -182,7 +186,81 @@ def render_answer_markdown(text: str, *, final: bool = False, table_limit: int =
     if not text:
         return " "
     rendered = _downgrade_tables(optimize_markdown_style(text), limit=table_limit) if final else text
-    return escape_markdown_asterisks(rendered) or " "
+    return escape_markdown_asterisks(_normalize_list_markers(rendered)) or " "
+
+
+def _normalize_list_markers(text: str) -> str:
+    """Use Feishu's native list syntax so wrapped lines get a hanging indent.
+
+    Literal bullets are plain text, so their wrapped lines start at the card's
+    left edge. Replace them with ``- `` lists; preserve actual Markdown list
+    markers, item text, spacing and nesting, and leave code/table examples alone.
+    This runs on every frame, without adding card elements or hard line wraps.
+    """
+    if not any(marker in text for marker in "•●▪◦"):
+        return text
+
+    result: list[str] = []
+    # (marker indentation, content indentation), in display columns.
+    parents: list[tuple[int, int]] = []
+    fence_char = ""
+    fence_length = 0
+    code_spans = iter(_RE_CODE_SPAN.finditer(text))
+    code_span = next(code_spans, None)
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        line_start = offset
+        offset += len(line)
+        body = line.rstrip("\r\n")
+        indent = len(body[:len(body) - len(body.lstrip(" \t"))].expandtabs(4))
+        fence = _RE_LIST_FENCE.match(body)
+        code_indent = (not parents and indent >= 4) or (
+            parents and indent >= parents[-1][1] + 4
+        )
+        if fence and (fence_char or not code_indent):
+            run, suffix = fence.groups()
+            if not fence_char:
+                if parents and indent < parents[-1][1]:
+                    parents.clear()
+                fence_char, fence_length = run[0], len(run)
+            elif run[0] == fence_char and len(run) >= fence_length and not suffix.strip():
+                fence_char, fence_length = "", 0
+            result.append(line)
+            continue
+        if fence_char or not body.strip():
+            result.append(line)
+            continue
+
+        match = _RE_LIST_MARKER.match(body)
+        if not match or _RE_THEMATIC_BREAK.fullmatch(body):
+            if parents and indent < parents[-1][1]:
+                parents.clear()
+            result.append(line)
+            continue
+
+        marker_start = line_start + match.start(2)
+        while code_span is not None and code_span.end() <= marker_start:
+            code_span = next(code_spans, None)
+        if code_span is not None and code_span.start() <= marker_start < code_span.end():
+            result.append(line)
+            continue
+
+        while parents and indent < parents[-1][0]:
+            parents.pop()
+        # Four-space indentation outside a list is code. Inside a list,
+        # another four spaces beyond the item's content is also code.
+        if (not parents and indent >= 4) or (
+            parents and indent >= parents[-1][1] + 4
+        ):
+            result.append(line)
+            continue
+        if parents and indent == parents[-1][0]:
+            parents.pop()
+        prefix, marker, gap, _ = match.groups()
+        parents.append((indent, len((prefix + marker + gap).expandtabs(4))))
+        native = "-" if marker in "•●▪◦" else marker
+        result.append(line[:match.start(2)] + native + line[match.end(2):])
+    return "".join(result)
 
 
 def split_table_spacing_blocks(text: str) -> list[str]:
