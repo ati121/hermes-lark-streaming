@@ -71,6 +71,20 @@ def test_top_level_fence_ends_list_context() -> None:
     assert render_answer_markdown(source) == source.replace("• 正文", "- 正文")
 
 
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("未闭合 ` 标记\n• 正文", "未闭合 ` 标记\n- 正文"),
+        ("`单反引号\n• 示例\n`` 长度不同\n• 正文", "`单反引号\n- 示例\n`` 长度不同\n- 正文"),
+        ("``较长定界符 `\n• 示例\n结束``\n• 正文", "``较长定界符 `\n• 示例\n结束``\n- 正文"),
+        ("`第一段`\n• 正文\n`第二段\n• 示例\n结束`", "`第一段`\n- 正文\n`第二段\n• 示例\n结束`"),
+        ("``未闭合\n`独立代码段\n• 示例\n结束`\n• 正文", "``未闭合\n`独立代码段\n• 示例\n结束`\n- 正文"),
+    ],
+)
+def test_inline_code_requires_matching_delimiter_lengths(source: str, expected: str) -> None:
+    assert render_answer_markdown(source) == expected
+
+
 def test_bullets_in_prose_tables_escaped_text_and_rules_stay_literal() -> None:
     source = (
         "行内 • 圆点和 `• 代码`\n"

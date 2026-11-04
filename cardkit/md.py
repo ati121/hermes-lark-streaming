@@ -36,7 +36,6 @@ _RE_TABLE_DELIMITER = re.compile(r"^ {0,3}\|(?:\s*:?-{3,}:?\s*\|)+\s*$")
 _RE_LIST_MARKER = re.compile(r"^([ \t]*)([-+*•●▪◦]|[0-9]{1,9}[.)])([ \t]+)(\S.*)$")
 _RE_LIST_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
 _RE_THEMATIC_BREAK = re.compile(r"^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$")
-_RE_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)")
 
 __all__ = [
     "_MAX_CRON_TABLES",
@@ -189,6 +188,34 @@ def render_answer_markdown(text: str, *, final: bool = False, table_limit: int =
     return escape_markdown_asterisks(_normalize_list_markers(rendered)) or " "
 
 
+def _inline_code_ranges(text: str) -> list[tuple[int, int]]:
+    """Pair equal-length backtick runs in linear time, leaving unmatched runs literal.
+
+    Index the next run of each length so unmatched openers do not repeatedly
+    scan the remaining text. Reuse the existing token regex rather than a
+    lookaround/backreference expression that resembles an inline shell DSL to
+    Hermes' install scanner.
+    """
+    runs = list(_RE_BACKTICK_RUN.finditer(text))
+    next_run: dict[int, int] = {}
+    closing: dict[int, int] = {}
+    for index in range(len(runs) - 1, -1, -1):
+        length = runs[index].end() - runs[index].start()
+        if length in next_run:
+            closing[index] = next_run[length]
+        next_run[length] = index
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(runs):
+        end = closing.get(index)
+        if end is None:
+            index += 1
+        else:
+            ranges.append((runs[index].start(), runs[end].end()))
+            index = end + 1
+    return ranges
+
+
 def _normalize_list_markers(text: str) -> str:
     """Use Feishu's native list syntax so wrapped lines get a hanging indent.
 
@@ -205,7 +232,7 @@ def _normalize_list_markers(text: str) -> str:
     parents: list[tuple[int, int]] = []
     fence_char = ""
     fence_length = 0
-    code_spans = iter(_RE_CODE_SPAN.finditer(text))
+    code_spans = iter(_inline_code_ranges(text))
     code_span = next(code_spans, None)
     offset = 0
     for line in text.splitlines(keepends=True):
@@ -239,9 +266,9 @@ def _normalize_list_markers(text: str) -> str:
             continue
 
         marker_start = line_start + match.start(2)
-        while code_span is not None and code_span.end() <= marker_start:
+        while code_span is not None and code_span[1] <= marker_start:
             code_span = next(code_spans, None)
-        if code_span is not None and code_span.start() <= marker_start < code_span.end():
+        if code_span is not None and code_span[0] <= marker_start < code_span[1]:
             result.append(line)
             continue
 

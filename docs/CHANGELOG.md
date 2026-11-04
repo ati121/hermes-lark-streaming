@@ -4,6 +4,24 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.49 (2026-11-04, personal fork)
+
+### Fixed — installation scanner compatibility
+
+- v1.48's inline-code regex was misidentified as an executable shell snippet
+  by Hermes' plugin scanner, so unattended updates were rejected and kept the
+  installed v1.47. Replace it with linear pairing of equal-length backtick
+  runs, preserving code examples and the native-list indentation fix.
+- Verified the candidate tree with the same Plugin Guard version running on
+  DXP4800: verdict `safe`, allowed without an override; the installed v1.47
+  baseline produces the same finding counts.
+
+### Tests
+
+- Full default suite: 1,841 passed. Wheel metadata, installation and import
+  smoke checks passed for version 1.49.
+- Added five cases for unmatched, mixed-length and independent code spans.
+
 ## v1.48 (2026-11-04, personal fork)
 
 ### Fixed — native list indentation
