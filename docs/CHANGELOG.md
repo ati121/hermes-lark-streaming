@@ -4,6 +4,29 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.51 (2026-11-10, personal fork)
+
+### Fixed — clarify callbacks on current Hermes
+
+- Intercept plugin dropdown and text-input actions at Hermes' native synchronous
+  clarify handler, which newer hosts call before the generic card-event hook.
+  Native numbered buttons and "Other" retain the host's behavior.
+- Register sent cards with the adapter's clarify state so callbacks use the
+  host's operator, chat and session checks, and timeout/typed-answer retirement.
+- Return the confirmed card only after the pending waiter accepts the answer;
+  consume adapter state before waking it to avoid duplicate clicks and retirement
+  races. Correct an invalid argument in the older submitted-card fallback.
+
+### Tests
+
+- Cover native dispatch through an SDK callback retained before patching, both
+  choices, free text, form submit, native controls, authorization, invalid
+  options, expired/session-mismatched prompts and concurrent/duplicate answers.
+- Full suite: **1,926 passed**. Real Hermes/SDK isolated dispatch accepted both
+  choices, text and form submission and returned confirmation cards without
+  sending messages. Plugin Guard allowed the candidate with a clean scan;
+  changed files introduce no new Ruff diagnostics.
+
 ## v1.50 (2026-11-04, personal fork)
 
 ### Fixed — spacing after lists

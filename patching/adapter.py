@@ -528,6 +528,18 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
                 if card_msg_id:
                     _clarify_card_msg_ids[clarify_id] = card_msg_id
 
+            # Hermes 0.23+ routes clarify callbacks before _handle_card_action_event.
+            # Register the same state its native cards use for authorization,
+            # session checks and retiring prompts after timeout or a typed reply.
+            native_state = getattr(self_feishu, "_clarify_state", None)
+            if isinstance(native_state, dict) and card_msg_id:
+                native_state[clarify_id] = {
+                    "session_key": session_key,
+                    "message_id": card_msg_id,
+                    "chat_id": chat_id,
+                    "question": question,
+                }
+
             # Register the card in gateway card registry (for edit tracking)
             _register_gateway_card(card_msg_id, chat_id=chat_id, card_id=None, category="clarify")
 
@@ -553,6 +565,74 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
             )
 
     return _intercepted_send_clarify
+
+
+def _wrap_native_clarify_card_action(original_method: Callable) -> Callable:
+    """Handle plugin controls at the host's synchronous dispatch target.
+
+    The SDK may retain an old bound _on_card_action_trigger, but that callback
+    looks up this method on self. Native numeric/other buttons still belong to
+    Hermes; only our dropdown/input/retry tokens are intercepted here.
+    """
+    def _wrapped(self, *, event, action_value, loop):
+        action = action_value.get("hermes_clarify_action")
+        if action not in {"select", "input_submit", "button_submit", "retry_submit"}:
+            return original_method(self, event=event, action_value=action_value, loop=loop)
+
+        cid = str(action_value.get("clarify_id") or "")
+        state_map = getattr(self, "_clarify_state", {})
+        state = state_map.get(cid)
+        if not state:
+            _logger.info("clarify card: native callback has no live card state id=%s", cid[:12])
+            return self._card_response()
+        if self._validate_card_action(event=event, state=state, label="clarify", ident=cid) is None:
+            return self._card_response()
+
+        from tools.clarify_gateway import get_pending, resolve_gateway_clarify
+
+        entry = get_pending(cid)
+        if entry is None or entry.session_key != state.get("session_key"):
+            _logger.info("clarify card: native callback expired or session mismatch id=%s", cid[:12])
+            return self._card_response()
+
+        action_obj = getattr(event, "action", None)
+        if action == "select":
+            option = str(getattr(action_obj, "option", "") or "")
+            with _clarify_lock:
+                choices = list(_clarify_choices.get(cid, []))
+            if not option.isdecimal() or int(option) >= len(choices):
+                return self._card_response()
+            text = choices[int(option)]
+        elif action == "input_submit":
+            text = str(getattr(action_obj, "input_value", "") or "").strip()
+        elif action == "button_submit":
+            values = getattr(action_obj, "form_value", None) or {}
+            text = str(values.get("clarify_input", "") or "").strip() if isinstance(values, dict) else ""
+        else:
+            with _clarify_lock:
+                text = _clarify_selections.get(cid, "")
+        if not text:
+            return self._card_response()
+
+        # This is a locked threading.Event set in Hermes, safe on the SDK thread.
+        # Settle only when the waiter actually accepted this answer. Returning the
+        # card inline avoids a delayed PATCH racing native retire_clarify_card.
+        if state_map.pop(cid, None) is None:
+            return self._card_response()  # another callback or retirement won
+        if not resolve_gateway_clarify(cid, text):
+            return self._card_response()
+        from ..cardkit import build_clarify_confirmed_card
+
+        card = build_clarify_confirmed_card(question=state.get("question", ""), selected=text)
+        with _clarify_lock:
+            for store in (_clarify_choices, _clarify_questions, _clarify_card_msg_ids,
+                          _clarify_selections, _clarify_timestamps):
+                store.pop(cid, None)
+        _logger.info("clarify card: native callback resolved action=%s id=%s", action, cid[:12])
+        return self._card_response(card)
+
+    return _wrapped
+
 
 def _safe_action_value_repr(action_value: Any) -> str:
     """Safely repr an action_value dict for logging (truncated, no secrets)."""
@@ -799,7 +879,7 @@ def _handle_clarify_card_action(
         from ..cardkit import build_clarify_submitted_card
         card_data = build_clarify_submitted_card(
             question=q, selected=selected_text,
-            choices=choices_list, clarify_id=cid,
+            clarify_id=cid,
         )
         response = P2CardActionTriggerResponse()
         card = CallBackCard()

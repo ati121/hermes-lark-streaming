@@ -249,6 +249,7 @@ from .adapter import (  # noqa: E402
     _wrap_feishu_adapter_delete_reaction,
     _wrap_feishu_adapter_send_clarify,
     _wrap_handle_card_action_event,
+    _wrap_native_clarify_card_action,
     _handle_clarify_card_action,
     _REACTION_STATUS_MAP,
     _clarify_choices,
@@ -640,6 +641,7 @@ def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
             ("delete_reaction", _wrap_feishu_adapter_delete_reaction, "_remove_reaction"),
             ("send_clarify", _wrap_feishu_adapter_send_clarify, None),
             ("_handle_card_action_event", _wrap_handle_card_action_event, None),
+            ("_handle_clarify_card_action", _wrap_native_clarify_card_action, None),
         ):
             _outcome = _wrap_method_once(FeishuAdapter, _name, _factory)
             if _outcome == "missing" and _alt:
