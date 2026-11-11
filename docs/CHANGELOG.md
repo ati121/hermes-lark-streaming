@@ -4,6 +4,28 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.52 (2026-11-11, personal fork)
+
+### Fixed — transient failures while sending initial cards
+
+- Apply the existing bounded network/token/transient-API retry policy to IM
+  message creation and replies. An initial connection or TLS failure no longer
+  immediately disables the streaming card for the whole turn.
+- Set one Feishu message UUID per logical delivery and reuse the same request
+  across retries, preserving caller-supplied UUIDs. A lost response after an
+  accepted send can be retried without sending a second card.
+- Keep permanent API errors, IM frequency limits and cancellation fail-fast;
+  sustained failures still reach the existing fallback after three retries.
+
+### Tests
+
+- Cover direct cards, CardKit references, standalone sends and text fallbacks;
+  transient TLS recovery, lost-response deduplication, independent-send UUIDs,
+  bounded failure, permanent rejections, cancellation and controller readiness.
+- Full suite: **1,942 passed**. Installed Hermes/SDK serialization and controller
+  recovery passed in isolation without sending messages. Plugin Guard allowed
+  the candidate with a clean scan; no new changed-file Ruff diagnostics.
+
 ## v1.51 (2026-11-10, personal fork)
 
 ### Fixed — clarify callbacks on current Hermes

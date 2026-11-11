@@ -11,6 +11,7 @@ import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import lark_oapi as lark
 from lark_oapi.api.cardkit.v1 import (
@@ -328,19 +329,27 @@ class FeishuClient:
     async def _card_json(self, payload: Any) -> str:
         return self._dumps(await self._brand_assets.resolve(payload, self.upload_local_image))
 
+    async def _deliver_message(self, operation: str, request: Any, send: Callable) -> str:
+        # Both IM create/reply endpoints deduplicate by body.uuid. Keep one key
+        # across attempts, including a read timeout after Feishu accepted the
+        # message, so transport retries cannot create duplicate cards/replies.
+        if not request.request_body.uuid:
+            request.request_body.uuid = uuid4().hex
+
+        async def _do() -> str:
+            resp = await send(request)
+            self._check(resp, operation)
+            if resp.data and resp.data.message_id:
+                return str(resp.data.message_id)
+            raise FeishuAPIError(f"{operation}: response missing message_id")
+
+        return await self._retry_transient(operation, _do)
+
     async def _create_message(self, operation: str, request: Any) -> str:
-        resp = await self._client.im.v1.message.acreate(request)
-        self._check(resp, operation)
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError(f"{operation}: response missing message_id")
+        return await self._deliver_message(operation, request, self._client.im.v1.message.acreate)
 
     async def _reply_message(self, operation: str, request: Any) -> str:
-        resp = await self._client.im.v1.message.areply(request)
-        self._check(resp, operation)
-        if resp.data and resp.data.message_id:
-            return str(resp.data.message_id)
-        raise FeishuAPIError(f"{operation}: response missing message_id")
+        return await self._deliver_message(operation, request, self._client.im.v1.message.areply)
 
     async def send_card_to_chat(self, chat_id: str, card: dict[str, Any]) -> str:
         """发送独立卡片到聊天（非回复），返回 message_id."""
