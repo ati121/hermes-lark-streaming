@@ -4,6 +4,31 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.54 (2026-11-13, personal fork)
+
+### Fixed — whole-card table budget
+
+- Apply the five-table IM limit across the assembled card rather than treating
+  each Markdown element separately. This covers live updates, final sealing,
+  static fallback and reasoning expansion, including nested panels and locale
+  variants. Extra tables become fenced code with all rows preserved.
+- Recheck cron/gateway cards after chunking; repeating headers for one long
+  table can otherwise create more than five rendered tables in the final card.
+- Recognize CRLF, short delimiters and optional outer pipes, skip fenced code,
+  and use a fence longer than backticks in the downgraded table. Copy rendered
+  containers so source elements and session data are unchanged.
+
+### Tests
+
+- Reproduce a six-table answer across streaming, sealing and static fallback;
+  verify only the original card is updated. Cover nested content, locales,
+  CRLF/code protection, safe fences, preserved rows and long-table chunking.
+- Full suite: **1,980 passed**. Replay of the affected answer passed against the
+  installed Hermes/SDK without sending messages. Feishu accepted creation and
+  final update of an unsent synthetic six-table card with the overflow rendered
+  as code. Plugin Guard allowed the candidate with a clean scan; no new
+  changed-file Ruff diagnostics.
+
 ## v1.53 (2026-11-12, personal fork)
 
 ### Fixed — IM frequency limit 230429

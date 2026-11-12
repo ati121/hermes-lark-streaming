@@ -16,6 +16,7 @@ from .elements import (
     enforce_element_limit,
 )
 from .i18n import _LOCALES, _T, _i18n, _t
+from .md import _enforce_markdown_table_budget
 
 __all__ = [
     'build_streaming_card_v2',
@@ -135,4 +136,6 @@ def build_interactive_card_v2(
     mapped_styles = build_card_text_size_style(text_sizes)
     if mapped_styles:
         card["config"]["style"] = {"text_size": mapped_styles}
-    return _enforce_card_element_limit(card, text_sizes=text_sizes)
+    card = _enforce_card_element_limit(card, text_sizes=text_sizes)
+    card["body"]["elements"] = _enforce_markdown_table_budget(card["body"]["elements"])
+    return card

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
 _MAX_CARD_TABLES = 20  # 流式卡片：20表降级阈值（流式增量内容，飞书宽松执行）
 _MAX_CRON_TABLES = 5   # 静态卡片：5表降级阈值（飞书 Card 2.0 单卡硬限）
+_MAX_INTERACTIVE_TABLES = _MAX_CRON_TABLES  # Whole-card writes share the static-card limit.
 _MAX_CHUNK_CHARS = 2400
 
 # ── Pre-compiled regex patterns (P2-01: avoid recompilation on every call) ──
@@ -20,7 +22,6 @@ _RE_INLINE_CODE = re.compile(r'`[^`]+`')
 _RE_BOLD = re.compile(r'\*{2,3}(?!\s)((?:(?!\*{2,3}).)+?)(?<!\s)\*{2,3}', re.DOTALL)
 _RE_VALID_ITALIC = re.compile(r'(?<![a-zA-Z0-9_])\*(?!\s)((?:(?!\*).)+?)(?<!\s)\*', re.DOTALL)
 _RE_UNPAIRED_ASTERISK = re.compile(r'(?<!\\)\*(?=[^\s*])')
-_RE_TABLE_ROW = re.compile(r"\|.+\|\n\|[-:| ]+\|[\s\S]*?(?=\n\n|\n(?!\|)|$)")
 _RE_IMAGE_REF = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 _RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,}|~{3,})([^\n`]*)\n[\s\S]*?(?:\n\2(?=\n|$)|\Z)")
 _RE_H1_TO_H3 = re.compile(r"^#{1,3} ", re.MULTILINE)
@@ -54,18 +55,46 @@ __all__ = [
 ]
 
 def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
-    """查找代码块外的 markdown 表格，返回 [(start, end, raw), ...]."""
-    code_ranges: list[tuple[int, int]] = []
-    for m in _RE_FENCED_CODE.finditer(text):
-        code_ranges.append((m.start(), m.end()))
-
-    def _in_code(idx: int) -> bool:
-        return any(s <= idx < e for s, e in code_ranges)
-
+    """Find pipe tables outside fenced code, including CRLF and optional edges."""
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
     results: list[tuple[int, int, str]] = []
-    for m in _RE_TABLE_ROW.finditer(text):
-        if not _in_code(m.start()):
-            results.append((m.start(), m.end(), m.group(0)))
+    fence_char, fence_length = "", 0
+    index = 0
+    while index < len(lines):
+        line = lines[index].rstrip("\r\n")
+        fence = _RE_FENCE_LINE.match(line)
+        if fence:
+            run, suffix = fence.groups()
+            if not fence_char:
+                fence_char, fence_length = run[0], len(run)
+            elif run[0] == fence_char and len(run) >= fence_length and not suffix.strip():
+                fence_char, fence_length = "", 0
+            index += 1
+            continue
+        if fence_char or index + 1 >= len(lines) or len(line) - len(line.lstrip(" ")) > 3:
+            index += 1
+            continue
+        delimiter = lines[index + 1].strip()
+        cells = delimiter.strip("|").split("|")
+        if (
+            "|" not in line or "|" not in delimiter
+            or not all(re.fullmatch(r":?-+:?", cell.strip()) for cell in cells)
+        ):
+            index += 1
+            continue
+        end_index = index + 2
+        while end_index < len(lines):
+            row = lines[end_index].rstrip("\r\n")
+            if not row.strip() or "|" not in row or _RE_FENCE_LINE.match(row):
+                break
+            end_index += 1
+        start = offsets[index]
+        end = offsets[end_index - 1] + len(lines[end_index - 1].rstrip("\r\n"))
+        results.append((start, end, text[start:end]))
+        index = end_index
     return results
 
 def _downgrade_tables(text: str, limit: int = _MAX_CARD_TABLES) -> str:
@@ -78,9 +107,65 @@ def _downgrade_tables(text: str, limit: int = _MAX_CARD_TABLES) -> str:
         return text
     result = text
     for start, end, raw in reversed(matches[limit:]):
-        replacement = f"```\n{raw}\n```"
+        fence = "`" * max(3, _longest_backtick_run(raw) + 1)
+        newline = "\r\n" if "\r\n" in raw else "\n"
+        replacement = f"{fence}{newline}{raw}{newline}{fence}"
         result = result[:start] + replacement + result[end:]
     return result
+
+
+def _enforce_markdown_table_budget(elements: list[dict], *, limit: int = _MAX_INTERACTIVE_TABLES) -> list[dict]:
+    """Apply one table budget across a card, independently for each locale.
+
+    Work on copied containers: a rendered card must not mutate a session's
+    saved Markdown, reasoning snapshot or caller-owned elements. Run after
+    chunking, which can repeat a large table's header in multiple elements.
+    """
+    locales = {""}
+
+    def collect(value):
+        if isinstance(value, dict):
+            variants = value.get("i18n_content")
+            if isinstance(variants, dict):
+                locales.update(variants)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(elements)
+    remaining = dict.fromkeys(locales, max(0, limit))
+
+    def visit(value: Any) -> Any:
+        if isinstance(value, list):
+            return [visit(child) for child in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: visit(child) for key, child in value.items()}
+        content = value.get("content")
+        if value.get("tag") not in {"markdown", "lark_md"} or not isinstance(content, str):
+            return result
+        variants = value.get("i18n_content", {})
+        if not isinstance(variants, dict):
+            variants = {}
+        rendered = {}
+        for locale in locales:
+            source = variants.get(locale, content) if locale else content
+            if not isinstance(source, str):
+                source = content
+            count = len(_find_tables_outside_code_blocks(source)) if "|" in source else 0
+            rendered[locale] = _downgrade_tables(source, limit=remaining[locale])
+            remaining[locale] = max(0, remaining[locale] - count)
+        result["content"] = rendered[""]
+        localized = {locale: rendered[locale] for locale in locales if locale and (
+            locale in variants or rendered[locale] != rendered[""]
+        )}
+        if localized:
+            result["i18n_content"] = localized
+        return result
+
+    return visit(elements)
 
 def _strip_invalid_image_keys(text: str) -> str:
     """移除非 img_ 前缀的图片引用."""

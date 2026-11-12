@@ -115,10 +115,12 @@ def _static_card_shell(elements: list[dict], *, streaming_mode: bool | None = No
     config: dict[str, Any] = {"locales": _LOCALES}
     if streaming_mode is not None:
         config["streaming_mode"] = streaming_mode
+    from .md import _enforce_markdown_table_budget
+
     return {
         "schema": "2.0",
         "config": config,
-        "body": {"elements": elements},
+        "body": {"elements": _enforce_markdown_table_budget(elements)},
     }
 
 

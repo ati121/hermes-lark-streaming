@@ -1040,6 +1040,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 preview=False,
             )
             body["elements"] = new_els + strip_reasoning_region(els)
+            from ..cardkit.md import _enforce_markdown_table_budget
+            body["elements"] = _enforce_markdown_table_budget(body["elements"])
             await self._client.update_card(msg_id, new_card)
             snap["card"] = new_card
             _logger.info(
