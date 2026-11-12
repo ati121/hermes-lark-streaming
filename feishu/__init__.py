@@ -15,6 +15,8 @@ from .client import (  # noqa: F401
     CARDKIT_ELEMENT_NOT_FOUND_ALT,
     MSG_NOT_FOUND,
     IM_FREQUENCY_LIMIT,
+    IM_FREQUENCY_LIMITS,
+    is_frequency_limit,
     CARDKIT_TRANSIENT_CODES,
 )
 from .guard import (  # noqa: F401
@@ -40,6 +42,8 @@ __all__ = [
     "CARDKIT_ELEMENT_NOT_FOUND_ALT",
     "MSG_NOT_FOUND",
     "IM_FREQUENCY_LIMIT",
+    "IM_FREQUENCY_LIMITS",
+    "is_frequency_limit",
     "CARDKIT_TRANSIENT_CODES",
     "UnavailableGuard",
     "mark_unavailable",

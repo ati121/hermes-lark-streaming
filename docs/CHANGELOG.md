@@ -4,6 +4,30 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.53 (2026-11-12, personal fork)
+
+### Fixed — IM frequency limit 230429
+
+- Recognize both `230020` and `230429` as IM frequency limits through one
+  shared predicate. Preserve the existing `IM_FREQUENCY_LIMIT` constant for
+  callers that use the original code.
+- Apply streaming cooldown, opt-in terminal backoff and delayed original-card
+  repair to both codes. A `230429` seal rejection no longer immediately sends
+  a second result card while leaving the first card frozen.
+- Keep streaming API calls and message creation fail-fast on frequency limits;
+  only terminal sealing opts into the longer retry budget. Persistent rejection
+  still reaches the existing single fallback after bounded repair is exhausted.
+
+### Tests
+
+- Exercise both codes across retry policy, streaming cooldown, repair success,
+  exhaustion, stale snapshots and cleanup. Drive real client error responses
+  through terminal retry and delayed repair, checking that only the original
+  card is updated and no duplicate reply is sent.
+- Full suite: **1,959 passed**. Installed Hermes/SDK replay recovered the
+  original card for both codes without network sends. Plugin Guard allowed
+  the candidate with a clean scan; no new changed-file Ruff diagnostics.
+
 ## v1.52 (2026-11-11, personal fork)
 
 ### Fixed — transient failures while sending initial cards

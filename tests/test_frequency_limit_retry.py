@@ -21,7 +21,6 @@ from hermes_lark_streaming.feishu.client import (
     CARDKIT_TRANSIENT_CODES,
     FeishuAPIError,
     FeishuClient,
-    IM_FREQUENCY_LIMIT,
     _is_frequency_limit,
 )
 
@@ -56,20 +55,22 @@ def _always_fail(code: int):
     return _do, calls
 
 
-def test_frequency_limit_is_not_in_the_transient_set() -> None:
-    """230020 不能混进默认重试集合 —— 否则流式热路径也会开始退避等待."""
-    assert IM_FREQUENCY_LIMIT not in CARDKIT_TRANSIENT_CODES
-    assert _is_frequency_limit(FeishuAPIError("x", code=IM_FREQUENCY_LIMIT))
+@pytest.mark.parametrize("code", [230020, 230429])
+def test_frequency_limit_is_not_in_the_transient_set(code) -> None:
+    """Both IM limits need opt-in backoff, not the streaming hot-path retries."""
+    assert code not in CARDKIT_TRANSIENT_CODES
+    assert _is_frequency_limit(FeishuAPIError("x", code=code))
     assert not _is_frequency_limit(FeishuAPIError("x", code=2200))
 
 
 @pytest.mark.asyncio
-async def test_frequency_limit_not_retried_by_default(monkeypatch) -> None:
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_frequency_limit_not_retried_by_default(monkeypatch, code) -> None:
     """默认（流式刷新）撞频控：一次就抛，不 await 任何退避."""
     client = _client()
     rec = _SleepRecorder()
     monkeypatch.setattr(asyncio, "sleep", rec)
-    _do, calls = _always_fail(IM_FREQUENCY_LIMIT)
+    _do, calls = _always_fail(code)
 
     with pytest.raises(FeishuAPIError):
         await client._retry_transient("update_card", _do)
@@ -79,7 +80,8 @@ async def test_frequency_limit_not_retried_by_default(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_frequency_limit_retried_when_delays_given(monkeypatch) -> None:
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_frequency_limit_retried_when_delays_given(monkeypatch, code) -> None:
     """终态封口：显式传入长退避序列后才重试，第三次成功即返回."""
     client = _client()
     rec = _SleepRecorder()
@@ -89,7 +91,7 @@ async def test_frequency_limit_retried_when_delays_given(monkeypatch) -> None:
     async def _do():
         calls["n"] += 1
         if calls["n"] < 3:
-            raise FeishuAPIError("boom", code=IM_FREQUENCY_LIMIT)
+            raise FeishuAPIError("boom", code=code)
         return "ok"
 
     result = await client._retry_transient(
@@ -104,12 +106,13 @@ async def test_frequency_limit_retried_when_delays_given(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_frequency_limit_exhausts_and_raises(monkeypatch) -> None:
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_frequency_limit_exhausts_and_raises(monkeypatch, code) -> None:
     """全部退避用完仍失败：抛出，总调用次数 = 重试次数 + 1."""
     client = _client()
     rec = _SleepRecorder()
     monkeypatch.setattr(asyncio, "sleep", rec)
-    _do, calls = _always_fail(IM_FREQUENCY_LIMIT)
+    _do, calls = _always_fail(code)
 
     with pytest.raises(FeishuAPIError):
         await client._retry_transient(

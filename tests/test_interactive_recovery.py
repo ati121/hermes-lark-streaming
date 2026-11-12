@@ -56,8 +56,8 @@ async def card_session(request):
     ctrl._sess_clear()
 
 
-def frequency_error():
-    return FeishuAPIError("single message updated too frequently", code=IM_FREQUENCY_LIMIT)
+def frequency_error(code=IM_FREQUENCY_LIMIT):
+    return FeishuAPIError("single message updated too frequently", code=code)
 
 
 def assert_static(card):
@@ -91,11 +91,12 @@ async def test_interactive_throttle_has_independent_floor(card_session, configur
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_coalesces_dirty_and_forced_flushes(card_session):
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_rate_limit_coalesces_dirty_and_forced_flushes(card_session, code):
     ctrl, session = card_session
     session.state = STREAMING
     session._first_flush_done = True
-    ctrl._client.update_card.side_effect = [frequency_error(), None]
+    ctrl._client.update_card.side_effect = [frequency_error(code), None]
     await session.flush.flush_now(lambda: ctrl._do_unified_flush(session))
     assert session._first_flush_done is True
     assert session.unified_state.answer_dirty is True
@@ -129,7 +130,8 @@ async def test_network_failure_keeps_first_flush_and_dirty(card_session):
 
 
 @pytest.mark.asyncio
-async def test_repair_success_sends_no_static_reply(card_session, monkeypatch):
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_repair_success_sends_no_static_reply(card_session, monkeypatch, code):
     """A repair that lands must not leave a second copy of the answer.
 
     生产复现（DXP4800 2026-10-20）：封口撞 230020 后静态兜底卡先发出，
@@ -137,8 +139,8 @@ async def test_repair_success_sends_no_static_reply(card_session, monkeypatch):
     """
     ctrl, session = card_session
     original_id = session.card_msg_id
-    monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0,))
-    ctrl._client.update_card.side_effect = [frequency_error(), None]
+    monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0, 0))
+    ctrl._client.update_card.side_effect = [frequency_error(code), frequency_error(code), None]
     await ctrl._do_linear_complete_with_fallback(session)
     assert session.state == CREATION_FAILED
     assert session.unified_state is None
@@ -157,16 +159,18 @@ async def test_repair_success_sends_no_static_reply(card_session, monkeypatch):
     assert newer.state == STREAMING
     assert ctrl._client.update_card.await_args.args[0] == original_id
     assert session.fallback_card is None
+    assert ctrl._client.update_card.await_count == 3
     assert ctrl._client.reply_card.await_count == 0
     assert ctrl._client.reply_text.await_count == 0
 
 
 @pytest.mark.asyncio
-async def test_repair_exhaustion_sends_static_card_once(card_session, monkeypatch):
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_repair_exhaustion_sends_static_card_once(card_session, monkeypatch, code):
     """修复彻底失败时才补一张静态卡，且只补一张。"""
     ctrl, session = card_session
     monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0, 0, 0))
-    ctrl._client.update_card.side_effect = frequency_error()
+    ctrl._client.update_card.side_effect = frequency_error(code)
     await ctrl._do_linear_complete_with_fallback(session)
     ctrl._client.reply_card.assert_not_awaited()
     await drain_recovery(session)
@@ -177,6 +181,51 @@ async def test_repair_exhaustion_sends_static_card_once(card_session, monkeypatc
     assert ctrl._client.reply_card.await_args.args[0] == session.message_id
     assert_static(ctrl._client.reply_card.await_args.args[1])
     assert "hls_body" in json.dumps(ctrl._client.reply_card.await_args.args[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rejections", [2, 7])
+async def test_230429_sdk_response_reaches_retry_and_repair_without_second_card(
+    card_session, monkeypatch, rejections,
+):
+    """Use the real API client through sealing, backoff and delayed repair."""
+    ctrl, session = card_session
+    real_client = object.__new__(FeishuClient)
+    rejected = SimpleNamespace(
+        success=lambda: False, code=230429, msg="This operation triggers the frequency limit.",
+        get_log_id=lambda: "synthetic-log-id",
+    )
+    accepted = SimpleNamespace(success=lambda: True)
+    patch_message = AsyncMock(side_effect=[rejected] * rejections + [accepted])
+    real_client._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(
+        message=SimpleNamespace(apatch=patch_message),
+    )))
+    real_client._card_json = AsyncMock(side_effect=json.dumps)
+    real_client.reply_card = AsyncMock()
+    real_client.reply_text = AsyncMock()
+    ctrl._client = real_client
+    original_sleep = asyncio.sleep
+    delays = []
+
+    async def fast_sleep(delay):
+        delays.append(delay)
+        await original_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0, 0))
+    await ctrl._do_linear_complete_with_fallback(session)
+    if rejections > 5:
+        assert session.state == CREATION_FAILED
+        real_client.reply_card.assert_not_awaited()
+        await drain_recovery(session)
+        assert delays[:5] == [1.0, 2.0, 4.0, 8.0, 16.0]
+    else:
+        assert delays == [1.0, 2.0]
+    assert session.state == COMPLETED
+    assert patch_message.await_count == rejections + 1
+    assert all(call.args[0].message_id == session.card_msg_id for call in patch_message.await_args_list)
+    real_client.reply_card.assert_not_awaited()
+    real_client.reply_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -194,10 +243,11 @@ async def test_recovery_is_bounded_and_never_resends_fallback(card_session, monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["replace_session", "replace_card", "abort", "delete", "epoch"])
-async def test_recovery_skips_stale_snapshot(card_session, monkeypatch, change):
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_recovery_skips_stale_snapshot(card_session, monkeypatch, change, code):
     ctrl, session = card_session
     monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0,))
-    ctrl._client.update_card.side_effect = frequency_error()
+    ctrl._client.update_card.side_effect = frequency_error(code)
     await ctrl._do_linear_complete_with_fallback(session)
     if change == "replace_session":
         ctrl._sess_put(session.message_id, CardSession(
@@ -217,9 +267,10 @@ async def test_recovery_skips_stale_snapshot(card_session, monkeypatch, change):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("clear_all", [False, True])
-async def test_cleanup_cancels_pending_recovery(card_session, clear_all):
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_cleanup_cancels_pending_recovery(card_session, clear_all, code):
     ctrl, session = card_session
-    ctrl._client.update_card.side_effect = frequency_error()
+    ctrl._client.update_card.side_effect = frequency_error(code)
     await ctrl._do_linear_complete_with_fallback(session)
     task = session.seal_task
     assert task is not None

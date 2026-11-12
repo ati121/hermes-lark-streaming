@@ -111,6 +111,7 @@ MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
 # 与 CardKit 那组码不同源，故不放进 CARDKIT_TRANSIENT_CODES —— 详见
 # _retry_transient 的 frequency_limit_delays 参数。
 IM_FREQUENCY_LIMIT = 230020
+IM_FREQUENCY_LIMITS = frozenset({IM_FREQUENCY_LIMIT, 230429})
 
 # v1.3.1 fix: 300315 错误码有两种含义：
 _RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
@@ -168,13 +169,16 @@ class FeishuClientConfig:
             raise ValueError("app_secret is required")
 
 def _is_frequency_limit(e: FeishuAPIError) -> bool:
-    """230020: 飞书 IM 接口频控（也可能是单条消息更新过于频繁）.
+    """230020/230429: 飞书 IM 接口频控（含单条消息更新过于频繁）.
 
     这个码默认不重试 —— 它的成因是"这一秒发太多了"，而插件最密集的调用
     恰恰是流式刷新：那些渲染下一轮就会被更新的内容覆盖，为它们退避等待
     只会把刷新队列越堆越长。只有终态封口那种"一次机会"的调用才值得等。
     """
-    return e.code == IM_FREQUENCY_LIMIT
+    return e.code in IM_FREQUENCY_LIMITS
+
+
+is_frequency_limit = _is_frequency_limit
 
 def _is_transient_error(e: FeishuAPIError) -> bool:
     """判断 FeishuAPIError 是否为 CardKit 瞬态错误（可重试）."""
@@ -217,7 +221,7 @@ class FeishuClient:
     ) -> Any:
         """执行协程，遇到 CardKit 瞬态错误时自动重试.
 
-        frequency_limit_delays: 只有显式传入时，IM 频控（230020）才算可重试，
+        frequency_limit_delays: 只有显式传入时，IM 频控（230020/230429）才算可重试，
         并按这条更长的序列退避；默认 None 表示频控直接抛出。这个默认值是有意
         的 —— 流式刷新撞上限流时应该放弃本轮，让下一轮渲染覆盖掉，而不是在
         热路径上阻塞几秒把刷新越堆越多（见 _is_frequency_limit 的注释）。
@@ -433,7 +437,7 @@ class FeishuClient:
     ) -> None:
         """PATCH 更新已发送的卡片（IM PATCH 通道）.
 
-        retry_frequency_limit: 撞上飞书 IM 频控（230020）时是否退避重试。
+        retry_frequency_limit: 撞上飞书 IM 频控（230020/230429）时是否退避重试。
         流式刷新保持 False；只有终态封口那种「只有一次机会、失败就永久卡住」
         的调用才传 True。
         """

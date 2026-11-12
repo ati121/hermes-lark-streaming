@@ -108,7 +108,7 @@ async def test_persistent_connection_failure_has_bounded_retries(delivery):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", [230001, 230002, 230020])
+@pytest.mark.parametrize("code", [230001, 230002, 230020, 230429])
 async def test_permanent_errors_and_im_throttling_are_not_retried(delivery, code):
     delivery.reply.return_value = response(code=code)
     with pytest.raises(FeishuAPIError) as error:

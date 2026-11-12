@@ -30,9 +30,9 @@ from ..cardkit.md import (
 from ..feishu import (
     CARDKIT_SEQUENCE_CONFLICT,
     CARDKIT_STREAMING_CLOSED,
-    IM_FREQUENCY_LIMIT,
     FeishuAPIError,
     is_element_not_found_error,
+    is_frequency_limit,
     is_schema_error,
     is_terminal_api_code,
     is_unavailable,
@@ -781,7 +781,7 @@ class UnifiedControllerMixin:
                 "interactive card update failed: %s msg=%s",
                 e, (session.card_msg_id or "?")[:12],
             )
-            if isinstance(e, FeishuAPIError) and e.code == IM_FREQUENCY_LIMIT:
+            if isinstance(e, FeishuAPIError) and is_frequency_limit(e):
                 # Coalesce all updates rejected by IM frequency limits and
                 # retry only after the provider's rejection window cools.
                 session.flush.set_cooldown(_INTERACTIVE_COOLDOWN_SEC)
@@ -1916,7 +1916,7 @@ class UnifiedControllerMixin:
                 )
                 session.fallback_card = card
             self._fail_creation(session, "_do_interactive_linear_complete_seal_failed")
-            if isinstance(e, FeishuAPIError) and e.code == IM_FREQUENCY_LIMIT and card:
+            if isinstance(e, FeishuAPIError) and is_frequency_limit(e) and card:
                 self._schedule_interactive_seal_recovery(session, message_id, card)
             self._release_session_data(session)
             return False
@@ -1990,7 +1990,7 @@ class UnifiedControllerMixin:
                     if is_terminal_api_code(e.code):
                         session.guard.terminate("interactive_seal_recovery", err=e)
                         return
-                    if e.code != IM_FREQUENCY_LIMIT:
+                    if not is_frequency_limit(e):
                         _logger.warning("interactive seal recovery rejected", exc_info=True)
                         return
                     continue
