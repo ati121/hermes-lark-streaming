@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -23,9 +22,6 @@ _stream_timing = shared_object(
     "speed.stream_timing", lambda: ContextVar("hls_stream_timing", default=None),
 )
 _observer_lock = shared_object("speed.observer_lock", Lock)
-_session_speed = shared_object("speed.session_totals", OrderedDict)
-_session_speed_lock = shared_object("speed.session_totals.lock", Lock)
-_SESSION_SPEED_LIMIT = 64
 _MIN_DECODE_SECONDS = 1.0
 _MAX_DECODE_TPS = 10000.0
 
@@ -295,13 +291,6 @@ class RequestTotals:
         with self._lock:
             self.requests += 1
 
-    def reset(self) -> None:
-        with self._lock:
-            self.requests = 0
-            self.measured = 0
-            self.output_tokens = 0
-            self.seconds = 0.0
-
     def record(self, output: int | None, seconds: float) -> None:
         with self._lock:
             if output is None or not math.isfinite(seconds) or seconds <= 0:
@@ -310,140 +299,43 @@ class RequestTotals:
             self.output_tokens += output
             self.seconds += seconds
 
-    def footer(self, prefix: str = "speed") -> dict[str, int | float]:
+    def footer(self) -> dict[str, int | float]:
         with self._lock:
             result: dict[str, int | float] = {
-                f"{prefix}_requests": self.measured,
-                f"{prefix}_total_requests": self.requests,
+                "speed_requests": self.measured,
+                "speed_total_requests": self.requests,
             }
             # Keep every measured request in both sums. The renderer labels a
             # subset explicitly instead of hiding the entire rate.
             if self.measured:
                 result.update(
-                    **{
-                        f"{prefix}_output_tokens": self.output_tokens,
-                        f"{prefix}_request_seconds": self.seconds,
-                    },
+                    speed_output_tokens=self.output_tokens,
+                    speed_request_seconds=self.seconds,
                 )
             return result
-
-
-@dataclass
-class SessionSpeedTotals:
-    """Lifetime and post-compaction windows for one Hermes session."""
-
-    session: RequestTotals = field(default_factory=RequestTotals)
-    since_compaction: RequestTotals = field(default_factory=RequestTotals)
 
 
 def _totals_for_context(ctx: dict) -> RequestTotals:
     return ctx.setdefault("_speed_totals", RequestTotals())
 
 
-def _session_speed_for(session_id: str) -> SessionSpeedTotals | None:
-    if not session_id:
-        return None
-    with _session_speed_lock:
-        totals = _session_speed.get(session_id)
-        if totals is None:
-            totals = SessionSpeedTotals()
-            _session_speed[session_id] = totals
-            while len(_session_speed) > _SESSION_SPEED_LIMIT:
-                _session_speed.popitem(last=False)
-        else:
-            _session_speed.move_to_end(session_id)
-        return totals
-
-
-def _attach_session_speed(ctx: dict, session_id: str) -> None:
-    """Share one lifetime accumulator across every top-level turn."""
-    totals = _session_speed_for(str(session_id or ""))
-    if totals is None:
-        return
-    ctx["_speed_session_totals"] = totals.session
-    ctx["_speed_compaction_totals"] = totals.since_compaction
-
-
-def _reset_compaction_speed(session_id: str) -> None:
-    """Start a fresh recent window without discarding lifetime totals."""
-    key = str(session_id or "")
-    if not key:
-        return
-    with _session_speed_lock:
-        totals = _session_speed.get(key)
-    if totals is not None:
-        totals.since_compaction.reset()
-
-
-def _clear_session_speed(session_id: str | None = None) -> None:
-    """Drop one or every session accumulator; used by reset paths and tests."""
-    with _session_speed_lock:
-        if session_id is None:
-            _session_speed.clear()
-        else:
-            _session_speed.pop(str(session_id), None)
-
-
-def _speed_targets(ctx: dict | None, agent: Any) -> tuple[RequestTotals, ...]:
-    if ctx is not None:
-        values = (
-            _totals_for_context(ctx),
-            ctx.get("_speed_session_totals"),
-            ctx.get("_speed_compaction_totals"),
-        )
-    else:
-        values = (
-            getattr(agent, "_hls_speed_totals", None),
-            getattr(agent, "_hls_speed_session_totals", None),
-            getattr(agent, "_hls_speed_compaction_totals", None),
-        )
-    targets: list[RequestTotals] = []
-    seen: set[int] = set()
-    for value in values:
-        if not isinstance(value, RequestTotals) or id(value) in seen:
-            continue
-        seen.add(id(value))
-        targets.append(value)
-    return tuple(targets)
-
-
 def _speed_footer(ctx: dict) -> dict[str, int | float]:
     turn = ctx.get("_speed_totals")
-    session = ctx.get("_speed_session_totals")
-    recent = ctx.get("_speed_compaction_totals")
-
-    if isinstance(session, RequestTotals) and session.requests:
-        primary = session
-        scope = "session"
-    elif isinstance(turn, RequestTotals):
-        primary = turn
-        scope = "turn"
-    else:
+    if not isinstance(turn, RequestTotals):
         return {}
 
-    result = primary.footer("speed")
-    if isinstance(turn, RequestTotals) and turn is not primary:
-        result["speed_api_requests"] = turn.requests
-        result.update(turn.footer("speed_turn"))
-    if (
-        isinstance(recent, RequestTotals)
-        and recent is not primary
-        and recent is not turn
-        and recent.requests
-    ):
-        result.update(recent.footer("speed_recent"))
-
+    result = turn.footer()
     measured = int(result.get("speed_requests", 0) or 0)
     requests = int(result.get("speed_total_requests", 0) or 0)
     if measured != requests:
         _logger.info(
-            "HLS: speed partial scope=%s measured=%s requests=%s",
-            scope, measured, requests,
+            "HLS: speed partial scope=turn measured=%s requests=%s",
+            measured, requests,
         )
     else:
         _logger.info(
-            "HLS: speed measured scope=%s requests=%s output=%s decode_seconds=%.3f",
-            scope, measured, result.get("speed_output_tokens", 0),
+            "HLS: speed measured scope=turn requests=%s output=%s decode_seconds=%.3f",
+            measured, result.get("speed_output_tokens", 0),
             result.get("speed_request_seconds", 0.0),
         )
     return result
@@ -461,8 +353,11 @@ def _wrap_api_usage(agent: Any, original: Callable) -> Callable:
             _logger.debug("HLS: speed skip auxiliary role=%s", role)
             return original(*args, **kwargs)
         ctx = _msg_ctx.get()
-        targets = _speed_targets(ctx, agent)
-        if not targets:
+        totals = (
+            _totals_for_context(ctx) if ctx is not None
+            else getattr(agent, "_hls_speed_totals", None)
+        )
+        if not isinstance(totals, RequestTotals):
             return original(*args, **kwargs)
         active = _active_calls.get()
         if id(agent) in active:
@@ -470,8 +365,7 @@ def _wrap_api_usage(agent: Any, original: Callable) -> Callable:
         token = _active_calls.set((*active, id(agent)))
         timing = StreamTiming(str(getattr(agent, "session_id", None) or ""))
         timing_token = _stream_timing.set(timing)
-        for totals in targets:
-            totals.start()
+        totals.start()
         try:
             response = original(*args, **kwargs)
             output, seconds = None, 0.0
@@ -479,16 +373,14 @@ def _wrap_api_usage(agent: Any, original: Callable) -> Callable:
                 output, seconds = timing.decode(_snapshot_usage(_field(response, "usage")))
             except Exception:
                 _logger.debug("HLS: response usage unavailable for speed", exc_info=True)
-            for totals in targets:
-                totals.record(output, seconds)
+            totals.record(output, seconds)
             _logger.debug(
                 "HLS: speed request measured=%s output=%s decode_seconds=%.3f streams=%d events=%d",
                 output is not None, output, seconds, timing.streams, len(timing.events),
             )
             return response
         except BaseException:
-            for totals in targets:
-                totals.record(None, 0.0)
+            totals.record(None, 0.0)
             raise
         finally:
             _stream_timing.reset(timing_token)

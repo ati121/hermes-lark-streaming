@@ -13,11 +13,7 @@ from . import (
     _session_contexts_lock,
 )
 from .memory import _maybe_wrap_memory_prefetch
-from .usage import (
-    _maybe_wrap_api_usage,
-    _reset_compaction_speed,
-    _totals_for_context,
-)
+from .usage import _maybe_wrap_api_usage, _totals_for_context
 
 
 _TOOL_RESULT_TEXT_MAX = 8000
@@ -132,8 +128,6 @@ def _maybe_wrap_callbacks(agent) -> None:
     if ctx is not None:
         totals = _totals_for_context(ctx)
         ctx["_agent_ref"] = agent
-        agent._hls_speed_session_totals = ctx.get("_speed_session_totals")
-        agent._hls_speed_compaction_totals = ctx.get("_speed_compaction_totals")
         _thread_local_ctx.data = dict(ctx)
 
     # Hermes' ``on_first_delta`` is not the transport-level first event: the
@@ -164,10 +158,6 @@ def _maybe_wrap_callbacks(agent) -> None:
                     "context compression started",
                     "context compression in progress",
                 )):
-                    if _activity.startswith("context compression started"):
-                        _reset_compaction_speed(
-                            str(getattr(agent, "session_id", "") or "")
-                        )
                     from .hooks import on_compression_started
 
                     _compression_eid = _resolve_eid(eid, agent)

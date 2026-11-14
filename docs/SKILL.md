@@ -146,7 +146,7 @@ Hook 11 里封口当前卡片、开一张新卡续写；后续回调带的仍是
 
 **4.19 记忆自动预取状态 (v1.6.22; v1.20 仅 Hermes 端观察)**: `patching/memory.py` 包装 `MemoryManager._prefetch_provider` 的等待边界，统一显示“OpenViking · 查询记忆”。不改 OpenViking 服务端、Compose、启动入口或 provider 的 HTTP 客户端；不猜测内部意图分析与检索的切换，也不显示准备提示。结束或超时后恢复，迟到结束通知不影响新请求；不计入工具调用记录。旧服务端扩展的清理见 [迁移说明](../integrations/README.md)。
 
-**4.20 页脚速度字段 (v1.6.23–v1.6.28)**: `speed` 取最后一次模型调用的可见输出 token 除以时间窗口。窗口优先用可见正文首末块间隔，整段下发时回退到该次调用「首个上游活动 → 末个可见块」；两个窗口都在模型调用边界清零。原始用量由 `patching/usage.py` 在归一化前保存。窗口选择规则见 [AGENT_GUIDE.md「配置项」](AGENT_GUIDE.md#配置项)。
+**4.20 页脚速度字段**: `speed` 按一次用户提问累计所有主模型请求的可测 token 与提供方解码秒数，再用总 token 除以总秒数。同卡内部续接和本次压缩前后的请求继续累计；下一次提问建立独立累计器，即使 `session_id` 不变。辅助请求排除，隐藏 reasoning 与不超过 1 秒的窗口不计入可靠样本；部分可测时显示本轮覆盖率。计时由 `patching/usage.py` 观察 Hermes Relay 原始流。窗口选择规则见 [AGENT_GUIDE.md「配置项」](AGENT_GUIDE.md#配置项)。
 
 **4.21 思考过程块 (v1.6.30)**: 在统一面板之外常显一个 `🫧 思考过程` 按钮。流式期间按钮下方自动跟随最新约两行思考，封口后只留按钮；点按钮展开全部（`REASONING_EXPANDED_LIMIT` 截断），再点收起。会话释放后按钮仍可用：控制器保留最近 `_REASONING_SNAPSHOT_CARDS` 张封口卡的整卡快照，用同一条整卡 PATCH 重渲染；快照被挤掉时回一条提示。仅在 interactive 路径渲染，且需要 `display.show_reasoning: true`。该路径上折叠面板只列工具步骤（`show_reasoning=False`），没有工具调用的回合不渲染面板；CardKit 路径仍由面板承载推理。
 

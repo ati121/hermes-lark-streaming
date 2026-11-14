@@ -4,6 +4,27 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.55 (2026-11-14, personal fork)
+
+### Fixed — speed scoped to each user question
+
+- Compute the footer speed from all measured main-model requests made for the
+  current user question. A later question starts fresh even when Hermes reuses
+  the same session and cached agent; its coverage count is also turn-local.
+- Keep internal continuations and main-model requests on both sides of context
+  compression in the same turn total. Retain auxiliary-call filtering, hidden
+  reasoning handling, short-window rejection and partial-sample coverage.
+- Remove the cross-turn session speed table and its post-compaction window.
+- Regression coverage checks two questions with 12 and 15 requests in one
+  session, a second question with no measurable samples, compression, internal
+  continuations and interrupted turns.
+
+### Tests
+
+- Targeted speed, decode, CardKit, controller, callback and multiplex tests:
+  **456 passed**. Full default suite: **1,980 passed**.
+- No new changed-file Ruff diagnostics; `git diff --check` passes.
+
 ## v1.54 (2026-11-13, personal fork)
 
 ### Fixed — whole-card table budget

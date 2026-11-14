@@ -24,14 +24,9 @@ from hermes_lark_streaming.patching.gateway import (
     _wrap_run_background_task,
 )
 from hermes_lark_streaming.patching.usage import (
-    _SESSION_SPEED_LIMIT,
     RequestTotals,
-    _attach_session_speed,
-    _clear_session_speed,
     _maybe_wrap_api_usage,
     _output_tokens,
-    _reset_compaction_speed,
-    _session_speed,
     _snapshot_usage,
     _speed_footer,
     _totals_for_context,
@@ -46,13 +41,6 @@ def _chat_usage(output=135, reasoning=678, total=839):
         "completion_tokens_details": {"reasoning_tokens": reasoning},
         "total_tokens": total,
     }
-
-
-@pytest.fixture(autouse=True)
-def _isolate_session_speed():
-    _clear_session_speed()
-    yield
-    _clear_session_speed()
 
 
 @pytest.fixture
@@ -166,44 +154,56 @@ def test_weighted_average_includes_all_requests_not_tool_wait(make_agent):
     assert _speed(footer) == "91 t/s"  # Not mean(50, 100) = 75.
 
 
-def test_session_rate_weights_every_top_level_turn(make_agent):
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_turn_measurable", [True, False])
+async def test_same_session_question_has_its_own_weighted_rate(make_agent, second_turn_measurable):
     agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
-    first_ctx = {"message_id": "session-turn-1", "event_message_id": "session-turn-1"}
-    _msg_ctx.set(first_ctx)
-    _attach_session_speed(first_ctx, agent.session_id)
-    _maybe_wrap_callbacks(agent)
-    _call(agent, 1, 3)
 
-    second_ctx = {"message_id": "session-turn-2", "event_message_id": "session-turn-2"}
-    _msg_ctx.set(second_ctx)
-    _attach_session_speed(second_ctx, agent.session_id)
-    agent.response = SimpleNamespace(
-        usage=_chat_usage(output=900, reasoning=0, total=926)
-    )
-    _maybe_wrap_callbacks(agent)
-    _call(agent, 10, 19)
+    async def run(self, message, *args, **kwargs):
+        _maybe_wrap_callbacks(agent)
+        first_turn = message == "first question"
+        agent.nonstream = not first_turn and not second_turn_measurable
+        agent.response = SimpleNamespace(usage=_chat_usage(
+            output=100 if first_turn else 900,
+            reasoning=0, total=126 if first_turn else 926,
+        ))
+        for index in range(12 if first_turn else 15):
+            start = index * 20 + 1
+            seconds = 2 if first_turn else (0.5 if index == 0 else 9)
+            _call(agent, start, start + seconds)
+        return {"final_response": "done"}
 
-    footer = _speed_footer(second_ctx)
-    assert footer["speed_output_tokens"] == 1000
-    assert footer["speed_request_seconds"] == 11
-    assert footer["speed_requests"] == 2
-    assert footer["speed_total_requests"] == 2
-    assert footer["speed_api_requests"] == 1
-    assert footer["speed_turn_output_tokens"] == 900
-    assert footer["speed_turn_request_seconds"] == 9
-    assert _speed(footer) == "91 t/s"
+    wrapped = _wrap_run_agent(run)
+    contexts = []
+    with patch("hermes_lark_streaming.patching.hooks.on_message_completed", return_value=True) as completed:
+        for message in ("first question", "second question"):
+            ctx = {"message_id": message, "event_message_id": message}
+            contexts.append(ctx)
+            _msg_ctx.set(ctx)
+            await wrapped(
+                SimpleNamespace(), message, "", [], SimpleNamespace(), agent.session_id,
+                event_message_id=message,
+            )
 
-
-def test_session_speed_table_evicts_least_recently_used():
-    for index in range(_SESSION_SPEED_LIMIT):
-        _attach_session_speed({}, f"session-{index}")
-    _attach_session_speed({}, "session-0")
-    _attach_session_speed({}, f"session-{_SESSION_SPEED_LIMIT}")
-
-    assert len(_session_speed) == _SESSION_SPEED_LIMIT
-    assert "session-0" in _session_speed
-    assert "session-1" not in _session_speed
-    assert f"session-{_SESSION_SPEED_LIMIT}" in _session_speed
+    first_footer = completed.call_args_list[0].kwargs["tokens"]
+    second_footer = completed.call_args_list[1].kwargs["tokens"]
+    assert first_footer["speed_total_requests"] == 12
+    assert first_footer["speed_requests"] == 12
+    assert first_footer["speed_output_tokens"] == 1200
+    assert first_footer["speed_request_seconds"] == 24
+    assert _speed(first_footer) == "50 t/s"
+    assert second_footer["speed_total_requests"] == 15
+    if second_turn_measurable:
+        assert second_footer["speed_requests"] == 14
+        assert second_footer["speed_output_tokens"] == 12600
+        assert second_footer["speed_request_seconds"] == 126
+        assert _speed(second_footer) == "100 t/s (14/15)"
+    else:
+        assert second_footer["speed_requests"] == 0
+        assert "speed_output_tokens" not in second_footer
+        assert _speed(second_footer) is None
+    assert contexts[0]["_speed_totals"] is not contexts[1]["_speed_totals"]
+    assert _speed(_speed_footer(contexts[0])) == "50 t/s"
 
 
 @pytest.mark.parametrize("auxiliary", [
@@ -214,7 +214,6 @@ def test_auxiliary_requests_never_enter_speed_samples(make_agent, auxiliary):
     agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
     ctx = {"message_id": "auxiliary", "event_message_id": "auxiliary"}
     _msg_ctx.set(ctx)
-    _attach_session_speed(ctx, agent.session_id)
     _maybe_wrap_callbacks(agent)
     _call(agent, 1, 3)
     agent.response = SimpleNamespace(
@@ -229,29 +228,31 @@ def test_auxiliary_requests_never_enter_speed_samples(make_agent, auxiliary):
     assert footer["speed_total_requests"] == 1
 
 
-def test_compaction_resets_recent_window_only(make_agent):
+def test_compaction_keeps_entire_question_rate_and_excludes_auxiliary(make_agent):
     agent = make_agent(_chat_usage(output=100, reasoning=0, total=126))
+    agent._touch_activity = Mock()
     ctx = {"message_id": "compacted", "event_message_id": "compacted"}
     _msg_ctx.set(ctx)
-    _attach_session_speed(ctx, agent.session_id)
     _maybe_wrap_callbacks(agent)
     _call(agent, 1, 3)
-    _reset_compaction_speed(agent.session_id)
 
     agent.response = SimpleNamespace(
         usage=_chat_usage(output=900, reasoning=0, total=926)
     )
-    _call(agent, 10, 19)
+    with patch("hermes_lark_streaming.patching.hooks.on_compression_started"), patch(
+        "hermes_lark_streaming.patching.hooks.on_compression_completed",
+    ):
+        agent._touch_activity("context compression started")
+        _call(agent, 10, 19, call_role="auxiliary:compression")
+        agent._touch_activity("context compression in progress")
+        agent._touch_activity("context compression completed")
+    _call(agent, 100, 109)
 
     footer = _speed_footer(ctx)
     assert footer["speed_output_tokens"] == 1000
     assert footer["speed_request_seconds"] == 11
     assert footer["speed_requests"] == 2
     assert footer["speed_total_requests"] == 2
-    assert footer["speed_recent_output_tokens"] == 900
-    assert footer["speed_recent_request_seconds"] == 9
-    assert footer["speed_recent_requests"] == 1
-    assert footer["speed_recent_total_requests"] == 1
     assert _speed(footer) == "91 t/s"
 
 
