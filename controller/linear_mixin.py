@@ -542,7 +542,7 @@ class UnifiedControllerMixin:
 
             try:
                 reply_to = session.anchor_id or session.message_id
-                standalone = session.message_id.startswith("hls-recovery-")
+                standalone = session.standalone
                 include_hint = False
                 if session.interactive_mode:
                     card = self._build_interactive_linear_card(session)
@@ -1992,11 +1992,11 @@ class UnifiedControllerMixin:
                         return
                     if not is_frequency_limit(e):
                         _logger.warning("interactive seal recovery rejected", exc_info=True)
-                        return
+                        break
                     continue
                 except Exception:
                     _logger.warning("interactive seal recovery failed", exc_info=True)
-                    return
+                    break
                 if still_current():
                     self._finish_interactive_seal(session)
                     _logger.info("interactive seal recovered: msg=%s", message_id[:12])

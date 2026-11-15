@@ -504,10 +504,15 @@ def _maybe_wrap_callbacks(agent) -> None:
             try:
                 from .hooks import on_background_review_message
 
+                review_ctx = _msg_ctx.get()
+                if review_ctx is None:
+                    with _session_contexts_lock:
+                        review_ctx = _session_contexts.get(str(getattr(agent, "session_id", None) or ""))
                 deferred = on_background_review_message(
                     message_id=_eid,
                     text=message,
                     sender=_orig_bg,
+                    chat_id=(review_ctx or {}).get("chat_id", ""),
                 )
                 if deferred:
                     return

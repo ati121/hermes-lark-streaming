@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import threading
 import time
@@ -85,7 +86,7 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
         # On-demand repatch: if this adapter instance's class isn't patched yet
         # (deferred loading edge case), patch it now. O(1) set lookup.
         _cls = type(self_feishu)
-        if id(_cls) not in _patched_feishu_classes:
+        if _cls not in _patched_feishu_classes:
             from . import _apply_feishu_adapter_patches
             _apply_feishu_adapter_patches(_cls)
 
@@ -242,16 +243,21 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
 
     return _intercepted_send
 
-def _register_gateway_card(card_msg_id: str, *, chat_id: str, card_id: str | None, category: str) -> None:
+def _register_gateway_card(
+    card_msg_id: str, *, chat_id: str, card_id: str | None, category: str,
+    card: dict[str, Any] | None = None,
+) -> None:
     """Register a gateway card so edit_message can update it later."""
     if not card_msg_id:
         return
     with _gateway_cards_lock:
+        previous_card = _gateway_cards.get(card_msg_id, {}).get("card")
         _gateway_cards[card_msg_id] = {
             "chat_id": chat_id,
             "card_id": card_id,
             "category": category,
             "registered_at": time.time(),
+            "card": copy.deepcopy(card) if card is not None else previous_card,
         }
         # v1.3.1: prune oldest entries when over capacity
         _GATEWAY_CARDS_MAX = 500
@@ -541,7 +547,9 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
                 }
 
             # Register the card in gateway card registry (for edit tracking)
-            _register_gateway_card(card_msg_id, chat_id=chat_id, card_id=None, category="clarify")
+            _register_gateway_card(
+                card_msg_id, chat_id=chat_id, card_id=None, category="clarify", card=card,
+            )
 
             try:
                 from tools.clarify_gateway import mark_awaiting_text

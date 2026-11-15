@@ -45,6 +45,7 @@ def delivery(monkeypatch):
     ("reply_text", ("anchor", "fallback"), "reply"),
     ("send_card_to_chat", ("chat", {"schema": "2.0"}), "create"),
     ("send_card_by_id_to_chat", ("chat", "card-id"), "create"),
+    ("send_text_to_chat", ("chat", "visible fallback"), "create"),
 ])
 async def test_connection_failure_retries_same_idempotent_request(delivery, method, args, endpoint):
     send = getattr(delivery, endpoint)
@@ -58,6 +59,17 @@ async def test_connection_failure_retries_same_idempotent_request(delivery, meth
     assert first.request_body.uuid
     assert first.body.uuid == second.body.uuid
     delivery.sleep.assert_awaited_once_with(_TRANSIENT_RETRY_DELAYS[0])
+
+
+@pytest.mark.asyncio
+async def test_standalone_text_uses_chat_recipient_and_text_payload(delivery):
+    await delivery.client.send_text_to_chat("target-chat", "visible answer")
+    request = delivery.create.await_args.args[0]
+    assert request.receive_id_type == "chat_id"
+    assert request.body.receive_id == "target-chat"
+    assert request.body.msg_type == "text"
+    assert json.loads(request.body.content) == {"text": "visible answer"}
+    delivery.reply.assert_not_awaited()
 
 
 @pytest.mark.asyncio

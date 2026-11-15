@@ -87,9 +87,14 @@ def on_feishu_normalize(
         event.source = source
 
 @_safe_hook()
-def on_message_started(*, ctrl: Any, message_id: str, chat_id: str, anchor_id: str | None = None) -> None:
+def on_message_started(
+    *, ctrl: Any, message_id: str, chat_id: str, anchor_id: str | None = None,
+    standalone: bool = False,
+) -> None:
     """[注入点 1] 函数开头 — message.started."""
-    ctrl.on_message_started(message_id=message_id, chat_id=chat_id, anchor_id=anchor_id)
+    ctrl.on_message_started(
+        message_id=message_id, chat_id=chat_id, anchor_id=anchor_id, standalone=standalone,
+    )
 
 @_safe_hook(default_return=False)
 def on_message_completed(
@@ -224,9 +229,12 @@ def on_background_review_message(
     message_id: str,
     text: str,
     sender: Callable[[str], Any],
+    chat_id: str = "",
 ) -> bool:
     """[注入点 7] background_review_callback — background.review."""
-    deferred: bool = ctrl.defer_background_review(message_id=message_id, text=text, sender=sender)
+    deferred: bool = ctrl.defer_background_review(
+        message_id=message_id, text=text, sender=sender, chat_id=chat_id,
+    )
     return deferred
 
 @_safe_hook()

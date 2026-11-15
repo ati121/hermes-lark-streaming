@@ -180,7 +180,7 @@ class TestOnMessageStarted:
             on_message_started(message_id="m1", chat_id="c1", anchor_id="a1")
 
         ctrl.on_message_started.assert_called_once_with(
-            message_id="m1", chat_id="c1", anchor_id="a1"
+            message_id="m1", chat_id="c1", anchor_id="a1", standalone=False
         )
 
     def test_delegates_without_anchor_id(self) -> None:
@@ -190,7 +190,7 @@ class TestOnMessageStarted:
             on_message_started(message_id="m1", chat_id="c1")
 
         ctrl.on_message_started.assert_called_once_with(
-            message_id="m1", chat_id="c1", anchor_id=None
+            message_id="m1", chat_id="c1", anchor_id=None, standalone=False
         )
 
     def test_returns_none_when_disabled(self) -> None:
@@ -493,7 +493,7 @@ class TestOnBackgroundReviewMessage:
             )
 
         ctrl.defer_background_review.assert_called_once_with(
-            message_id="m1", text="review text", sender=sender
+            message_id="m1", text="review text", sender=sender, chat_id=""
         )
         assert result is True
 

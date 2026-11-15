@@ -4,6 +4,42 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.56 (2026-11-15, personal fork)
+
+### Fixed — card-first delivery at completion boundaries
+
+- Deliver a static result card when delayed seal repair ends with a network or
+  non-frequency API failure, instead of clearing the held answer without delivery.
+  Successful repair still produces only the original card; stale/deleted sessions
+  do not trigger another reply.
+- Keep reviews accepted before completion inside the final card. Reviews arriving
+  during or after sealing get a separate static notification card with the current
+  device text sizes, without overwriting the completed response.
+- Send background tasks and internal recovery results directly to the chat, both
+  for initial streaming cards and static/text fallbacks. Preserve task IDs for
+  callbacks, and keep independent tasks from interrupting the user's active card.
+- Use the existing context-aware adapter send interception for background tasks
+  instead of temporarily replacing the shared adapter's send method. Suppress
+  duplicate plain replies while preserving concurrent task and foreground routing.
+- Preserve gateway and clarify card contents, controls and configuration when
+  adding or clearing a reaction status. Status edits use the latest saved payload.
+- Plain text remains the last resort after a static card cannot be sent, and
+  reasoning-tag contents are excluded from text fallbacks.
+- Track patched adapter classes with weak references instead of integer IDs,
+  so reloading an adapter cannot skip card/clarify patches when Python reuses
+  a retired class's ID.
+
+### Tests
+
+- Regression coverage checks a review arriving after the final PATCH snapshot,
+  early and post-turn reviews, failed seal repair, internal fallback recipients,
+  concurrent background tasks in both transports, and status edits on gateway and
+  clarify cards, plus adapter class-ID reuse during reload. All remote calls in
+  these regressions are mocked.
+- Full default suite: **2,001 passed**. Wheel version metadata, all 12 changed
+  packaged files and installed imports verified. No new changed-file Ruff
+  diagnostics; `git diff --check` passes.
+
 ## v1.55 (2026-11-14, personal fork)
 
 ### Fixed — speed scoped to each user question

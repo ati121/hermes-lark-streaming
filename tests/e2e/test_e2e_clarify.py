@@ -244,7 +244,7 @@ class TestClarifyDispatchPatch:
                 return None
 
         cls = FakeFeishuAdapterClass
-        P._patched_feishu_classes.discard(id(cls))
+        P._patched_feishu_classes.discard(cls)
 
         try:
             result = P._apply_feishu_adapter_patches(cls)
@@ -256,10 +256,10 @@ class TestClarifyDispatchPatch:
                 f"send_clarify must be wrapped, got {cls.send_clarify.__name__!r}"
             assert cls.send.__name__ == "_intercepted_send", \
                 f"send must be wrapped, got {cls.send.__name__!r}"
-            # And class id must be recorded
-            assert id(cls) in P._patched_feishu_classes
+            # And the actual class must be recorded
+            assert cls in P._patched_feishu_classes
         finally:
-            P._patched_feishu_classes.discard(id(cls))
+            P._patched_feishu_classes.discard(cls)
 
     def test_create_adapter_hook_patches_unpatched_feishu_class_e2e(self) -> None:
         """The v1.6.0 create_adapter hook must patch an unpatched feishu
@@ -287,7 +287,7 @@ class TestClarifyDispatchPatch:
                 return None
 
         cls_b = FakeRealFeishuAdapter
-        P._patched_feishu_classes.discard(id(cls_b))
+        P._patched_feishu_classes.discard(cls_b)
 
         def orig_create_adapter(name, config):
             # Simulate hermes instantiating the deferred-loaded real class
@@ -299,10 +299,10 @@ class TestClarifyDispatchPatch:
             # Simulate gateway calling create_adapter("feishu", config)
             adapter = wrapped_create("feishu", {"app_id": "x"})
             # After hook, the instance's class must be patched
-            assert id(type(adapter)) in P._patched_feishu_classes, \
+            assert type(adapter) in P._patched_feishu_classes, \
                 "create_adapter hook must register the real class in _patched_feishu_classes"
             # And send_clarify on the instance must now be the wrapper
             assert type(adapter).send_clarify.__name__ == "_intercepted_send_clarify", \
                 f"send_clarify must be wrapped after hook, got {type(adapter).send_clarify.__name__!r}"
         finally:
-            P._patched_feishu_classes.discard(id(cls_b))
+            P._patched_feishu_classes.discard(cls_b)

@@ -387,6 +387,22 @@ class FeishuClient:
         )
         return await self._create_message("send_card_by_id_to_chat", request)
 
+    async def send_text_to_chat(self, chat_id: str, text: str) -> str:
+        """Send visible fallback text when there is no platform reply anchor."""
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(self._dumps({"text": text}))
+                .build()
+            )
+            .build()
+        )
+        return await self._create_message("send_text_to_chat", request)
+
     async def reply_card(self, message_id: str, card: dict[str, Any]) -> str:
         """回复消息，返回 message_id."""
         request = (

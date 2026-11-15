@@ -242,6 +242,25 @@ async def test_recovery_is_bounded_and_never_resends_fallback(card_session, monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repair_error", [
+    OSError("repair network unavailable"),
+    FeishuAPIError("repair schema rejected", code=300312),
+])
+async def test_non_frequency_repair_failure_delivers_static_card(card_session, monkeypatch, repair_error):
+    ctrl, session = card_session
+    monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0, 0))
+    ctrl._client.update_card.side_effect = [frequency_error(), repair_error]
+    await ctrl._do_linear_complete_with_fallback(session)
+    ctrl._client.reply_card.assert_not_awaited()
+    await drain_recovery(session)
+    assert ctrl._client.update_card.await_count == 2
+    ctrl._client.reply_card.assert_awaited_once()
+    assert_static(ctrl._client.reply_card.await_args.args[1])
+    ctrl._client.reply_text.assert_not_awaited()
+    assert session._seal_recovery_fallback_text == ""
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["replace_session", "replace_card", "abort", "delete", "epoch"])
 @pytest.mark.parametrize("code", [230020, 230429])
 async def test_recovery_skips_stale_snapshot(card_session, monkeypatch, change, code):

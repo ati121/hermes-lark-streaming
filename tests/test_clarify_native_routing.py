@@ -154,6 +154,37 @@ def test_state_is_retired_before_waking_waiter(native_adapter):
     assert "resolve_filled" in str(click(callback, option="0").card)
 
 
+@pytest.mark.parametrize("via_factory", [False, True])
+def test_recreated_adapter_is_patched_when_class_id_is_reused(monkeypatch, via_factory):
+    from hermes_lark_streaming import patching
+
+    # Model CPython reusing a retired class's address during adapter reload.
+    monkeypatch.setattr(patching, "id", lambda cls: 42, raising=False)
+
+    def new_adapter_class():
+        class Adapter:
+            async def send(self, *args, **kwargs):
+                return "native"
+
+            def _handle_clarify_card_action(self, **kwargs):
+                return "native"
+
+        return Adapter
+
+    retired = new_adapter_class()
+    assert _apply_feishu_adapter_patches(retired)
+    replacement = new_adapter_class()
+    if via_factory:
+        create = patching._wrap_platform_registry_create_adapter(
+            lambda name, config: replacement(),
+        )
+        create("feishu", {})
+    else:
+        assert _apply_feishu_adapter_patches(replacement)
+    assert patching._already_wrapped(replacement.send)
+    assert patching._already_wrapped(replacement._handle_clarify_card_action)
+
+
 @pytest.mark.asyncio
 async def test_sent_card_registers_native_retirement_and_authorization_state(monkeypatch):
     adapter = SimpleNamespace(_clarify_state={})

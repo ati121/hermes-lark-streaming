@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,20 @@ class ControllerMixin:
     _ensure_init: Callable[[], Coroutine[Any, Any, None]]
     _cleanup: Callable[[str], None]
 
+    def _remember_gateway_card(
+        self, card_msg_id: str, chat_id: str, card: dict, category: str,
+        *, card_id: str | None = None,
+    ) -> None:
+        """Keep the sent payload for status edits without risking a second send."""
+        try:
+            from ..patching.adapter import _register_gateway_card
+
+            _register_gateway_card(
+                card_msg_id, chat_id=chat_id, card_id=card_id, category=category, card=card,
+            )
+        except Exception:
+            _logger.debug("gateway card snapshot unavailable", exc_info=True)
+
     async def _do_cron_deliver(self, chat_id: str, content: str) -> None:
         _logger.info("cron _do_cron_deliver: chat=%s content_len=%d", chat_id[:12], len(content))
         await self._ensure_init()
@@ -77,6 +92,7 @@ class ControllerMixin:
             )
             # Use send_card_to_chat which returns card_msg_id
             card_msg_id = await self._client.send_card_to_chat(chat_id, card)
+            self._remember_gateway_card(card_msg_id, chat_id, card, category)
             _logger.info(
                 "gateway card delivered: chat=%s category=%s card_msg_id=%s "
                 "content_len=%d",
@@ -105,6 +121,7 @@ class ControllerMixin:
             assert self._client is not None
             card = build_gateway_card(content, category=category)
             await self._update_gateway_card(card, card_id=card_id, card_msg_id=card_msg_id)
+            self._remember_gateway_card(card_msg_id, chat_id, card, category, card_id=card_id)
             _logger.info(
                 "gateway card updated (%s): card_id=%s card_msg_id=%s category=%s",
                 "cardkit" if card_id else "im_patch",
@@ -137,13 +154,31 @@ class ControllerMixin:
         try:
             await self._ensure_init()
             assert self._client is not None
-            card = build_gateway_card(
-                "",
-                category=category,
-                status_label=status_label,
-                status_emoji=emoji,
-            )
+            from ..cardkit.special import _GATEWAY_STATUS_ELEMENT_ID
+            from ..patching import _gateway_cards, _gateway_cards_lock
+
+            with _gateway_cards_lock:
+                info = _gateway_cards.get(card_msg_id, {})
+                saved_card = info.get("card")
+                if not isinstance(saved_card, dict):
+                    return False  # Let the original reaction handle unknown cards.
+                card = deepcopy(saved_card)
+            body = card.get("body")
+            if not isinstance(body, dict) or not isinstance(body.get("elements"), list):
+                return False
+            elements = [
+                element for element in body["elements"]
+                if element.get("element_id") != _GATEWAY_STATUS_ELEMENT_ID
+            ]
+            if status_label and emoji:
+                elements[:0] = build_gateway_card(
+                    "", status_label=status_label, status_emoji=emoji,
+                )["body"]["elements"]
+            body["elements"] = elements
             await self._update_gateway_card(card, card_id=card_id, card_msg_id=card_msg_id)
+            with _gateway_cards_lock:
+                if _gateway_cards.get(card_msg_id) is info:
+                    info["card"] = card
             _logger.info(
                 "gateway card status: card_msg_id=%s status=%s emoji=%s",
                 card_msg_id[:12],

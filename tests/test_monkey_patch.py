@@ -172,7 +172,7 @@ class TestCronDeliveryIsolation:
                 return "plain"
 
         FakeFeishuAdapter.send = _wrap_feishu_adapter_send(FakeFeishuAdapter.send)
-        P._patched_feishu_classes.add(id(FakeFeishuAdapter))
+        P._patched_feishu_classes.add(FakeFeishuAdapter)
         return FakeFeishuAdapter, plain_sends
 
     @staticmethod
@@ -261,7 +261,7 @@ class TestCronDeliveryIsolation:
             loop.call_soon_threadsafe(loop.stop)
             loop_thread.join(5)
             loop.close()
-            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+            P._patched_feishu_classes.discard(FakeFeishuAdapter)
 
         assert other == "plain"
         assert plain_sends == [("user_chat", "agent reply")]
@@ -288,7 +288,7 @@ class TestCronDeliveryIsolation:
                 result = await FakeFeishuAdapter().send("cron_chat", "report")
         finally:
             _cron_delivery_ctx.reset(token)
-            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+            P._patched_feishu_classes.discard(FakeFeishuAdapter)
 
         assert result == "plain"
         assert plain_sends == [("cron_chat", "report")]
@@ -313,7 +313,7 @@ class TestCronDeliveryIsolation:
                 await FakeFeishuAdapter().send("cron_chat", "  report\n")
         finally:
             _cron_delivery_ctx.reset(token)
-            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+            P._patched_feishu_classes.discard(FakeFeishuAdapter)
 
         assert cards == [("cron_chat", "report")]
         assert plain_sends == []
@@ -332,7 +332,7 @@ class TestCronDeliveryIsolation:
                 await FakeFeishuAdapter().send("cron_chat", "report")
         finally:
             _cron_delivery_ctx.reset(token)
-            P._patched_feishu_classes.discard(id(FakeFeishuAdapter))
+            P._patched_feishu_classes.discard(FakeFeishuAdapter)
 
         assert plain_sends == [("cron_chat", "report")]
         ctrl._do_cron_deliver.assert_not_called()
@@ -734,13 +734,16 @@ class TestInterceptedEditChatId:
 class TestOnDemandRepatchV150:
     """v1.5.0: on-demand repatch check in _wrap_feishu_adapter_send.
 
-    Replaces 3 deferred-loading timer schedules. Checks id(type(self)) in
+    Replaces 3 deferred-loading timer schedules. Checks type(self) in
     _patched_feishu_classes on every send(); if not, patches the class now.
     """
 
     def test_patched_feishu_classes_set_exists(self) -> None:
+        from weakref import WeakSet
+
         from hermes_lark_streaming.patching import _patched_feishu_classes
-        assert isinstance(_patched_feishu_classes, set)
+
+        assert isinstance(_patched_feishu_classes, WeakSet)
 
     @pytest.mark.asyncio
     async def test_send_triggers_repatch_for_unpatched_class(self) -> None:
@@ -764,13 +767,13 @@ class TestOnDemandRepatchV150:
         def fake_apply(cls):
             repatch_called["yes"] = True
             repatch_called["cls"] = cls
-            P._patched_feishu_classes.add(id(cls))
+            P._patched_feishu_classes.add(cls)
             return True
 
         P._apply_feishu_adapter_patches = fake_apply
         try:
             # Ensure FakeAdapter NOT in patched set
-            P._patched_feishu_classes.discard(id(FakeAdapter))
+            P._patched_feishu_classes.discard(FakeAdapter)
 
             # Call wrapped send — should trigger repatch
             result = await wrapped_send(fake_adapter, "chat1", "hello")
@@ -779,7 +782,7 @@ class TestOnDemandRepatchV150:
             assert repatch_called["cls"] is FakeAdapter
         finally:
             P._apply_feishu_adapter_patches = orig_apply
-            P._patched_feishu_classes.discard(id(FakeAdapter))
+            P._patched_feishu_classes.discard(FakeAdapter)
 
     @pytest.mark.asyncio
     async def test_send_skips_repatch_for_patched_class(self) -> None:
@@ -796,7 +799,7 @@ class TestOnDemandRepatchV150:
         wrapped_send = _wrap_feishu_adapter_send(FakeAdapter2.send)
 
         # Mark FakeAdapter2 as already patched
-        P._patched_feishu_classes.add(id(FakeAdapter2))
+        P._patched_feishu_classes.add(FakeAdapter2)
 
         repatch_called = {"yes": False}
         orig_apply = P._apply_feishu_adapter_patches
@@ -811,7 +814,7 @@ class TestOnDemandRepatchV150:
             assert not repatch_called["yes"], "repatch should NOT trigger for already-patched class"
         finally:
             P._apply_feishu_adapter_patches = orig_apply
-            P._patched_feishu_classes.discard(id(FakeAdapter2))
+            P._patched_feishu_classes.discard(FakeAdapter2)
 
 
 # ── v1.6.0: platform_registry.create_adapter hook (main-chain deferred-loading fix) ──
@@ -839,7 +842,7 @@ class TestCreateAdapterHookV160:
                 self.config = config
 
         # Make sure class B is NOT in patched set
-        P._patched_feishu_classes.discard(id(FakeDeferredFeishuAdapter))
+        P._patched_feishu_classes.discard(FakeDeferredFeishuAdapter)
 
         def orig_create(name, config):
             return FakeDeferredFeishuAdapter(config)
@@ -852,7 +855,7 @@ class TestCreateAdapterHookV160:
         def fake_apply(cls):
             repatch_called["yes"] = True
             repatch_called["cls"] = cls
-            P._patched_feishu_classes.add(id(cls))
+            P._patched_feishu_classes.add(cls)
             return True
 
         P._apply_feishu_adapter_patches = fake_apply
@@ -863,7 +866,7 @@ class TestCreateAdapterHookV160:
             assert repatch_called["cls"] is FakeDeferredFeishuAdapter
         finally:
             P._apply_feishu_adapter_patches = orig_apply
-            P._patched_feishu_classes.discard(id(FakeDeferredFeishuAdapter))
+            P._patched_feishu_classes.discard(FakeDeferredFeishuAdapter)
 
     def test_wrap_create_adapter_skips_already_patched_class(self) -> None:
         """When the feishu class is already patched, hook does O(1) skip."""
@@ -873,7 +876,7 @@ class TestCreateAdapterHookV160:
         class FakePatchedAdapter:
             platform = type("P", (), {"value": "feishu"})()
 
-        P._patched_feishu_classes.add(id(FakePatchedAdapter))
+        P._patched_feishu_classes.add(FakePatchedAdapter)
 
         def orig_create(name, config):
             return FakePatchedAdapter()
@@ -894,7 +897,7 @@ class TestCreateAdapterHookV160:
             assert not repatch_called["yes"], "should skip already-patched class"
         finally:
             P._apply_feishu_adapter_patches = orig_apply
-            P._patched_feishu_classes.discard(id(FakePatchedAdapter))
+            P._patched_feishu_classes.discard(FakePatchedAdapter)
 
     def test_wrap_create_adapter_ignores_non_feishu_platform(self) -> None:
         """Non-feishu adapters (irc/telegram/...) must pass through untouched."""
@@ -955,17 +958,17 @@ class TestCreateAdapterHookV160:
 
         def fake_apply(cls):
             repatch_called["yes"] = True
-            P._patched_feishu_classes.add(id(cls))
+            P._patched_feishu_classes.add(cls)
             return True
 
         P._apply_feishu_adapter_patches = fake_apply
         try:
-            P._patched_feishu_classes.discard(id(FakeEnumAdapter))
+            P._patched_feishu_classes.discard(FakeEnumAdapter)
             wrapped(type("Enum", (), {"value": "unknown"}), {})
             assert repatch_called["yes"], "should detect feishu via module path"
         finally:
             P._apply_feishu_adapter_patches = orig_apply
-            P._patched_feishu_classes.discard(id(FakeEnumAdapter))
+            P._patched_feishu_classes.discard(FakeEnumAdapter)
 
     def test_apply_create_adapter_hook_installs_wrapper(self, monkeypatch) -> None:
         """_apply_create_adapter_hook wraps platform_registry.create_adapter

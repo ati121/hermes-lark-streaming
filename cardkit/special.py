@@ -33,6 +33,7 @@ _CLARIFY_DICT_FIELD_PRIORITY = (
 )
 
 _CLARIFY_MAX_CHOICE_LEN = 80
+_GATEWAY_STATUS_ELEMENT_ID = "hls_gateway_status"
 
 def _normalize_choice(choice: Any) -> str:
     """Normalize clarify choice to readable string. Handles: plain string,
@@ -156,6 +157,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
     if status_label and status_emoji:
         elements.append({
             "tag": "div",
+            "element_id": _GATEWAY_STATUS_ELEMENT_ID,
             "text": {
                 "tag": "plain_text",
                 "content": f"{status_emoji} {status_label}",

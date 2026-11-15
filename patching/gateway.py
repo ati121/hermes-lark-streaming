@@ -19,7 +19,6 @@ from . import (
     _session_contexts,
     _session_contexts_lock,
 )
-from .adapter import _send_result
 from .usage import _speed_footer, _totals_for_context
 
 # ── GatewayRunner method wrappers ──────────────────────────────────
@@ -693,7 +692,8 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
         chat_id = getattr(source, "chat_id", "")
 
         # Set up message context so _maybe_wrap_callbacks works
-        _msg_ctx.set({
+        previous_local = getattr(_thread_local_ctx, "data", None)
+        context_token = _msg_ctx.set({
             "message_id": task_id,
             "chat_id": chat_id,
             "anchor_id": None,  # No reply anchor for background tasks
@@ -708,33 +708,14 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
         # ── Fire START hook ──
         try:
             from .hooks import on_message_started
-            on_message_started(message_id=task_id, chat_id=chat_id, anchor_id=None)
+            on_message_started(
+                message_id=task_id, chat_id=chat_id, anchor_id=None, standalone=True,
+            )
         except Exception:
             _logger.debug("background task START hook failed", exc_info=True)
 
-        # ── Wrap adapter.send to suppress duplicate text delivery ──
-        adapter = None
-        original_send = None
-
-        try:
-            if hasattr(self, "adapters") and source.platform:
-                adapter = self.adapters.get(source.platform)
-        except Exception:
-            _logger.warning("HLS: suppressed exception", exc_info=True)
-        if adapter:
-            original_send = adapter.send
-
-            async def _intercepting_send(chat_id, content, **send_kwargs):
-                """Suppress plain text delivery when our card was sent."""
-                ctx = _msg_ctx.get()
-                if ctx and ctx.get("card_sent"):
-                    return _send_result(success=True)
-                return await original_send(chat_id, content, **send_kwargs)
-
-            adapter.send = _intercepting_send
-            # run concurrently on the same adapter, the first to finish must
-            adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) + 1
-
+        # The class-level send wrapper uses this task's context and existing
+        # card to suppress duplicate output. Never replace the shared adapter.
         # v1.3.4 fix (P1): orig() + COMPLETE hook 都在 try 块内，finally
         try:
             result = await orig(self, prompt, source, task_id, **kwargs)
@@ -761,14 +742,8 @@ def _wrap_run_background_task(orig: Callable) -> Callable:
 
             return result
         finally:
-            if original_send and adapter:
-                adapter.send = original_send
-                # v1.3.2 fix (B3-06): default to 0 (not 1) for consistency —
-                # a counter should never default to 1 when decrementing.
-                adapter._hls_bg_sending = getattr(adapter, '_hls_bg_sending', 0) - 1
-            # v1.3.4 fix (P1): clear context in finally — runs on ALL paths
-            _msg_ctx.set(None)
-            _thread_local_ctx.data = None
+            _msg_ctx.reset(context_token)
+            _thread_local_ctx.data = previous_local
 
     return wrapper
 

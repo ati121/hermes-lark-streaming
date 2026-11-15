@@ -70,6 +70,7 @@ class CardSession:
         "sequence",
         "seal_task",
         "state",
+        "standalone",
         "terminal_reason",
         "terminal_source",
         "text",
@@ -83,10 +84,14 @@ class CardSession:
         message_id: str,
         chat_id: str,
         loop: asyncio.AbstractEventLoop,
+        *,
+        standalone: bool = False,
     ) -> None:
         self.message_id = message_id
         self.anchor_id: str | None = None
         self.chat_id = chat_id
+        # Internal lifecycle IDs and background task IDs are not IM reply targets.
+        self.standalone = standalone or message_id.startswith("hls-recovery-")
         self.state: str = CardPhase.IDLE
         self.card_msg_id: str | None = None
         self.card_id: str | None = None

@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from typing import Any, Callable
+from weakref import WeakSet
 
 from .. import __version__
 from ..runtime_globals import shared_dict, shared_object
@@ -152,7 +153,9 @@ _gw_runner_patched: bool = False
 
 _patch_status: dict[str, Any] = {}
 
-_patched_feishu_classes: set[int] = set()
+# Adapter classes can be unloaded and recreated; integer IDs can then be reused.
+# Weak references track the actual classes without retaining retired plugins.
+_patched_feishu_classes: WeakSet[type] = WeakSet()
 
 # ── Cross-copy wrap markers (multiplex) ────────────────────────────────
 #
@@ -621,7 +624,7 @@ def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
     Each Hermes profile loads its OWN feishu_platform directory plugin, so every
     profile owns a distinct ``FeishuAdapter`` class object — this must run once
     per class.  The dedup key is therefore the class itself (marker attribute
-    plus the ``id()`` registry), never a module-level flag: under multiplex the
+    plus a weak class registry), never a module-level flag: under multiplex the
     same wrapper module exists once per profile, and a module-level flag would
     let copy B re-wrap the class copy A already patched.
     """
@@ -629,8 +632,8 @@ def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
         return False
 
     cls_id = id(FeishuAdapter)
-    if _class_marked(FeishuAdapter, _FEISHU_CLASS_MARK_ATTR) or cls_id in _patched_feishu_classes:
-        _patched_feishu_classes.add(cls_id)
+    if _class_marked(FeishuAdapter, _FEISHU_CLASS_MARK_ATTR) or FeishuAdapter in _patched_feishu_classes:
+        _patched_feishu_classes.add(FeishuAdapter)
         return True
     _outcomes: dict[str, str] = {}
     try:
@@ -670,7 +673,7 @@ def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
     # so a failed attempt can be retried later in the deferred stage).  The
     # marker attribute is what the OTHER plugin copies see (their own
     # ``_patched_feishu_classes`` is per-copy).
-    _patched_feishu_classes.add(cls_id)
+    _patched_feishu_classes.add(FeishuAdapter)
     _mark_class(FeishuAdapter, _FEISHU_CLASS_MARK_ATTR, _installing_home())
     _logger.info(
         "hermes-lark-streaming: FeishuAdapter.send/edit/reaction/clarify patched ✓ "
@@ -706,7 +709,7 @@ def _wrap_platform_registry_create_adapter(orig_create_adapter: Callable) -> Cal
             return adapter
         cls = type(adapter)
         cls_id = id(cls)
-        if cls_id in _patched_feishu_classes:
+        if cls in _patched_feishu_classes:
             return adapter
         try:
             if _apply_feishu_adapter_patches(cls):

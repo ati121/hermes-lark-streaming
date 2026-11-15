@@ -379,6 +379,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         让新卡片挂在用户刚发的那条消息下面（默认沿用 stale session 的锚点）。
         """
         chat_id = stale_session.chat_id
+        standalone = stale_session.standalone and not anchor_id
         # anchor_id 优先（调用方指定 → 用户原始消息 id → message_id）
         anchor_id = anchor_id or stale_session.anchor_id or stale_session.message_id
         if not chat_id or not anchor_id:
@@ -417,7 +418,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 )
                 return None
 
-        new_session = CardSession(new_message_id, chat_id, loop)
+        new_session = CardSession(new_message_id, chat_id, loop, standalone=standalone)
         # anchor_id 设为原 anchor_id（reply 时仍回复到用户原始消息，保持线程上下文）
         new_session.anchor_id = anchor_id if anchor_id != new_message_id else None
         new_session._is_continuation = True
@@ -526,6 +527,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         newest = -1.0
         for _mid, candidate in self._sess_items_snapshot():
             if candidate.chat_id != chat_id:
+                continue
+            if candidate.standalone:
                 continue
             if candidate.is_terminal_phase or candidate.state == COMPLETING:
                 continue
@@ -654,6 +657,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         message_id: str | None,
         chat_id: str,
         anchor_id: str | None = None,
+        standalone: bool = False,
     ) -> None:
         """消息处理开始 — 创建会话 + 发占位卡片."""
         if not self.enabled:
@@ -661,6 +665,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not message_id:
             _logger.warning("HLS: on_message_started missing message_id chat=%s", chat_id[:12])
             return
+        standalone = standalone or message_id.startswith("hls-recovery-")
         if self._continuation_session_for(message_id) is not None:
             _logger.info(
                 "HLS: continuation already claimed msg=%s; reusing busy card",
@@ -676,6 +681,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         seen_sessions: set[int] = set()
         for existing_msg_id, existing_session in self._sess_items_snapshot():
             if existing_session.chat_id != chat_id:
+                continue
+            if standalone or existing_session.standalone:
                 continue
             if existing_session.is_terminal_phase:
                 continue
@@ -726,7 +733,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 _logger.debug('metrics: record_card_created failed (reuse path)', exc_info=True)
             return
 
-        session = CardSession(message_id, chat_id, loop)
+        session = CardSession(message_id, chat_id, loop, standalone=standalone)
         winner = self._sess_put_if_absent(message_id, session)
         if winner is not None:
             _logger.info(
@@ -1586,24 +1593,55 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         message_id: str,
         text: str,
         sender: Callable[[str], Any],
+        chat_id: str = "",
     ) -> bool:
-        """将后台审查消息推入卡片面板（如果在线性模式），否则暂停持原发送路径."""
+        """Keep reviews in the live seal, or deliver a separate static card."""
         if not self.enabled or not text or not callable(sender):
             return False
-        session = self._get_active_session(message_id)
-        if session is None:
+        session = self._get_active_session(message_id) or self._sess_get(message_id)
+        if session is not None:
+            accepted = False
+            with session._stream_lock:
+                if session.accepts_stream_updates and session.linear and session.unified_state:
+                    session.unified_state.on_background_review(text)
+                    accepted = True
+            if accepted:
+                self._schedule_linear_flush(session)
+                return True
+            chat_id = session.chat_id
+        loop = self._get_loop()
+        if not chat_id or loop is None or not loop.is_running() or loop.is_closed():
             return False
+        self._fire_and_forget(self._send_background_review_card(chat_id, text), loop)
+        return True
 
-        # Try to push into linear state for real-time card display
-        if session.linear and session.unified_state:
-            session.unified_state.on_background_review(text)
-            self._schedule_linear_flush(session)
-            return True  # Consumed by card, suppress plain text
+    async def _send_background_review_card(self, chat_id: str, text: str) -> None:
+        """Late reviews get their own card, never an old final-card PATCH."""
+        from ..cardkit import build_answer_elements, build_interactive_card_v2
+        from ..cardkit.md import render_answer_markdown
 
-        # The card is gone (creation failed, or the turn already sealed): there
-        # is no surface left to defer onto, and the caller treats True as
-        # "handled". Returning False lets the original sender deliver.
-        return False
+        visible_text = strip_reasoning_tags(text).strip()
+        if not visible_text:
+            return
+        try:
+            await self._ensure_init()
+            assert self._client is not None
+            sizes = self._cfg.text_sizes
+            card = build_interactive_card_v2(
+                elements=build_answer_elements(
+                    content=render_answer_markdown(visible_text, final=True), text_sizes=sizes,
+                ),
+                summary=visible_text[:120], text_sizes=sizes,
+            )
+            await self._client.send_card_to_chat(chat_id, card)
+            return
+        except Exception:
+            _logger.warning("background review card failed, trying visible text", exc_info=True)
+        if self._client is not None:
+            try:
+                await self._client.send_text_to_chat(chat_id, visible_text[:4000])
+            except Exception:
+                _logger.warning("background review text fallback failed", exc_info=True)
 
     def _cleanup(self, message_id: str) -> None:
         session = self._sess_pop(message_id)
@@ -1725,8 +1763,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         session.fallback_card = None
         if self._client and card:
             try:
-                reply_id = session.anchor_id or session.message_id
-                fallback_id = await self._client.reply_card(reply_id, card)
+                if session.standalone:
+                    fallback_id = await self._client.send_card_to_chat(session.chat_id, card)
+                else:
+                    reply_id = session.anchor_id or session.message_id
+                    fallback_id = await self._client.reply_card(reply_id, card)
                 original = self._rsn_map().get(session.card_msg_id)
                 if isinstance(fallback_id, str) and fallback_id and isinstance(original, dict):
                     # The replacement reply has its own reasoning buttons and
@@ -1757,6 +1798,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             # 优先使用调用方传入的 fallback_text（在 _release_session_data 前快照的）
             # 其次从 session 读取（用于 _do_linear_complete_with_fallback 以外的调用路径）
             text = fallback_text or session.error_message or (session.text.display_text if session.text else "") or ""
+            text = strip_reasoning_tags(text)
             if not text.strip():
                 return
             # 限制长度避免过长
@@ -1764,8 +1806,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 text = text[:4000] + "..."
             from ..cardkit.md import optimize_markdown_style
             content = optimize_markdown_style(text) or text
-            reply_id = session.anchor_id or session.message_id
-            await self._client.reply_text(reply_id, content)
+            if session.standalone:
+                await self._client.send_text_to_chat(session.chat_id, content)
+            else:
+                reply_id = session.anchor_id or session.message_id
+                await self._client.reply_text(reply_id, content)
             _logger.info(
                 "text fallback sent: msg=%s len=%d",
                 (session.message_id or "?")[:12],
