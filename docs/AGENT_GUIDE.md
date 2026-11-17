@@ -127,6 +127,9 @@ FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 `cache`、`cost`、`api_calls`、`history_offset`、`compression_exhausted`。未知字段名
 会被静默跳过。
 
+`model` 只显示模型名，省略渠道或提供方前缀，例如
+`octopus/deepseek-v4.1-flash` 显示为 `deepseek-v4.1-flash`。
+
 `speed` 默认开启，显示**当前这次用户提问执行期间，所有主模型请求的加权生成速度**
 （如 `50 t/s`）。一次提问中的多次工具调用和 LLM 请求一起统计；用户下一次提问时
 从零开始，即使 Hermes 仍使用同一个 `session_id`。不想要可以从 `fields` 里去掉。

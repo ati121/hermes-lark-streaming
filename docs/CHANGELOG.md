@@ -4,6 +4,24 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.57 (2026-11-18, personal fork)
+
+### Changed — show only the model name in reply footers
+
+- Hide channel and provider prefixes in the reply footer. For example,
+  `octopus/deepseek-v4.1-flash` now displays as `deepseek-v4.1-flash`.
+  Nested routes also use the final model name; plain names remain unchanged.
+- Apply the same display rule to both languages and all footer rendering paths.
+  Keep the full model identifier in the source data for routing and usage.
+
+### Validation
+
+- CardKit tests: **187 passed**. Direct rendering checks cover provider prefixes,
+  nested routes, plain names, empty values, both languages and source-data retention.
+- Full default suite: **2,001 passed**. Wheel version metadata is **1.57**;
+  all 42 packaged files match the source, and installed imports and footer checks pass.
+- No new changed-file Ruff diagnostics; `git diff --check` passes.
+
 ## v1.56 (2026-11-15, personal fork)
 
 ### Fixed — card-first delivery at completion boundaries

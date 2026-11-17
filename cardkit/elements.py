@@ -1382,6 +1382,8 @@ def _render_footer_field(
 
     if name == "model":
         v = data.get("model") or None
+        if v:
+            v = v.rsplit("/", 1)[-1]
         return v, v
 
     if name == "tokens":
