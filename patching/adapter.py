@@ -575,6 +575,37 @@ def _wrap_feishu_adapter_send_clarify(orig_send_clarify: Callable) -> Callable:
     return _intercepted_send_clarify
 
 
+def _wrap_feishu_interactive_authorization(original_method: Callable) -> Callable:
+    """Check SDK operator aliases against the host's existing authorization gate.
+
+    Message events may pair an open_id while card callbacks additionally supply
+    a tenant user_id. Hermes checks only the preferred user_id at its gateway
+    fallback, so the same paired operator can be denied. Explicit Feishu lists
+    remain authoritative; aliases never create or share authorization grants.
+    """
+    def _wrapped(self, open_id, **kwargs):
+        if original_method(self, open_id, **kwargs) is True:
+            return True
+        normalized = str(open_id or "").strip()
+        if not normalized or getattr(self, "_admins", None) or getattr(self, "_allowed_group_users", None):
+            return False
+        check = getattr(self, "_is_sender_authorized", None)
+        if not callable(check):
+            return False
+        primary = str(kwargs.get("user_id") or "").strip() or normalized
+        seen = {primary}
+        for field, ident in (("open_id", normalized), ("union_id", str(kwargs.get("union_id") or "").strip())):
+            if not ident or ident in seen:
+                continue
+            seen.add(ident)
+            if check(ident, "group", str(kwargs.get("chat_id") or "") or None) is True:
+                _logger.info("HLS: card operator authorized by existing %s grant", field)
+                return True
+        return False
+
+    return _wrapped
+
+
 def _wrap_native_clarify_card_action(original_method: Callable) -> Callable:
     """Handle plugin controls at the host's synchronous dispatch target.
 

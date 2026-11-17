@@ -4,6 +4,31 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.58 (2026-11-18, personal fork)
+
+### Fixed — paired users can answer approval cards with different Feishu ID tiers
+
+- Check the SDK operator's open and union IDs against the host's existing
+  authorization gate when its preferred tenant user ID has no grant. A user
+  paired through a message's open ID can now answer a card callback that also
+  supplies a tenant user ID.
+- Keep explicit Feishu admin/user lists authoritative. Each alias must pass the
+  same profile and chat authorization check; no pairing or allowlist is changed.
+- Preserve native approval routing, requester checks, asynchronous revalidation,
+  request targeting and timeout handling. The shared identity gate also applies
+  to other native interactive prompts without replacing their handlers.
+
+### Validation
+
+- Approval and clarify tests: **158 passed**, including paired ID tiers, native
+  allow/deny dispatch from an SDK callback captured before patching, duplicate
+  clicks, unpaired operators, wrong chats, explicit restrictions and profile isolation.
+- Extracted live Hermes callback code reproduces the original failure and verifies
+  native approval settlement and expiry handling after the fix, with settlement mocked.
+- Full default suite: **2,017 passed**. Wheel version is **1.58**; all 42 packaged
+  files match the source, and installed native callback checks pass. New tests pass
+  Ruff; changed source files introduce no new diagnostics. `git diff --check` passes.
+
 ## v1.57 (2026-11-18, personal fork)
 
 ### Changed — show only the model name in reply footers
