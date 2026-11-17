@@ -1,0 +1,205 @@
+"""Approval feedback is persisted while the agent is still running."""
+
+import asyncio
+import json
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from hermes_lark_streaming.patching import _apply_feishu_adapter_patches
+from hermes_lark_streaming.patching.adapter import _wrap_feishu_resolve_approval
+
+
+@pytest.fixture
+def approval_adapter(monkeypatch):
+    settlement = Mock(return_value=1)
+    monkeypatch.setitem(sys.modules, "tools.approval", SimpleNamespace(resolve_gateway_approval_card=settlement))
+    translate = Mock(return_value="Approval expired")
+    monkeypatch.setitem(sys.modules, "agent.i18n", SimpleNamespace(t=translate))
+
+    class Adapter:
+        def __init__(self):
+            self._approval_state = {}
+            self.config = SimpleNamespace(extra={"scope": "this-bot"})
+            self._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(patch=Mock()))))
+            self._run_blocking = AsyncMock(return_value=SimpleNamespace(success=lambda: True))
+            self.send = AsyncMock()
+            self.original_resolve = AsyncMock()
+            self.queued = []
+            self.allowed = True
+            self.requester_allowed = True
+
+        def _on_card_action_trigger(self, data):
+            return self._handle_approval_card_action(event=data.event, action_value=data.event.action.value, loop=None)
+
+        def _handle_approval_card_action(self, *, event, action_value, loop):
+            ident = action_value["approval_id"]
+            state = self._approval_state.get(ident)
+            if not state or not self.allowed or not self.requester_allowed or event.context.open_chat_id != state["chat_id"]:
+                return None
+            choice = "deny" if action_value["hermes_action"] == "deny" else "once"
+            self.queued.append(self._resolve_approval(
+                ident, choice, "Operator", open_id="ou_user", user_id="tenant", union_id="on_user", chat_id=state["chat_id"],
+            ))
+            return self._build_resolved_approval_card(choice=choice, user_name="Operator", body=state["body"])
+
+        def _pop_validated_prompt_state(self, *, states, ident, chat_id, **kwargs):
+            state = states.get(ident)
+            if not state or not self.allowed or state["chat_id"] != chat_id:
+                return None
+            return states.pop(ident, None)
+
+        @staticmethod
+        def _build_resolved_approval_card(*, choice, user_name, body):
+            return {"header": {"title": {"content": choice}}, "elements": [{"tag": "markdown", "content": body}]}
+
+        async def _resolve_approval(self, *args, **kwargs):
+            await self.original_resolve(*args, **kwargs)
+
+        async def send(self, *args, **kwargs):
+            pass
+
+    adapter = Adapter()
+    callback = adapter._on_card_action_trigger  # SDK captured before class patching
+    assert _apply_feishu_adapter_patches(Adapter)
+    adapter._approval_state[1] = {"chat_id": "chat", "message_id": "approval-card", "session_key": "session",
+                                  "request_id": "request", "body": "Protected write request"}
+    yield adapter, callback, settlement
+    for coro in adapter.queued:
+        coro.close()
+
+
+def click(callback, *, action="approve_once", chat="chat"):
+    return callback(SimpleNamespace(event=SimpleNamespace(
+        action=SimpleNamespace(value={"hermes_action": action, "approval_id": 1}),
+        context=SimpleNamespace(open_chat_id=chat),
+    )))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action, choice", [("approve_once", "once"), ("deny", "deny")])
+async def test_result_is_patched_before_agent_completes(approval_adapter, action, choice):
+    adapter, callback, settlement = approval_adapter
+    agent_started, agent_finished = asyncio.Event(), asyncio.Event()
+
+    async def agent():
+        await agent_started.wait()
+        await agent_finished.wait()
+
+    worker = asyncio.create_task(agent())
+    settlement.side_effect = lambda *args, **kwargs: agent_started.set() or 1
+    try:
+        inline_card = click(callback, action=action)
+        assert inline_card["header"]["title"]["content"] == choice
+        await adapter.queued.pop()
+        assert agent_started.is_set()
+        assert not worker.done()
+        adapter._run_blocking.assert_awaited_once()
+        api_method, request = adapter._run_blocking.await_args.args
+        assert api_method is adapter._client.im.v1.message.patch
+        assert request.message_id == "approval-card"
+        assert json.loads(request.request_body.content) == inline_card
+        assert "button" not in request.request_body.content
+        settlement.assert_called_once_with("session", choice, "request", actor_id="tenant", extra={"scope": "this-bot"})
+        assert not adapter._approval_state
+        adapter.original_resolve.assert_not_awaited()
+        assert click(callback, action=action) is None
+        assert not adapter.queued
+        adapter._run_blocking.assert_awaited_once()
+    finally:
+        agent_started.set()
+        agent_finished.set()
+        await worker
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve_once", "deny"])
+async def test_expired_or_racing_answer_does_not_patch_success(approval_adapter, action):
+    adapter, callback, settlement = approval_adapter
+    settlement.return_value = 0
+    click(callback, action=action)
+    await adapter.queued.pop()
+    adapter._run_blocking.assert_not_awaited()
+    if action == "approve_once":
+        adapter.send.assert_awaited_once_with("chat", "Approval expired")
+    else:
+        adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restriction", ["allowed", "requester_allowed", "chat"])
+async def test_rejected_click_never_patches_or_settles(approval_adapter, restriction):
+    adapter, callback, settlement = approval_adapter
+    if restriction != "chat":
+        setattr(adapter, restriction, False)
+    assert click(callback, chat="wrong-chat" if restriction == "chat" else "chat") is None
+    assert not adapter.queued
+    adapter._run_blocking.assert_not_awaited()
+    settlement.assert_not_called()
+    assert 1 in adapter._approval_state
+
+
+@pytest.mark.asyncio
+async def test_authorization_revoked_before_async_resolution_does_not_patch(approval_adapter):
+    adapter, callback, settlement = approval_adapter
+    click(callback)
+    adapter.allowed = False
+    await adapter.queued.pop()
+    adapter._run_blocking.assert_not_awaited()
+    settlement.assert_not_called()
+    assert 1 in adapter._approval_state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["api", "network"])
+async def test_display_failure_does_not_repeat_decision_or_block_agent(approval_adapter, failure):
+    adapter, callback, settlement = approval_adapter
+    if failure == "api":
+        adapter._run_blocking.return_value = SimpleNamespace(success=lambda: False, code=230001)
+    else:
+        adapter._run_blocking.side_effect = OSError("connection lost")
+    click(callback)
+    await adapter.queued.pop()
+    settlement.assert_called_once()
+    assert not adapter._approval_state
+    assert not adapter.queued
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [230020, 230429])
+async def test_frequency_limit_retries_only_the_card_update(approval_adapter, monkeypatch, code):
+    adapter, callback, settlement = approval_adapter
+    monkeypatch.setattr("hermes_lark_streaming.patching.adapter.asyncio.sleep", AsyncMock())
+    adapter._run_blocking.side_effect = [
+        SimpleNamespace(success=lambda: False, code=code),
+        SimpleNamespace(success=lambda: True),
+    ]
+    click(callback)
+    await adapter.queued.pop()
+    settlement.assert_called_once()
+    assert not adapter._approval_state
+    assert adapter._run_blocking.await_count == 2
+    first, second = adapter._run_blocking.await_args_list
+    assert first.args[1] is second.args[1]
+    assert json.loads(second.args[1].request_body.content)["header"]["title"]["content"] == "once"
+
+
+@pytest.mark.asyncio
+async def test_missing_message_id_does_not_send_another_card(approval_adapter):
+    adapter, callback, settlement = approval_adapter
+    adapter._approval_state[1].pop("message_id")
+    click(callback)
+    await adapter.queued.pop()
+    settlement.assert_called_once()
+    adapter._run_blocking.assert_not_awaited()
+    adapter.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_older_host_retains_native_resolver():
+    original = AsyncMock(return_value="legacy")
+    wrapped = _wrap_feishu_resolve_approval(original)
+    adapter = SimpleNamespace()
+    assert await wrapped(adapter, 1, "once", "Operator", open_id="ou_user") == "legacy"
+    original.assert_awaited_once_with(adapter, 1, "once", "Operator", open_id="ou_user")

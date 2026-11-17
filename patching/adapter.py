@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import threading
 import time
@@ -602,6 +603,85 @@ def _wrap_feishu_interactive_authorization(original_method: Callable) -> Callabl
                 _logger.info("HLS: card operator authorized by existing %s grant", field)
                 return True
         return False
+
+    return _wrapped
+
+
+async def _update_approval_result(adapter, message_id: str, card: dict) -> None:
+    """Persist the native decision on the original IM card using its own bot."""
+    from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+    request = (
+        PatchMessageRequest.builder()
+        .message_id(message_id)
+        .request_body(PatchMessageRequestBody.builder().content(json.dumps(card, ensure_ascii=False)).build())
+        .build()
+    )
+    for attempt in range(4):
+        response = await adapter._run_blocking(adapter._client.im.v1.message.patch, request)
+        if response.success():
+            return
+        if response.code in (230020, 230429) and attempt < 3:
+            await asyncio.sleep(2 ** attempt)
+            continue
+        raise RuntimeError(f"approval card update failed: code={response.code}")
+
+
+def _wrap_feishu_resolve_approval(original_method: Callable) -> Callable:
+    """Settle through Hermes, then immediately persist its native result card.
+
+    Hermes returns the result card in the SDK acknowledgement but never writes
+    it through IM PATCH. Some clients retain the prompt until a later refresh.
+    Use the host's validation and resolver, and patch only a settled request.
+    Older hosts without these APIs retain their original resolver.
+    """
+    async def _persist_result(self, approval_id, choice, user_name, *, open_id="", chat_id="",
+                              user_id="", union_id=""):
+        from tools.approval import resolve_gateway_approval_card
+
+        state = self._pop_validated_prompt_state(
+            states=self._approval_state, ident=approval_id, label="Approval", open_id=open_id, chat_id=chat_id,
+            unauthorized_fmt="[Feishu] Unauthorized approval click by %s for approval %s",
+            operator_repr=open_id or "<unknown>", user_id=user_id, union_id=union_id,
+        )
+        if not state:
+            return
+        count = resolve_gateway_approval_card(
+            state["session_key"], choice, state.get("request_id"), actor_id=user_id or open_id, extra=self.config.extra,
+        )
+        _logger.info("HLS: native approval settled count=%s choice=%s", count, choice)
+        if not count:
+            # Keep Hermes' late-approval notice, and never PATCH false success
+            # over a timeout or another answer which already won the race.
+            if choice != "deny" and (target := state.get("chat_id") or chat_id):
+                try:
+                    from agent.i18n import t
+                    await self.send(target, t("platform.shared.approval_expired"))
+                except Exception:  # noqa: BLE001 - notification failure cannot change an expired decision
+                    _logger.exception("HLS: expired approval notice failed")
+            return
+        if not (message_id := state.get("message_id")):
+            return
+        try:
+            card = self._build_resolved_approval_card(choice=choice, user_name=user_name, body=state.get("body"))
+            await _update_approval_result(self, message_id, card)
+            _logger.info("HLS: approval result persisted immediately choice=%s", choice)
+        except Exception:  # noqa: BLE001 - isolate display errors after approval has already settled
+            # The command decision has already settled; a display failure must
+            # never repeat it or prevent the waiting agent from continuing.
+            _logger.exception("HLS: immediate approval card update failed")
+
+    async def _wrapped(self, *args, **kwargs):
+        validate = getattr(self, "_pop_validated_prompt_state", None)
+        build_card = getattr(self, "_build_resolved_approval_card", None)
+        try:
+            from tools.approval import resolve_gateway_approval_card
+        except ImportError:
+            resolve_gateway_approval_card = None
+        known = {"approval_id", "choice", "user_name", "open_id", "chat_id", "user_id", "union_id"}
+        if kwargs.keys() - known or not callable(validate) or not callable(build_card) or not callable(resolve_gateway_approval_card):
+            return await original_method(self, *args, **kwargs)
+        return await _persist_result(self, *args, **kwargs)
 
     return _wrapped
 

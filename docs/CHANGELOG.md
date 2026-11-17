@@ -4,6 +4,34 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.59 (2026-11-18, personal fork)
+
+### Fixed — persist approval results immediately after a click
+
+- Write the native allowed/denied result to the original approval card as soon as
+  Hermes accepts the decision, rather than relying only on the SDK callback card
+  which some clients display after the agent finishes. Remove the buttons while
+  preserving the command and flagged reason.
+- Use the approval adapter's own bot for the IM PATCH. Preserve native validation,
+  requester and request checks, and update only successfully settled requests.
+  Expired or racing answers never PATCH a successful result.
+- Retry IM frequency limits only for the result-card update. A display failure
+  never repeats approval settlement or prevents the agent from continuing.
+- Keep the native resolver unchanged on older hosts without the required APIs.
+
+### Validation
+
+- Full default suite: **2,031 passed**. Timing regressions keep the agent running
+  while asserting the original card is patched for both allow and deny. Coverage
+  includes duplicate clicks, expired/racing requests, rejected users/chats,
+  asynchronous revalidation, transport failures and frequency-limit recovery.
+- Current native Hermes callback code reproduces the missing IM update and
+  confirms immediate persistence after the fix with mocked transport and settlement.
+- New tests pass Ruff; changed source files introduce no new diagnostics.
+  `git diff --check` passes.
+- Wheel version is **1.59**; all 42 packaged files match the source, and installed
+  native callback checks confirm result updates while the agent remains running.
+
 ## v1.58 (2026-11-18, personal fork)
 
 ### Fixed — paired users can answer approval cards with different Feishu ID tiers
