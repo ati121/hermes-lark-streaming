@@ -67,11 +67,33 @@ class TestBuildClarifyCardWithChoices:
         assert "B. Option B" in content
         assert "C. Option C" in content
 
-    def test_select_static_element_present(self) -> None:
+    def test_short_choice_list_uses_localized_one_tap_buttons(self) -> None:
         card = build_clarify_card(
             question="Pick one",
             choices=["Option A", "Option B"],
             clarify_id="id3",
+        )
+        elements = card["body"]["elements"]
+        assert not any(e.get("tag") == "select_static" for e in elements)
+        row = next(e for e in elements if e.get("element_id") == "clarify_choices")
+        assert row["tag"] == "column_set"
+        buttons = [column["elements"][0] for column in row["columns"]]
+        assert [button["text"]["content"] for button in buttons] == [
+            "Choose A", "Choose B",
+        ]
+        assert buttons[0]["text"]["i18n_content"]["zh_cn"] == "选择 A"
+
+    def test_three_choices_use_buttons_and_four_use_dropdown(self) -> None:
+        three = build_clarify_card(question="Q", choices=["A", "B", "C"])
+        four = build_clarify_card(question="Q", choices=["A", "B", "C", "D"])
+        assert any(e.get("element_id") == "clarify_choices" for e in three["body"]["elements"])
+        assert any(e.get("tag") == "select_static" for e in four["body"]["elements"])
+
+    def test_long_choice_list_keeps_compact_dropdown(self) -> None:
+        card = build_clarify_card(
+            question="Pick one",
+            choices=[f"Option {i}" for i in range(6)],
+            clarify_id="id3-long",
         )
         elements = card["body"]["elements"]
         select_els = [e for e in elements if e.get("tag") == "select_static"]
@@ -80,36 +102,36 @@ class TestBuildClarifyCardWithChoices:
     def test_select_has_choices_without_other(self) -> None:
         card = build_clarify_card(
             question="Pick one",
-            choices=["Alpha", "Beta"],
+            choices=[f"Alpha {i}" for i in range(6)],
             clarify_id="id4",
         )
         select_el = next(e for e in card["body"]["elements"] if e.get("tag") == "select_static")
         options = select_el["options"]
-        # Should have 2 predefined options, NO "other" option
-        assert len(options) == 2
+        # All predefined options remain available, with no synthetic "other".
+        assert len(options) == 6
         assert options[0]["value"] == "0"
-        assert "Alpha" in options[0]["text"]["content"]
+        assert "Alpha 0" in options[0]["text"]["content"]
         assert options[1]["value"] == "1"
-        assert "Beta" in options[1]["text"]["content"]
+        assert "Alpha 1" in options[1]["text"]["content"]
         # No "other" value
         assert all(o["value"] != "other" for o in options)
 
-    def test_select_options_have_label_prefix(self) -> None:
-        """Options in dropdown should have A. B. C. label prefix."""
+    def test_dropdown_options_have_label_prefix(self) -> None:
+        """Long dropdown options retain their A. B. C. label prefix."""
         card = build_clarify_card(
             question="Q",
-            choices=["First", "Second"],
+            choices=[f"Option {i}" for i in range(6)],
             clarify_id="id_labels",
         )
         select_el = next(e for e in card["body"]["elements"] if e.get("tag") == "select_static")
         options = select_el["options"]
-        assert "A. First" in options[0]["text"]["content"]
-        assert "B. Second" in options[1]["text"]["content"]
+        assert "A. Option 0" in options[0]["text"]["content"]
+        assert "B. Option 1" in options[1]["text"]["content"]
 
     def test_select_behavior_has_clarify_action(self) -> None:
         card = build_clarify_card(
             question="Q",
-            choices=["X"],
+            choices=[f"X{i}" for i in range(6)],
             clarify_id="id5",
         )
         select_el = next(e for e in card["body"]["elements"] if e.get("tag") == "select_static")
@@ -472,7 +494,8 @@ class TestWrapHandleCardActionEventV142:
         original.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_clarify_action_handled_and_original_not_called(self) -> None:
+    @pytest.mark.parametrize("action", ["select", "choice"])
+    async def test_clarify_action_handled_and_original_not_called(self, action) -> None:
         """v1.4.2: clarify action → 复用 _handle_clarify_card_action, 不调用原生."""
         from hermes_lark_streaming.patching import (
             _wrap_handle_card_action_event,
@@ -486,8 +509,11 @@ class TestWrapHandleCardActionEventV142:
             wrapped = _wrap_handle_card_action_event(original)
 
             mock_action = MagicMock()
-            mock_action.value = {"hermes_clarify_action": "select", "clarify_id": "v142_cid"}
-            mock_action.option = "0"
+            mock_action.value = {"hermes_clarify_action": action, "clarify_id": "v142_cid"}
+            if action == "choice":
+                mock_action.value["choice_index"] = "0"
+            else:
+                mock_action.option = "0"
 
             mock_event = MagicMock()
             mock_event.action = mock_action
@@ -1017,13 +1043,13 @@ class TestBuildClarifyCardEscaping:
 
     def test_dict_repr_with_path_normalized_no_curly_leakage(self) -> None:
         """Production bug regression: dict-repr `{'id': 1, 'path': '/x'}` is
-        normalized to `/x` in BOTH the markdown and the select.  Crucially,
+        normalized to `/x` in BOTH the markdown and the dropdown. Crucially,
         the markdown MUST NOT contain raw `{'` (which would trigger Feishu's
         lark_md template-syntax bug and garble the display).
         """
         card = build_clarify_card(
             question="Q",
-            choices=["{'id': 1, 'path': '/x'}"],
+            choices=["{'id': 1, 'path': '/x'}", "B", "C", "D"],
             clarify_id="c1",
         )
         md, options = self._get_md_and_select(card)
@@ -1042,7 +1068,7 @@ class TestBuildClarifyCardEscaping:
         misinterpreted as template syntax.
 
         Markdown: escaped (`\{`, `\}`)
-        Select (plain_text): unescaped (raw `{'id': 1}`)
+        Dropdown (plain_text): unescaped (raw `{'id': 1}`)
 
         Note: the escaped form `\{'id': 1\}` technically still contains the
         2-char substring `{'` (because `\{` is backslash + brace), but the
@@ -1054,7 +1080,7 @@ class TestBuildClarifyCardEscaping:
         raw = "{'id': 1}"
         card = build_clarify_card(
             question="Q",
-            choices=[raw],
+            choices=[raw, "A", "B", "C"],
             clarify_id="c1",
         )
         md, options = self._get_md_and_select(card)
@@ -1066,21 +1092,21 @@ class TestBuildClarifyCardEscaping:
         # The raw, UNescaped original text is NOT in the markdown — it's been
         # transformed by the escape (every `{` and `}` now has a `\` prefix).
         assert raw not in md
-        # The select (plain_text) shows the raw text unchanged.
+        # The dropdown (plain_text) shows the raw text unchanged.
         assert raw in options[0]["text"]["content"]
 
     def test_normal_choices_regression(self) -> None:
         """Regression: plain string choices still work (no escaping needed)."""
         card = build_clarify_card(
             question="Q",
-            choices=["Fast", "Slow"],
+            choices=["Fast", "Slow", "Steady", "Careful"],
             clarify_id="c1",
         )
         md, options = self._get_md_and_select(card)
         assert md is not None
         assert "A. Fast" in md
         assert "B. Slow" in md
-        assert len(options) == 2
+        assert len(options) == 4
 
     def test_square_brackets_escaped_in_markdown(self) -> None:
         """`[` and `]` are lark_md special chars (link syntax) → escaped."""
@@ -1120,11 +1146,11 @@ class TestBuildClarifyCardEscaping:
         (path extracted) and then the brackets are escaped in the markdown.
 
         Markdown: `/x\\[1\\]` (escaped)
-        Select (plain_text): `/x[1]` (unescaped, plain)
+        Dropdown (plain_text): `/x[1]` (unescaped, plain)
         """
         card = build_clarify_card(
             question="Q",
-            choices=["{'path': '/x[1]'}"],
+            choices=["{'path': '/x[1]'}", "B", "C", "D"],
             clarify_id="c1",
         )
         md, options = self._get_md_and_select(card)
@@ -1133,14 +1159,12 @@ class TestBuildClarifyCardEscaping:
         # Markdown: normalized then escaped.
         assert "/x\\[1\\]" in md
         assert "/x[1]" not in md  # raw form is NOT in the markdown
-        # Select (plain_text): normalized, NOT escaped.
+        # Dropdown (plain_text): normalized, NOT escaped.
         assert "/x[1]" in options[0]["text"]["content"]
         assert "\\[" not in options[0]["text"]["content"]
 
-    def test_select_options_use_normalized_text(self) -> None:
-        """The select_static dropdown options use the normalized (but unescaped)
-        text — it's plain_text, so no markdown processing happens.
-        """
+    def test_choice_buttons_use_compact_labels_and_keep_choices_above(self) -> None:
+        """Buttons stay short while the markdown list keeps normalized choices."""
         card = build_clarify_card(
             question="Q",
             choices=[
@@ -1149,13 +1173,10 @@ class TestBuildClarifyCardEscaping:
             ],
             clarify_id="c1",
         )
-        _, options = self._get_md_and_select(card)
-        assert options is not None
-        assert len(options) == 2
-        assert "First" in options[0]["text"]["content"]
-        assert "Second" in options[1]["text"]["content"]
-        # No dict-repr garbage in the dropdown.
-        assert all("{'" not in o["text"]["content"] for o in options)
+        elements = card["body"]["elements"]
+        md = next(e["content"] for e in elements if e.get("tag") == "markdown")
+        assert "A. First" in md
+        assert "B. Second" in md
 
 
 # ── v1.3.0 P0-01: lark_md escaping in submitted/confirmed cards ──

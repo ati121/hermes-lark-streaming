@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from hermes_lark_streaming.cardkit import build_clarify_card
 from hermes_lark_streaming.patching import _apply_feishu_adapter_patches
 from hermes_lark_streaming.patching import adapter as patch_adapter
 
@@ -57,8 +58,9 @@ def native_adapter(monkeypatch):
     patch_adapter._clarify_selections.pop("cid", None)
 
 
-def click(callback, action="select", **kwargs):
-    value = {"hermes_clarify_action": action, "clarify_id": "cid"}
+def click(callback, action="select", *, value=None, **kwargs):
+    if value is None:
+        value = {"hermes_clarify_action": action, "clarify_id": "cid"}
     event = SimpleNamespace(
         action=SimpleNamespace(value=value, **kwargs),
         operator=SimpleNamespace(open_id="user", user_id="uid", union_id="union"),
@@ -77,6 +79,27 @@ def test_native_dispatch_resolves_dropdown_and_returns_confirmed_card(native_ada
     assert expected in str(result.card)
     assert "select_static" not in str(result.card)
     assert "cid" not in adapter._clarify_state
+
+
+@pytest.mark.parametrize("option, expected", [(0, "Yes"), (1, "No")])
+def test_native_dispatch_resolves_one_tap_choice(native_adapter, option, expected):
+    adapter, callback, gateway = native_adapter
+    prompt = build_clarify_card(question="Restart?", choices=["Yes", "No"], clarify_id="cid")
+    row = next(e for e in prompt["body"]["elements"] if e.get("element_id") == "clarify_choices")
+    button = row["columns"][option]["elements"][0]
+    result = click(callback, value=button["behaviors"][0]["value"])
+    gateway.resolve_gateway_clarify.assert_called_once_with("cid", expected)
+    adapter.native.assert_not_called()
+    assert result.card["body"]["elements"][1]["text"]["content"] == f"Selected: {expected}"
+    assert "clarify_choices" not in str(result.card)
+    assert "cid" not in adapter._clarify_state
+
+
+@pytest.mark.parametrize("invalid", ["-1", "2", "garbage", ""])
+def test_native_dispatch_rejects_invalid_one_tap_choice(native_adapter, invalid):
+    _, callback, gateway = native_adapter
+    click(callback, value={"hermes_clarify_action": "choice", "clarify_id": "cid", "choice_index": invalid})
+    gateway.resolve_gateway_clarify.assert_not_called()
 
 
 @pytest.mark.parametrize("action, values", [

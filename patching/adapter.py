@@ -607,6 +607,71 @@ def _wrap_feishu_interactive_authorization(original_method: Callable) -> Callabl
     return _wrapped
 
 
+_APPROVAL_ACTION_LABELS_ZH = {
+    "approve_once": "仅本次允许",
+    "approve_session": "本会话允许",
+    "approve_always": "始终允许",
+    "deny": "拒绝",
+}
+_APPROVAL_RESULT_LABELS_ZH = {
+    "once": "已批准本次操作",
+    "session": "已允许本会话",
+    "always": "已设为始终允许",
+    "deny": "已拒绝",
+}
+_APPROVAL_RECALL_DELAY_SEC = 5
+_approval_recall_tasks: set[asyncio.Task[None]] = set()
+
+
+def _wrap_feishu_send_interactive_card(original_method: Callable) -> Callable:
+    """Translate the native approval card without changing its available actions."""
+    async def _wrapped(self, chat_id, card, *args, **kwargs):
+        states = getattr(self, "_approval_state", None)
+        if states is not None and kwargs.get("state_map") is states:
+            card = copy.deepcopy(card)
+            if title := card.get("header", {}).get("title"):
+                title["content"] = "⚠️ 操作审批"
+            for row in card.get("elements", []):
+                for button in row.get("actions", []):
+                    action = button.get("value", {}).get("hermes_action")
+                    if action in _APPROVAL_ACTION_LABELS_ZH:
+                        button["text"]["content"] = _APPROVAL_ACTION_LABELS_ZH[action]
+        return await original_method(self, chat_id, card, *args, **kwargs)
+
+    return _wrapped
+
+
+def _wrap_feishu_build_resolved_approval_card(original_method: Callable) -> Callable:
+    """Use Chinese for both the callback card and the persisted result."""
+    def _wrapped(*args, **kwargs):
+        card = original_method(*args, **kwargs)
+        choice = kwargs.get("choice")
+        label = _APPROVAL_RESULT_LABELS_ZH.get(choice)
+        title = card.get("header", {}).get("title")
+        elements = card.get("elements", [])
+        if label and title and elements and elements[0].get("tag") == "markdown":
+            from ..cardkit.elements import _escape_md
+
+            icon = "❌" if choice == "deny" else "✅"
+            title["content"] = f"{icon} {label}"
+            body = kwargs.get("body")
+            user_name = _escape_md(str(kwargs.get("user_name") or ""))
+            decided = f"{icon} **{label}** · 操作人：{user_name}" if user_name else f"{icon} **{label}**"
+            elements[0]["content"] = f"{body}\n\n{decided}" if body else decided
+        return card
+
+    return _wrapped
+
+
+async def _recall_approval_card(delete_message: Callable, chat_id: str, message_id: str) -> None:
+    await asyncio.sleep(_APPROVAL_RECALL_DELAY_SEC)
+    try:
+        if not await delete_message(chat_id, message_id):
+            _logger.warning("HLS: Feishu did not recall the resolved approval card")
+    except Exception:  # noqa: BLE001 - recall is separate from settling the approval
+        _logger.exception("HLS: resolved approval card recall failed")
+
+
 async def _update_approval_result(adapter, message_id: str, card: dict) -> None:
     """Persist the native decision on the original IM card using its own bot."""
     from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
@@ -662,6 +727,12 @@ def _wrap_feishu_resolve_approval(original_method: Callable) -> Callable:
             return
         if not (message_id := state.get("message_id")):
             return
+        delete_message = getattr(self, "delete_message", None)
+        target = state.get("chat_id") or chat_id
+        if callable(delete_message) and target:
+            task = asyncio.create_task(_recall_approval_card(delete_message, target, message_id))
+            _approval_recall_tasks.add(task)
+            task.add_done_callback(_approval_recall_tasks.discard)
         try:
             card = self._build_resolved_approval_card(choice=choice, user_name=user_name, body=state.get("body"))
             await _update_approval_result(self, message_id, card)
@@ -686,16 +757,27 @@ def _wrap_feishu_resolve_approval(original_method: Callable) -> Callable:
     return _wrapped
 
 
+def _clarify_choice_text(action, action_value, action_obj, choices: list[str]) -> str | None:
+    raw_index = action_value.get("choice_index") if action == "choice" else getattr(action_obj, "option", None)
+    index = str(raw_index)
+    if not index.isascii() or not index.isdecimal():
+        return None
+    try:
+        return choices[int(index)]
+    except (IndexError, ValueError):
+        return None
+
+
 def _wrap_native_clarify_card_action(original_method: Callable) -> Callable:
     """Handle plugin controls at the host's synchronous dispatch target.
 
     The SDK may retain an old bound _on_card_action_trigger, but that callback
     looks up this method on self. Native numeric/other buttons still belong to
-    Hermes; only our dropdown/input/retry tokens are intercepted here.
+    Hermes; only the plugin's controls are intercepted here.
     """
     def _wrapped(self, *, event, action_value, loop):
         action = action_value.get("hermes_clarify_action")
-        if action not in {"select", "input_submit", "button_submit", "retry_submit"}:
+        if action not in {"choice", "select", "input_submit", "button_submit", "retry_submit"}:
             return original_method(self, event=event, action_value=action_value, loop=loop)
 
         cid = str(action_value.get("clarify_id") or "")
@@ -715,13 +797,10 @@ def _wrap_native_clarify_card_action(original_method: Callable) -> Callable:
             return self._card_response()
 
         action_obj = getattr(event, "action", None)
-        if action == "select":
-            option = str(getattr(action_obj, "option", "") or "")
+        if action in {"choice", "select"}:
             with _clarify_lock:
                 choices = list(_clarify_choices.get(cid, []))
-            if not option.isdecimal() or int(option) >= len(choices):
-                return self._card_response()
-            text = choices[int(option)]
+            text = _clarify_choice_text(action, action_value, action_obj, choices)
         elif action == "input_submit":
             text = str(getattr(action_obj, "input_value", "") or "").strip()
         elif action == "button_submit":
@@ -1034,7 +1113,7 @@ def _handle_clarify_card_action(
     # v1.3.0: snapshot question + choices atomically (used by all action branches)
     with _clarify_lock:
         question = _clarify_questions.get(clarify_id, "")
-        choices = _clarify_choices.get(clarify_id) or None
+        choices = list(_clarify_choices.get(clarify_id, []))
 
     # ── Handle retry_submit action (re-send previous selection) ──
     if clarify_action == "retry_submit":
@@ -1056,23 +1135,12 @@ def _handle_clarify_card_action(
         # Return the same submitted card (soft lock with retry button)
         return _submitted_card_response(stored_selection, choices, question, clarify_id)
 
-    # ── Handle select action (dropdown choice) ──
-    if clarify_action == "select":
-        selected_option = str(getattr(getattr(event, "action", None), "option", "") or "")
-
-        # Predefined choice selected → resolve
-        with _clarify_lock:
-            choices_list = list(_clarify_choices.get(clarify_id, []))
-        try:
-            idx = int(selected_option)
-            choice_text = choices_list[idx]
-        except (ValueError, IndexError):
-            _logger.warning(
-                "clarify card: invalid option index '%s' for clarify_id=%s (choices=%s)",
-                selected_option,
-                (clarify_id or "?")[:12],
-                choices_list,
-            )
+    # ── Handle direct choice buttons and legacy dropdown choices ──
+    if clarify_action in {"choice", "select"}:
+        action_obj = getattr(event, "action", None)
+        choice_text = _clarify_choice_text(clarify_action, action_value, action_obj, choices)
+        if choice_text is None:
+            _logger.warning("clarify card: invalid choice index for clarify_id=%s", clarify_id[:12])
             return _empty_response()
 
         _logger.info(
@@ -1089,7 +1157,7 @@ def _handle_clarify_card_action(
         _resolve_clarify_and_confirm(adapter_instance, clarify_id, choice_text)
 
         # Return submitted card (soft lock with retry button) — don't cleanup yet
-        return _submitted_card_response(choice_text, choices_list or None, question, clarify_id)
+        return _submitted_card_response(choice_text, choices, question, clarify_id)
 
     # ── Handle input_submit action (text input via Enter key) ──
     if clarify_action == "input_submit":

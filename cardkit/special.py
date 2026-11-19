@@ -33,6 +33,9 @@ _CLARIFY_DICT_FIELD_PRIORITY = (
 )
 
 _CLARIFY_MAX_CHOICE_LEN = 80
+# A small list is easier to answer with one tap; cap it at three so buttons fit
+# comfortably on narrow screens. Keep the dropdown for longer lists.
+_CLARIFY_DIRECT_CHOICE_LIMIT = 3
 _GATEWAY_STATUS_ELEMENT_ID = "hls_gateway_status"
 
 def _normalize_choice(choice: Any) -> str:
@@ -178,8 +181,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
     return card
 
 def build_clarify_card(*, question: str, choices: list[str] | None = None, clarify_id: str = "") -> dict[str, Any]:
-    """构建 Clarify 待选择态卡片 (State 1: Pending). 三态: 标题/选项列表/快速选择下拉/
-    自定义输入. choices 经 normalize + escape for lark_md. select_static 用 plain_text."""
+    """构建 Clarify 待选择态卡片 (State 1: Pending): 标题、选项、快捷选择或下拉、自定义输入."""
     elements: list[dict] = [
         _icon_div("info_outlined", "blue", {
             "tag": "lark_md",
@@ -201,34 +203,71 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
             "content": options_md,
         })
 
-        # select_static dropdown (plain_text, no markdown).
-        options: list[dict] = [
-            {
-                "text": {"tag": "plain_text", "content": f"{label}. {choice}"},
-                "value": str(i),
-            }
-            for i, (label, choice) in enumerate(zip(labels, normalized_choices))
-        ]
+        if len(normalized_choices) <= _CLARIFY_DIRECT_CHOICE_LIMIT:
+            # Keep the full choice text above and use compact buttons to avoid
+            # repeating long labels or crowding the card on mobile.
+            en_choose, zh_choose = _T["clarify_choose"]
+            columns = []
+            for i, label in enumerate(labels):
+                en_label, zh_label = en_choose.format(label), zh_choose.format(label)
+                columns.append({
+                    "tag": "column",
+                    "width": "auto",
+                    "elements": [{
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": en_label,
+                            "i18n_content": _i18n(en_label, zh_label),
+                        },
+                        "type": "default",
+                        "size": "small",
+                        "behaviors": [{
+                            "type": "callback",
+                            "value": {
+                                "hermes_clarify_action": "choice",
+                                "choice_index": str(i),
+                                "clarify_id": clarify_id,
+                            },
+                        }],
+                    }],
+                })
+            elements.append({
+                "tag": "column_set",
+                "element_id": "clarify_choices",
+                "flex_mode": "flow",
+                "horizontal_spacing": "8px",
+                "columns": columns,
+            })
+        else:
+            # Long lists stay in a compact dropdown. Its callback is retained
+            # for cards created before this direct-button layout was introduced.
+            options: list[dict] = [
+                {
+                    "text": {"tag": "plain_text", "content": f"{label}. {choice}"},
+                    "value": str(i),
+                }
+                for i, (label, choice) in enumerate(zip(labels, normalized_choices))
+            ]
 
-        en_placeholder, zh_placeholder = _T["clarify_select_placeholder"]
-        select_el: dict[str, Any] = {
-            "tag": "select_static",
-            "element_id": "clarify_select",
-            "placeholder": {
-                "tag": "plain_text",
-                "content": en_placeholder,
-                "i18n_content": _i18n(en_placeholder, zh_placeholder),
-            },
-            "options": options,
-            "behaviors": [{
-                "type": "callback",
-                "value": {
-                    "hermes_clarify_action": "select",
-                    "clarify_id": clarify_id,
+            en_placeholder, zh_placeholder = _T["clarify_select_placeholder"]
+            elements.append({
+                "tag": "select_static",
+                "element_id": "clarify_select",
+                "placeholder": {
+                    "tag": "plain_text",
+                    "content": en_placeholder,
+                    "i18n_content": _i18n(en_placeholder, zh_placeholder),
                 },
-            }],
-        }
-        elements.append(select_el)
+                "options": options,
+                "behaviors": [{
+                    "type": "callback",
+                    "value": {
+                        "hermes_clarify_action": "select",
+                        "clarify_id": clarify_id,
+                    },
+                }],
+            })
 
     en_input_ph, zh_input_ph = _T["clarify_input_placeholder"]
     input_el: dict[str, Any] = {

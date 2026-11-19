@@ -39,7 +39,8 @@ _T: dict[str, tuple[str, str]] = {
     "calling_tool": ("Calling {}...", "正在调用 {}"),
     # ── Clarify interactive card (three-state: pending / submitted / confirmed) ──
     "clarify_select_placeholder": ("Quick select...", "快速选择..."),
-    "clarify_input_placeholder": ("Type your answer...", "请输入你的回答..."),
+    "clarify_choose": ("Choose {}", "选择 {}"),
+    "clarify_input_placeholder": ("Custom answer...", "自定义回答..."),
     "clarify_selected": ("Selected: {}", "已选择: {}"),
     "clarify_submitted": ("Submitted, awaiting confirmation...", "已提交，等待确认..."),
     "clarify_retry": ("Retry submission", "重试提交"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import inspect
 import logging
 import threading
 import time
@@ -253,6 +254,8 @@ from .adapter import (  # noqa: E402
     _wrap_feishu_adapter_send_clarify,
     _wrap_handle_card_action_event,
     _wrap_feishu_interactive_authorization,
+    _wrap_feishu_send_interactive_card,
+    _wrap_feishu_build_resolved_approval_card,
     _wrap_feishu_resolve_approval,
     _wrap_native_clarify_card_action,
     _handle_clarify_card_action,
@@ -304,7 +307,10 @@ def _wrap_method_once(cls: Any, name: str, wrapper_factory: Callable) -> str:
         return "missing"
     if _already_wrapped(orig):
         return "adopted"
-    setattr(cls, name, _mark_wrapped(wrapper_factory(orig)))
+    wrapped = _mark_wrapped(wrapper_factory(orig))
+    if isinstance(inspect.getattr_static(cls, name, None), staticmethod):
+        wrapped = staticmethod(wrapped)
+    setattr(cls, name, wrapped)
     return "patched"
 
 def _apply_gateway_runner_patches(compat: Any | None = None) -> bool:
@@ -646,6 +652,8 @@ def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
             ("delete_reaction", _wrap_feishu_adapter_delete_reaction, "_remove_reaction"),
             ("send_clarify", _wrap_feishu_adapter_send_clarify, None),
             ("_is_interactive_operator_authorized", _wrap_feishu_interactive_authorization, None),
+            ("_send_interactive_card", _wrap_feishu_send_interactive_card, None),
+            ("_build_resolved_approval_card", _wrap_feishu_build_resolved_approval_card, None),
             ("_resolve_approval", _wrap_feishu_resolve_approval, None),
             ("_handle_card_action_event", _wrap_handle_card_action_event, None),
             ("_handle_clarify_card_action", _wrap_native_clarify_card_action, None),

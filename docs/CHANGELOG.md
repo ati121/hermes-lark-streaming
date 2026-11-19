@@ -4,6 +4,26 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.61 (2026-11-19, personal fork)
+
+### Changed — localize and clear Feishu approval cards
+
+- Display native approval titles, buttons, and outcome labels in Chinese while
+  preserving the original request details and approval options.
+- Recall the original card five seconds after an approval decision is accepted,
+  using the same bot that sent it. Expired and unauthorized actions do not
+  schedule a recall.
+
+## v1.60 (2026-11-19, personal fork)
+
+### Changed — answer short clarification prompts with one tap
+
+- Show up to three localized choice buttons below the full option text. Longer
+  lists keep the compact dropdown, and custom text answers remain available.
+- Return the confirmed card with the chosen answer as part of the native
+  callback, without waiting for the agent's next reply. Keep compatibility with
+  existing dropdown callbacks and the older adapter routing path.
+
 ## v1.59 (2026-11-18, personal fork)
 
 ### Fixed — persist approval results immediately after a click

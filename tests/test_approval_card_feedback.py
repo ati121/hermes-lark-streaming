@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from hermes_lark_streaming.patching import _apply_feishu_adapter_patches
+from hermes_lark_streaming.patching import adapter as patch_adapter
 from hermes_lark_streaming.patching.adapter import _wrap_feishu_resolve_approval
 
 
@@ -54,6 +55,9 @@ def approval_adapter(monkeypatch):
         def _build_resolved_approval_card(*, choice, user_name, body):
             return {"header": {"title": {"content": choice}}, "elements": [{"tag": "markdown", "content": body}]}
 
+        async def _send_interactive_card(self, chat_id, card, *, state_map):
+            return card
+
         async def _resolve_approval(self, *args, **kwargs):
             await self.original_resolve(*args, **kwargs)
 
@@ -78,8 +82,11 @@ def click(callback, *, action="approve_once", chat="chat"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action, choice", [("approve_once", "once"), ("deny", "deny")])
-async def test_result_is_patched_before_agent_completes(approval_adapter, action, choice):
+@pytest.mark.parametrize(("action", "choice", "title"), [
+    ("approve_once", "once", "✅ 已批准本次操作"),
+    ("deny", "deny", "❌ 已拒绝"),
+])
+async def test_result_is_patched_before_agent_completes(approval_adapter, action, choice, title):
     adapter, callback, settlement = approval_adapter
     agent_started, agent_finished = asyncio.Event(), asyncio.Event()
 
@@ -91,7 +98,9 @@ async def test_result_is_patched_before_agent_completes(approval_adapter, action
     settlement.side_effect = lambda *args, **kwargs: agent_started.set() or 1
     try:
         inline_card = click(callback, action=action)
-        assert inline_card["header"]["title"]["content"] == choice
+        assert inline_card["header"]["title"]["content"] == title
+        assert "Protected write request\n\n" in inline_card["elements"][0]["content"]
+        assert "操作人：Operator" in inline_card["elements"][0]["content"]
         await adapter.queued.pop()
         assert agent_started.is_set()
         assert not worker.done()
@@ -182,7 +191,7 @@ async def test_frequency_limit_retries_only_the_card_update(approval_adapter, mo
     assert adapter._run_blocking.await_count == 2
     first, second = adapter._run_blocking.await_args_list
     assert first.args[1] is second.args[1]
-    assert json.loads(second.args[1].request_body.content)["header"]["title"]["content"] == "once"
+    assert json.loads(second.args[1].request_body.content)["header"]["title"]["content"] == "✅ 已批准本次操作"
 
 
 @pytest.mark.asyncio
@@ -203,3 +212,72 @@ async def test_older_host_retains_native_resolver():
     adapter = SimpleNamespace()
     assert await wrapped(adapter, 1, "once", "Operator", open_id="ou_user") == "legacy"
     original.assert_awaited_once_with(adapter, 1, "once", "Operator", open_id="ou_user")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("action_ids", "labels"), [
+    (["approve_once", "approve_session", "approve_always", "deny"],
+     ["仅本次允许", "本会话允许", "始终允许", "拒绝"]),
+    (["deny"], ["拒绝"]),
+])
+async def test_chinese_prompt_preserves_native_actions_and_body(approval_adapter, action_ids, labels):
+    adapter, _, _ = approval_adapter
+    body = "```text\nhermes_action: deny\n```\n\nFlagged reason: protected file"
+    buttons = [
+        {"tag": "button", "text": {"tag": "plain_text", "content": "English"}, "type": "default",
+         "value": {"hermes_action": action, "approval_id": 1}}
+        for action in action_ids
+    ]
+    card = {"header": {"title": {"content": "Approval required"}}, "elements": [
+        {"tag": "markdown", "content": body}, {"tag": "action", "actions": buttons},
+    ]}
+
+    result = await adapter._send_interactive_card("chat", card, state_map=adapter._approval_state)
+    assert result["header"]["title"]["content"] == "⚠️ 操作审批"
+    assert result["elements"][0]["content"] == body
+    localized = result["elements"][1]["actions"]
+    assert [b["text"]["content"] for b in localized] == labels
+    assert [b["value"] for b in localized] == [b["value"] for b in buttons]
+    assert [b["type"] for b in localized] == [b["type"] for b in buttons]
+    assert card["header"]["title"]["content"] == "Approval required"
+    assert await adapter._send_interactive_card("chat", card, state_map={}) is card
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve_once", "deny"])
+async def test_only_resolved_original_card_is_recalled_after_five_seconds(approval_adapter, monkeypatch, action):
+    adapter, callback, settlement = approval_adapter
+    adapter.delete_message = AsyncMock(return_value=True)
+    timer_started, timer_elapsed = asyncio.Event(), asyncio.Event()
+
+    async def wait_for_timer(seconds):
+        assert seconds == 5
+        timer_started.set()
+        await timer_elapsed.wait()
+
+    monkeypatch.setattr(patch_adapter.asyncio, "sleep", wait_for_timer)
+    click(callback, action=action)
+    await adapter.queued.pop()
+    (recall_task,) = patch_adapter._approval_recall_tasks
+    try:
+        await timer_started.wait()
+        adapter._run_blocking.assert_awaited_once()
+        adapter.delete_message.assert_not_awaited()
+        assert click(callback, action=action) is None
+        settlement.assert_called_once()
+    finally:
+        timer_elapsed.set()
+        await recall_task
+    adapter.delete_message.assert_awaited_once_with("chat", "approval-card")
+    assert recall_task not in patch_adapter._approval_recall_tasks
+
+
+@pytest.mark.asyncio
+async def test_expired_approval_does_not_schedule_recall(approval_adapter):
+    adapter, callback, settlement = approval_adapter
+    adapter.delete_message = AsyncMock(return_value=True)
+    settlement.return_value = 0
+    click(callback)
+    await adapter.queued.pop()
+    assert not patch_adapter._approval_recall_tasks
+    adapter.delete_message.assert_not_awaited()
