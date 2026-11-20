@@ -4,6 +4,25 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.65 (2026-11-20, personal fork)
+
+### Fixed — Zimage wrapper calls from terminal scripts
+
+- Recognize the image profile's local `zimage_gen.gen(...)` wrapper when a
+  terminal command runs a custom Python script such as `z_run8.py`.
+- Preserve the Zimage label, model and safe display detail in live tool rows
+  and completed history instead of falling back to a generic terminal or the
+  selected GPT image model.
+- Keep the static classifier conservative: it follows only the allow-listed
+  import/call shape, never executes scripts, and does not inspect imported
+  remote files.
+
+### Validation
+
+- Full default suite: **2,267 passed**, including the timeout wrapper negative
+  case and the custom `zimage_gen.gen` script coverage.
+- Ruff and `git diff --check` pass for all changed files.
+
 ## v1.64 (2026-11-20, personal fork)
 
 ### Fixed — image labels for prompt-file script calls

@@ -1213,6 +1213,8 @@ def _tool_display_names(name: str | None, detail: str | None = None, args: dict[
         return "Tool", "工具"
     if _normalize_tool_name(name) == "image_generate" and isinstance(args, dict):
         model = str(args.get("model") or "").strip().lower()
+        if re.fullmatch(r"(?:[a-z0-9_.-]+/)*z[-_ ]?image(?:[-_. ][a-z0-9]+)*", model):
+            return "Zimage · Generate image", "Zimage · 生成图片"
         if re.fullmatch(r"(?:[a-z0-9_.-]+/)*gpt[-_ ]image(?:[-_. ][a-z0-9]+)*", model):
             return "GPT · Generate image", "GPT · 生成图片"
     magpie = _magpie_mcp_spec(name, args)
@@ -1472,18 +1474,22 @@ class ToolUseTracker:
             detail = _sanitize_detail(s.detail, sanitizer)
             aliased = _terminal_program_spec(s.name, s.detail, s.args)
             if aliased is not None:
-                command = _terminal_command_text(s.name, s.detail, s.args)
-                prepared = _literal_cat_heredoc_tail(command)
-                if prepared is not None and prepared != command:
-                    detail = _oneline_clip(_sanitize_detail(_prepared_image_detail(prepared, aliased[0]), sanitizer))
+                api_detail = (s.args or {}).get("_hls_image_detail") if isinstance(s.args, dict) else None
+                if isinstance(api_detail, str) and api_detail.strip():
+                    detail = _oneline_clip(api_detail)
                 else:
-                    variables = _shell_variables(command)
-                    if command != (s.detail or ""):
-                        # Rebuilt from the full command so the arguments survive
-                        # Hermes's preview cap; clipped to keep the row one line.
-                        detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0], variables))
+                    command = _terminal_command_text(s.name, s.detail, s.args)
+                    prepared = _literal_cat_heredoc_tail(command)
+                    if prepared is not None and prepared != command:
+                        detail = _oneline_clip(_sanitize_detail(_prepared_image_detail(prepared, aliased[0]), sanitizer))
                     else:
-                        detail = _strip_leading_program(detail, aliased[0], variables)
+                        variables = _shell_variables(command)
+                        if command != (s.detail or ""):
+                            # Rebuilt from the full command so the arguments survive
+                            # Hermes's preview cap; clipped to keep the row one line.
+                            detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0], variables))
+                        else:
+                            detail = _strip_leading_program(detail, aliased[0], variables)
                 if any(token.lower() in _PARSEHUB_PROGRAMS for token in aliased[0]):
                     detail = _strip_parsehub_verb(detail)
             steps.append(
