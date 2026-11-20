@@ -33,7 +33,9 @@ class CardSession:
         "_final_delivery_unconfirmed",
         "_first_flush_done",
         "_is_continuation",
+        "_interactive_last_ack",
         "_interactive_seal_started",
+        "_interactive_update_attempt",
         "_loading_brand",
         "_loading_hint_state",
         "_loading_label",
@@ -118,6 +120,9 @@ class CardSession:
         self.seal_task: asyncio.Task[None] | None = None
         self._completion_started = False
         self._interactive_seal_started = False
+        # Only acknowledged full-card frames can suppress a later IM PATCH.
+        self._interactive_last_ack: tuple[str, int, str] | None = None
+        self._interactive_update_attempt = 0
         self._disposed = False
         self._final_delivery_unconfirmed = False
         self.text_sizes: dict[str, str | dict[str, str]] = {}

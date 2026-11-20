@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time as _time
 from collections.abc import Callable, Coroutine
@@ -303,7 +304,7 @@ def _restore_answer_flush_snapshot(
 
 # NOTE: This is the *server-side flush interval* (how often we send
 _ANSWER_FAST_STREAM_MS = 0.150  # answer-only 节流间隔（150ms，v1.2.1 从 70ms 上调）
-_INTERACTIVE_INTERVAL_SEC = 1.0
+_INTERACTIVE_INTERVAL_SEC = 2.0
 _INTERACTIVE_COOLDOWN_SEC = 12.0
 _INTERACTIVE_RECOVERY_DELAYS = (20.0, 30.0, 60.0)
 
@@ -804,21 +805,63 @@ class UnifiedControllerMixin:
         await self._flush_phase3(session, state)
 
     async def _flush_interactive(self, session: CardSession, state: UnifiedLinearState) -> None:
-        """Whole-card IM PATCH: one update_card per flush, rebuilt from state."""
+        """Send changed full-card frames through the independently paced IM path."""
         assert self._client is not None
-        if not session.card_msg_id:
+        message_id = session.card_msg_id
+        epoch = session.create_epoch
+        if not message_id:
             return
-        session.flush.set_cooldown(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
+
+        def still_current() -> bool:
+            current = self._sess_get(session.message_id)
+            return (
+                not session._disposed
+                and session.accepts_stream_updates
+                and session.card_msg_id == message_id
+                and session.create_epoch == epoch
+                and (current is None or current is session)
+                and not is_unavailable(message_id)
+                and not session.guard.should_skip("interactive_flush")
+            )
+
+        if not still_current():
+            return
         try:
             with session._stream_lock:
                 pending_panel = state.panel_dirty
                 pending_answer = state.answer_dirty
                 pending_tools = state.tool_steps_dirty
                 card = self._build_interactive_linear_card(session)
+                fingerprint = (
+                    message_id, epoch,
+                    json.dumps(card, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                )
                 state.panel_dirty = False
                 state.answer_dirty = False
                 state.tool_steps_dirty = False
-            await self._client.update_card(session.card_msg_id, card)
+            if fingerprint != session._interactive_last_ack:
+                session.flush.set_cooldown(max(self._cfg.flush_interval_sec, _INTERACTIVE_INTERVAL_SEC))
+                session._interactive_update_attempt += 1
+                _logger.debug(
+                    "[%s] interactive card update: attempt=%d card_msg=...%s bytes=%d",
+                    session.card_trace_id, session._interactive_update_attempt,
+                    message_id[-12:], len(fingerprint[2].encode("utf-8")),
+                )
+                await self._client.update_card(message_id, card, should_update=still_current)
+                if not still_current():
+                    # A queued PATCH may be skipped after the final seal or a
+                    # card replacement. It is not an acknowledged live frame.
+                    with session._stream_lock:
+                        state.panel_dirty = state.panel_dirty or pending_panel
+                        state.answer_dirty = state.answer_dirty or pending_answer
+                        state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
+                    return
+                session._interactive_last_ack = fingerprint
+            else:
+                _logger.debug(
+                    "[%s] interactive card update unchanged: card_msg=...%s",
+                    session.card_trace_id, message_id[-12:],
+                )
         except asyncio.CancelledError:
             with session._stream_lock:
                 state.panel_dirty = state.panel_dirty or pending_panel
@@ -831,13 +874,16 @@ class UnifiedControllerMixin:
                 state.answer_dirty = state.answer_dirty or pending_answer
                 state.tool_steps_dirty = state.tool_steps_dirty or pending_tools
             _logger.warning(
-                "interactive card update failed: %s msg=%s",
-                e, (session.card_msg_id or "?")[:12],
+                "[%s] interactive card update failed: %s attempt=%d card_msg=...%s",
+                session.card_trace_id, e, session._interactive_update_attempt,
+                message_id[-12:],
             )
             if isinstance(e, FeishuAPIError) and is_frequency_limit(e):
                 # Coalesce all updates rejected by IM frequency limits and
                 # retry only after the provider's rejection window cools.
-                session.flush.set_cooldown(_INTERACTIVE_COOLDOWN_SEC)
+                session.flush.set_cooldown(max(
+                    _INTERACTIVE_COOLDOWN_SEC, getattr(e, "retry_after", None) or 0.0,
+                ))
             elif isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
                 session.guard.terminate("interactive_flush", err=e)
                 session.flush.mark_completed()

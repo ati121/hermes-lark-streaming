@@ -4,6 +4,36 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.63 (2026-11-20, personal fork)
+
+### Fixed — IM card update frequency and recovery
+
+- Pace full-card IM streaming at a minimum of two seconds while keeping the
+  first visible content immediate. Skip frames identical to the last acknowledged
+  card, including source events that do not change the rendered preview.
+- Serialize every plugin IM PATCH attempt per message, including terminal writes,
+  callbacks and retries. Leave margin below the documented single-message limit
+  and recheck card/session validity immediately before sending queued work.
+- Share IM rejection cooldowns between callers, increase repeated rejection
+  backoff, and honor Feishu's `x-ogw-ratelimit-reset` and `Retry-After` headers.
+  Apply API-wide rejection cooldowns across messages using the same client.
+- Preserve dirty content after failed or skipped live writes. Only confirmed live
+  frames can suppress a later update; final-card repair and duplicate prevention
+  remain in place. Keep pending final repair alive across session TTL cleanup,
+  and release cached frames when the session completes.
+- Include a hashed message reference, provider trace and recent attempt counts in
+  frequency-limit diagnostics so subsequent incidents can be distinguished
+  without logging card contents or credentials.
+
+### Validation
+
+- Full default suite: **2,188 passed**, including concurrent writers, unchanged
+  frames, provider cooldowns, cancellation and final-delivery TTL regressions.
+- Transport/recovery regressions with `lark-oapi 1.7.5`: **107 passed**, using
+  mocked transport without sending live messages.
+- No new changed-file Ruff diagnostics compared with the release base;
+  `git diff --check` passes. All 43 packaged source/asset files match the workspace.
+
 ## v1.62 (2026-11-20, personal fork)
 
 ### Fixed — Feishu card formatting, budgets and delivery

@@ -268,8 +268,9 @@ def test_worker_first_activity_immediately_updates_interactive_card() -> None:
     updated = threading.Event()
     update_error: list[BaseException] = []
 
-    async def _record_update(message_id: str, card: dict) -> None:
+    async def _record_update(message_id: str, card: dict, *, should_update=None) -> None:
         try:
+            assert should_update is not None and should_update()
             assert message_id == "card-message"
             spinner = next(
                 element for element in card["body"]["elements"]
@@ -327,8 +328,9 @@ def test_worker_compression_immediately_updates_interactive_card() -> None:
     updated = threading.Event()
     update_error: list[BaseException] = []
 
-    async def _record_update(message_id: str, card: dict) -> None:
+    async def _record_update(message_id: str, card: dict, *, should_update=None) -> None:
         try:
+            assert should_update is not None and should_update()
             assert message_id == "compression-card"
             hint = next(
                 element for element in card["body"]["elements"]

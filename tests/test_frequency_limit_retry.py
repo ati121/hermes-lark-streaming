@@ -1,6 +1,6 @@
 """v1.8: 飞书 IM 频控（230020）的退避重试 —— 只给终态封口开.
 
-背景：飞书 IM 接口对单聊/群维度限流 5 QPS，超了返回 230020
+背景：飞书 IM 卡片更新接口对同一条消息限流 5 QPS，文档中的频控码为 230020
 （``This operation triggers the frequency limit``）。插件的终态封口只有一次
 机会 —— 那次 PATCH 被拒，卡片就永久停在「思考中」，上层还会退化成裸文本回复
 （``_do_linear_complete_with_fallback``）。所以只给这一次调用开退避重试。

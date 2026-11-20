@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import logging
+import math
 import re
 import time as _time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any
 from uuid import uuid4
 
@@ -75,11 +78,14 @@ def _sanitize_message(msg: str) -> str:
 class FeishuAPIError(RuntimeError):
     """飞书 API 错误，携带 API 错误码和 log_id."""
 
-    def __init__(self, message: str, code: int = 0, log_id: str = "") -> None:
+    def __init__(
+        self, message: str, code: int = 0, log_id: str = "", *, retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         # v1.3.4: 飞书 log_id，用于开放平台后台排查请求链路
         self.log_id = log_id
+        self.retry_after = retry_after
 
     def __str__(self) -> str:
         base = super().__str__()
@@ -154,6 +160,12 @@ _TRANSIENT_MAX_RETRIES = len(_TRANSIENT_RETRY_DELAYS)
 # IM rejection windows can last tens of seconds. Keep this budget separate
 # from short network/CardKit retries so streaming updates never block on it.
 _FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
+_APP_FREQUENCY_LIMITS = frozenset({99991400, 429})
+_APP_FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0)
+_IM_UPDATE_MIN_INTERVAL = 0.25  # Below the documented per-message 5 QPS ceiling.
+_IM_UPDATE_COOLDOWN = 12.0
+_IM_UPDATE_MAX_COOLDOWN = 60.0
+_IM_UPDATE_HISTORY_SECONDS = 60.0
 
 _ELEMENT_NOT_FOUND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 _ELEMENT_NOT_FOUND_MAX_RETRIES = len(_ELEMENT_NOT_FOUND_RETRY_DELAYS)
@@ -176,6 +188,8 @@ def _may_have_committed(error: Exception) -> bool:
 
 def _unclear_write_response(response: Any) -> bool:
     status = getattr(getattr(response, "raw", None), "status_code", None)
+    if status == 429:
+        return False  # Explicit rejection, even when the gateway omits an API code.
     return getattr(response, "code", None) is None or (isinstance(status, int) and status >= 500)
 
 
@@ -183,8 +197,74 @@ def _unacknowledged_write(
     error_type: type[FeishuAPIError], operation: str, error: Exception,
 ) -> FeishuAPIError:
     if isinstance(error, FeishuAPIError):
-        return error_type(f"commit not acknowledged: {error.args[0]}", error.code, error.log_id)
+        return error_type(
+            f"commit not acknowledged: {error.args[0]}", error.code, error.log_id,
+            retry_after=error.retry_after,
+        )
     return error_type(f"{operation}: commit not acknowledged ({type(error).__name__})")
+
+
+def _rate_limit_retry_after(response: Any) -> float | None:
+    """Read the provider's relative seconds or HTTP-date, without trusting bad hints."""
+    headers = getattr(getattr(response, "raw", None), "headers", None)
+    try:
+        values = {str(key).lower(): value for key, value in headers.items()}
+    except (AttributeError, TypeError, ValueError):
+        return None
+    for name in ("x-ogw-ratelimit-reset", "retry-after"):
+        value = values.get(name)
+        if value is None:
+            continue
+        try:
+            delay = float(value)
+        except (TypeError, ValueError):
+            try:
+                delay = parsedate_to_datetime(str(value)).timestamp() - _time.time()
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if math.isfinite(delay) and delay >= 0:
+            return delay
+    return None
+
+
+class _IMUpdateState:
+    """One dispatch lock, cooldown and bounded attempt history per IM message."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.active = 0
+        self.next_at = 0.0
+        self.cooldown_until = 0.0
+        self.rejections = 0
+        self.attempted_at: deque[float] = deque()
+        self.expiry: asyncio.TimerHandle | None = None
+
+    async def wait_for_slot(
+        self,
+        endpoint_cooldown: Callable[[], float],
+        *,
+        should_update: Callable[[], bool] | None = None,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            if should_update is not None and not should_update():
+                return
+            delay = max(self.next_at, self.cooldown_until, endpoint_cooldown()) - loop.time()
+            if delay <= 0:
+                return
+            await asyncio.sleep(delay)
+
+    def record_attempt(self, now: float) -> None:
+        while self.attempted_at and self.attempted_at[0] + _IM_UPDATE_HISTORY_SECONDS <= now:
+            self.attempted_at.popleft()
+        self.attempted_at.append(now)
+
+    def reject(self, now: float, retry_after: float | None) -> float:
+        self.rejections += 1
+        delay = min(_IM_UPDATE_COOLDOWN * 2 ** min(self.rejections - 1, 3), _IM_UPDATE_MAX_COOLDOWN)
+        delay = max(delay, retry_after or 0.0)
+        self.cooldown_until = max(self.cooldown_until, now + delay)
+        return self.cooldown_until - now
 
 
 class _CardKitWriteState:
@@ -317,6 +397,10 @@ class FeishuClient:
                     delays: tuple[float, ...] = frequency_limit_delays
                     retry_limit = frequency_limit
                     note = " (frequency limit)"
+                elif e.code in _APP_FREQUENCY_LIMITS:
+                    delays = _APP_FREQUENCY_LIMIT_RETRY_DELAYS
+                    retry_limit = transient_limit
+                    note = " (API frequency limit)"
                 elif _is_transient_error(e):
                     delays = _TRANSIENT_RETRY_DELAYS
                     retry_limit = transient_limit
@@ -324,7 +408,7 @@ class FeishuClient:
                 else:
                     raise
                 if attempt < retry_limit:
-                    delay = delays[min(attempt, len(delays) - 1)]
+                    delay = max(delays[min(attempt, len(delays) - 1)], e.retry_after or 0.0)
                     _logger.info(
                         "transient retry%s: %s attempt=%d/%d code=%s delay=%.2fs",
                         note, operation, attempt + 1, retry_limit, e.code, delay,
@@ -363,8 +447,11 @@ class FeishuClient:
     @staticmethod
     def _check(response: Any, operation: str) -> None:
         """检查 SDK 响应，失败时抛出 FeishuAPIError（携带 log_id）."""
-        if not response.success():
-            code = response.code or 0
+        status = getattr(getattr(response, "raw", None), "status_code", None)
+        if not response.success() or status == 429:
+            # The gateway's status applies to the whole endpoint even when its
+            # body contains a message-specific or otherwise unrelated API code.
+            code = 429 if status == 429 else response.code or 0
             msg = response.msg or ""
             # 返回 None（SDK bug），需从 response.error dict 兜底提取。
             log_id = ""
@@ -392,6 +479,11 @@ class FeishuClient:
                 _sanitize_message(f"{operation}: code={code}, msg={msg}"),
                 code,
                 log_id=log_id,
+                retry_after=(
+                    _rate_limit_retry_after(response)
+                    if code in IM_FREQUENCY_LIMITS or code in _APP_FREQUENCY_LIMITS or status == 429
+                    else None
+                ),
             )
 
     @staticmethod
@@ -410,6 +502,31 @@ class FeishuClient:
             if count_elements(resolved) > CARD_ELEMENT_LIMIT:
                 raise ValueError(f"complete card exceeds {CARD_ELEMENT_LIMIT} tagged elements")
         return content
+
+    @asynccontextmanager
+    async def _serialize_im_update(self, message_id: str) -> AsyncIterator[_IMUpdateState]:
+        states: dict[str, _IMUpdateState] = vars(self).setdefault("_im_update_states", {})
+        state = states.get(message_id)
+        if state is None:
+            state = states[message_id] = _IMUpdateState()
+        if state.expiry is not None:
+            state.expiry.cancel()
+            state.expiry = None
+        state.active += 1
+        try:
+            async with state.lock:
+                yield state
+        finally:
+            state.active -= 1
+            if state.active == 0:
+                if state.attempted_at:
+                    expires_at = max(
+                        state.attempted_at[-1] + _IM_UPDATE_HISTORY_SECONDS,
+                        state.cooldown_until, state.next_at,
+                    )
+                    state.expiry = asyncio.get_running_loop().call_at(expires_at, states.pop, message_id, None)
+                else:
+                    states.pop(message_id, None)
 
     @asynccontextmanager
     async def _serialize_cardkit_write(self, card_id: str) -> AsyncIterator[_CardKitWriteState]:
@@ -631,31 +748,89 @@ class FeishuClient:
 
         async def _do() -> None:
             nonlocal uncertain_error
-            # Recheck after every backoff; the original session/card may have
-            # been disposed, replaced, or stopped while this request slept.
-            if should_update is not None and not should_update():
-                return
-            content = await self._card_json(card)
-            if should_update is not None and not should_update():
-                return
-            request = (
-                PatchMessageRequest.builder()
-                .message_id(message_id)
-                .request_body(PatchMessageRequestBody.builder().content(content).build())
-                .build()
-            )
-            unclear_response = False
-            try:
-                resp = await self._client.im.v1.message.apatch(request)
-                unclear_response = _unclear_write_response(resp)
-                self._check(resp, operation)
-                if unclear_response:
-                    raise FeishuAPIError(f"{operation}: invalid write acknowledgement")
-            except Exception as error:
-                if unclear_response or _may_have_committed(error):
-                    uncertain_error = error
-                raise
-            uncertain_error = None
+            # All callers and every retry share the same boundary. Controller
+            # intervals alone cannot cover toggles, terminal writes or retries.
+            async with self._serialize_im_update(message_id) as state:
+                if should_update is not None and not should_update():
+                    return
+                content = await self._card_json(card)
+                if should_update is not None and not should_update():
+                    return
+                await state.wait_for_slot(
+                    lambda: vars(self).get("_im_update_endpoint_cooldown_until", 0.0),
+                    should_update=should_update,
+                )
+                # The session may stop or replace this frame while queued,
+                # resolving images, or waiting out a shared cooldown.
+                if should_update is not None and not should_update():
+                    return
+                request = (
+                    PatchMessageRequest.builder()
+                    .message_id(message_id)
+                    .request_body(PatchMessageRequestBody.builder().content(content).build())
+                    .build()
+                )
+                unclear_response = False
+                loop = asyncio.get_running_loop()
+                attempted_at = loop.time()
+                state.record_attempt(attempted_at)
+                endpoint_attempts: deque[float] = vars(self).setdefault("_im_update_endpoint_attempts", deque())
+                while endpoint_attempts and endpoint_attempts[0] + _IM_UPDATE_HISTORY_SECONDS <= attempted_at:
+                    endpoint_attempts.popleft()
+                endpoint_attempts.append(attempted_at)
+                try:
+                    resp = await self._client.im.v1.message.apatch(request)
+                    unclear_response = _unclear_write_response(resp)
+                    self._check(resp, operation)
+                    if unclear_response:
+                        raise FeishuAPIError(f"{operation}: invalid write acknowledgement")
+                except FeishuAPIError as error:
+                    if _is_frequency_limit(error) or error.code in _APP_FREQUENCY_LIMITS:
+                        now = loop.time()
+                        if _is_frequency_limit(error):
+                            error.retry_after = state.reject(now, error.retry_after)
+                        else:
+                            rejections = vars(self).get("_im_update_endpoint_rejections", 0) + 1
+                            self._im_update_endpoint_rejections = rejections
+                            delay = max(
+                                error.retry_after or 0.0,
+                                _APP_FREQUENCY_LIMIT_RETRY_DELAYS[
+                                    min(rejections - 1, len(_APP_FREQUENCY_LIMIT_RETRY_DELAYS) - 1)
+                                ],
+                            )
+                            deadline = max(vars(self).get("_im_update_endpoint_cooldown_until", 0.0), now + delay)
+                            self._im_update_endpoint_cooldown_until = deadline
+                            error.retry_after = deadline - now
+                        _logger.warning(
+                            "IM PATCH rate limited: message_hash=%s code=%s retry_after=%.2fs "
+                            "attempts_1s=%d attempts_60s=%d "
+                            "endpoint_attempts_1s=%d endpoint_attempts_60s=%d log_id=%s",
+                            hashlib.sha256(message_id.encode()).hexdigest()[:12], error.code,
+                            error.retry_after or _APP_FREQUENCY_LIMIT_RETRY_DELAYS[0],
+                            sum(at + 1.0 > now for at in state.attempted_at),
+                            sum(at + _IM_UPDATE_HISTORY_SECONDS > now for at in state.attempted_at),
+                            sum(at + 1.0 > now for at in endpoint_attempts),
+                            sum(at + _IM_UPDATE_HISTORY_SECONDS > now for at in endpoint_attempts),
+                            error.log_id or "-",
+                        )
+                    if unclear_response or _may_have_committed(error):
+                        uncertain_error = error
+                    raise
+                except Exception as error:
+                    if unclear_response or _may_have_committed(error):
+                        uncertain_error = error
+                    raise
+                else:
+                    state.rejections = 0
+                    # An older in-flight success must not erase a rejection
+                    # reported by another message after this attempt started.
+                    if attempted_at >= vars(self).get("_im_update_endpoint_cooldown_until", 0.0):
+                        self._im_update_endpoint_rejections = 0
+                    uncertain_error = None
+                finally:
+                    # Count spacing from completion, since the SDK can obtain
+                    # credentials before the actual PATCH is transmitted.
+                    state.next_at = loop.time() + _IM_UPDATE_MIN_INTERVAL
 
         try:
             await self._retry_transient(

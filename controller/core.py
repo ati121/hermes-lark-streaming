@@ -1716,6 +1716,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         """完成后释放重数据，仅保留最小元数据供 TTL 追踪."""
         session.unified_state = None
         session._streamed_answer = None
+        session._interactive_last_ack = None
         if session.text is not None:
             session.text = TextState()  # type: ignore[assignment]
         session.tool_use = ToolUseTracker()  # type: ignore[assignment]
@@ -1911,6 +1912,11 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         # v1.3.0 P1-01: use thread-safe snapshot to avoid RuntimeError.
         for mid, s in self._sess_items_snapshot():
             if mid is None or now - s.created_at <= self._session_ttl:
+                continue
+            repair = getattr(s, "seal_task", None)
+            if repair is not None and not repair.done():
+                # A failed seal stops streaming, but its bounded repair still
+                # owns final delivery while waiting out a provider cooldown.
                 continue
             if s.is_terminal_phase:
                 _logger.warning("pruning stale terminal session: msg=%s", (mid or "?")[:20])

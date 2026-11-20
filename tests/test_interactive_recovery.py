@@ -27,6 +27,7 @@ from hermes_lark_streaming.feishu import (
     FeishuAPIError,
     FeishuClient,
 )
+from hermes_lark_streaming.feishu import client as client_module
 from hermes_lark_streaming.flush import FlushController
 from hermes_lark_streaming.state.linear import UnifiedLinearState
 
@@ -78,7 +79,7 @@ async def drain_recovery(session):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("configured_ms, expected_sec", [(500, 1.0), (1000, 1.0), (2000, 2.0)])
+@pytest.mark.parametrize("configured_ms, expected_sec", [(500, 2.0), (1000, 2.0), (2000, 2.0)])
 async def test_interactive_throttle_has_independent_floor(card_session, configured_ms, expected_sec):
     ctrl, session = card_session
     ctrl._cfg._raw["hermes_lark_streaming"]["flush_interval_ms"] = configured_ms
@@ -212,15 +213,18 @@ async def test_230429_sdk_response_reaches_retry_and_repair_without_second_card(
         await original_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    # Real dispatch spacing/shared cooldowns are exercised in test_im_rate_control;
+    # this regression isolates terminal retries and the no-duplicate repair path.
+    monkeypatch.setattr(client_module._IMUpdateState, "wait_for_slot", AsyncMock())
     monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0, 0))
     await ctrl._do_linear_complete_with_fallback(session)
     if rejections > 5:
         assert session.state == CREATION_FAILED
         real_client.reply_card.assert_not_awaited()
         await drain_recovery(session)
-        assert delays[:5] == [1.0, 2.0, 4.0, 8.0, 16.0]
+        assert delays[:5] == [12.0, 24.0, 48.0, 60.0, 60.0]
     else:
-        assert delays == [1.0, 2.0]
+        assert delays == [12.0, 24.0]
     assert session.state == COMPLETED
     assert patch_message.await_count == rejections + 1
     assert all(call.args[0].message_id == session.card_msg_id for call in patch_message.await_args_list)
@@ -322,6 +326,43 @@ async def test_static_card_failure_falls_back_to_text_once(card_session):
 
 
 @pytest.mark.asyncio
+async def test_ttl_keeps_pending_final_repair_until_delivery(card_session, monkeypatch):
+    ctrl, session = card_session
+    monkeypatch.setattr(linear_mixin, "_INTERACTIVE_RECOVERY_DELAYS", (0,))
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def update(message_id, card, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise frequency_error(230429)
+        entered.set()
+        await release.wait()
+
+    ctrl._client.update_card.side_effect = update
+    await ctrl._do_linear_complete_with_fallback(session)
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    session.created_at = time.time() - ctrl._session_ttl - 1
+    repair = session.seal_task
+    ctrl._prune_stale_sessions()
+    assert ctrl._sess_get(session.message_id) is session
+    assert session.seal_task is repair and not repair.done()
+    assert not session._disposed
+    assert session.fallback_card is not None
+
+    release.set()
+    await drain_recovery(session)
+    assert session.state == COMPLETED
+    assert calls == 2
+    ctrl._client.reply_card.assert_not_awaited()
+    ctrl._client.reply_text.assert_not_awaited()
+    ctrl._prune_stale_sessions()
+    assert ctrl._sess_get(session.message_id) is None
+    assert session._disposed
+
+
+@pytest.mark.asyncio
 async def test_deleted_message_does_not_send_fallback_or_recover(card_session):
     ctrl, session = card_session
     ctrl._client.update_card.side_effect = FeishuAPIError("deleted", code=231003)
@@ -392,10 +433,11 @@ async def test_seal_backoff_spans_long_window(monkeypatch):
         return SimpleNamespace(code=0)
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(client_module._IMUpdateState, "wait_for_slot", AsyncMock())
     patch_request.side_effect = update
     await client.update_card("test-card", {}, retry_frequency_limit=True)
-    assert delays == [1, 2, 4, 8]
-    assert patch_request.await_count == 5
+    assert delays == [12.0, 24.0]
+    assert patch_request.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -409,6 +451,7 @@ async def test_retry_rechecks_validity_after_backoff(monkeypatch):
         valid = False
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(client_module._IMUpdateState, "wait_for_slot", AsyncMock())
     await client.update_card(
         "test-card", {}, retry_frequency_limit=True, should_update=lambda: valid,
     )
@@ -441,7 +484,7 @@ async def test_cooldown_automatically_flushes_latest_content(card_session, monke
     delivered = asyncio.Event()
     calls = 0
 
-    async def update(message_id, card):
+    async def update(message_id, card, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -547,6 +590,7 @@ async def test_mixed_backoff_does_not_index_past_network_delays(monkeypatch):
     client, patch_request = sdk_client()
     patch_request.side_effect = [frequency_error()] * 4 + [httpx.ConnectError("offline")]
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(client_module._IMUpdateState, "wait_for_slot", AsyncMock())
     with pytest.raises(httpx.ConnectError):
         await client.update_card("test-card", {}, retry_frequency_limit=True)
     assert patch_request.await_count == 5
