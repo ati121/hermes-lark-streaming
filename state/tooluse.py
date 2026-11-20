@@ -537,6 +537,15 @@ _SHELL_PART_RE = re.compile(
     r"'[^']*'|\"(?:\\[\s\S]|[^\"\\])*\"|\\[\s\S]|(?<!\S)\#[^\n]*"
     r"|(?P<unsupported><<|`|\$\()|(?P<separator>&&|\|\||[;|\n])"
 )
+_IMAGE_HEREDOC_LIMIT = 128 * 1024
+_LITERAL_CAT_HEREDOC_RE = re.compile(
+    r"[ \t]*cat[ \t]+>[ \t]*"
+    r"(?:'[A-Za-z0-9_./ -]+'|\"[A-Za-z0-9_./ -]+\"|[A-Za-z0-9_./-]+)"
+    r"[ \t]+<<[ \t]*(?P<quote>['\"])(?P<delimiter>[A-Za-z_][A-Za-z0-9_]{0,63})"
+    r"(?P=quote)[ \t]*"
+)
+_LITERAL_IMAGE_PATH_RE = re.compile(r"[A-Za-z0-9_./ -]+")
+_IMAGE_HEREDOC_FLOW_RE = re.compile(r"(?<!>)&(?!&)")
 
 # Words that can precede the real program on a command line.
 _COMMAND_WRAPPERS = frozenset({"sudo", "env", "nohup", "time", "exec", "command", "nice"})
@@ -677,7 +686,75 @@ def _image_script_action(script: str, args: list[str]) -> tuple[str, str, str] |
     return f"{family} · 生成图片", f"{family} · Generate image", "🎨"
 
 
+def _literal_cat_heredoc_tail(command: str) -> str | None:
+    """Discard one literal prompt preparation, never treating its body as code.
+
+    Only an initial ``cat > literal-path <<'DELIMITER'`` followed by one
+    static known generator is supported. Optional ``cd &&`` and a head/tail
+    output pipe cover the observed terminal shape; other flow stays unknown.
+    The shared shell tokenizer and native-handler script detection stay intact.
+    """
+    if len(command) > _IMAGE_HEREDOC_LIMIT:
+        return command  # The existing tokenizer rejects the unstripped heredoc.
+    opener, newline, body = command.partition("\n")
+    match = _LITERAL_CAT_HEREDOC_RE.fullmatch(opener.removesuffix("\r"))
+    if not newline or match is None:
+        return command
+    closing = re.search(r"(?m)^" + re.escape(match["delimiter"]) + r"\r?(?:\n|\Z)", body)
+    if closing is None:
+        return None
+    tail = body[closing.end():].strip(" \t\r\n")
+    segments = _image_command_segments(tail)
+    if not segments or any(not tokens for tokens in segments):
+        return None
+    separators = []
+    start = 0
+    for part in _SHELL_PART_RE.finditer(tail):
+        if _IMAGE_HEREDOC_FLOW_RE.search(tail[start:part.start()]):
+            return None
+        if part.lastgroup == "separator":
+            separators.append(part.group("separator"))
+        start = part.end()
+    if _IMAGE_HEREDOC_FLOW_RE.search(tail[start:]):
+        return None
+    if segments[0][0] == "cd":
+        directory = segments[0][1:]
+        if directory and directory[0] == "--":
+            directory = directory[1:]
+        if (len(directory) != 1 or not _LITERAL_IMAGE_PATH_RE.fullmatch(directory[0])
+                or not separators or separators[0] != "&&"):
+            return None
+        segments, separators = segments[1:], separators[1:]
+    if not segments or len(segments) > 2:
+        return None
+    if len(segments) == 2:
+        if separators != ["|"] or segments[1][0] not in {"head", "tail"}:
+            return None
+    elif separators:
+        return None
+    tokens = segments[0]
+    i = 0
+    while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+        i += 1
+    if i >= len(tokens) or not _LITERAL_IMAGE_PATH_RE.fullmatch(tokens[i]):
+        return None
+    program = os.path.basename(tokens[i])
+    i += 1
+    if re.fullmatch(r"(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?", program, re.IGNORECASE):
+        while i < len(tokens) and tokens[i] in _PYTHON_SCRIPT_FLAGS:
+            i += 1
+        if i >= len(tokens) or not _LITERAL_IMAGE_PATH_RE.fullmatch(tokens[i]):
+            return None
+        program = os.path.basename(tokens[i])
+    if program not in _IMAGE_SCRIPTS:
+        return None
+    return tail
+
+
 def _terminal_image_spec(command: str) -> tuple[list[str], tuple[str, str, str]] | None:
+    command = _literal_cat_heredoc_tail(command)
+    if command is None:
+        return None
     variables: dict[str, str] = {}
     help_match = None
     for tokens in _image_command_segments(command):
@@ -882,6 +959,25 @@ def _strip_leading_program(detail: str, leading: list[str], variables: dict[str,
             return detail
         rest = jumped
     return rest
+
+
+def _prepared_image_detail(command: str, leading: list[str]) -> str:
+    """Keep only generator arguments from a confirmed heredoc tail."""
+    if not leading:
+        return ""
+    for tokens in _image_command_segments(command):
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        for program in leading:
+            while i < len(tokens) and tokens[i] in _PYTHON_SCRIPT_FLAGS:
+                i += 1
+            if i >= len(tokens) or not _matches_program(tokens[i], program, {}):
+                break
+            i += 1
+        else:
+            return shlex.join(tokens[i:])
+    return ""
 
 # ── Emoji shown beside the spinner while a tool runs ──────────────────────
 # Resolved in two layers. The icon token already encodes the design's own
@@ -1377,13 +1473,17 @@ class ToolUseTracker:
             aliased = _terminal_program_spec(s.name, s.detail, s.args)
             if aliased is not None:
                 command = _terminal_command_text(s.name, s.detail, s.args)
-                variables = _shell_variables(command)
-                if command != (s.detail or ""):
-                    # Rebuilt from the full command so the arguments survive
-                    # Hermes's preview cap; clipped to keep the row one line.
-                    detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0], variables))
+                prepared = _literal_cat_heredoc_tail(command)
+                if prepared is not None and prepared != command:
+                    detail = _oneline_clip(_sanitize_detail(_prepared_image_detail(prepared, aliased[0]), sanitizer))
                 else:
-                    detail = _strip_leading_program(detail, aliased[0], variables)
+                    variables = _shell_variables(command)
+                    if command != (s.detail or ""):
+                        # Rebuilt from the full command so the arguments survive
+                        # Hermes's preview cap; clipped to keep the row one line.
+                        detail = _oneline_clip(_strip_leading_program(_sanitize_detail(command, sanitizer), aliased[0], variables))
+                    else:
+                        detail = _strip_leading_program(detail, aliased[0], variables)
                 if any(token.lower() in _PARSEHUB_PROGRAMS for token in aliased[0]):
                     detail = _strip_parsehub_verb(detail)
             steps.append(

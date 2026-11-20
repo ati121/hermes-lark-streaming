@@ -4,6 +4,31 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.64 (2026-11-20, personal fork)
+
+### Fixed — image labels for prompt-file script calls
+
+- Keep the `Zimage · Generate image` label when a terminal command first writes
+  a prompt with a quoted literal `cat` heredoc, then invokes the known generator
+  script with that prompt file. Preserve the matching image label in the live
+  status and completed tool history.
+- Treat heredoc contents as data and derive the display detail from the actual
+  outer generator command. Remove its environment and program prefixes from
+  the detail even when inline values contain quoted spaces or newlines.
+- Keep image detection conservative for examples, unfinished input, multiple
+  heredocs and unsupported shell control flow. Display classification never
+  executes the command or reads the prompt file.
+
+### Validation
+
+- Image labels, tool tracking, card callbacks and patch regressions:
+  **643 passed**, including prompt-body isolation, quoted environment values
+  and shell-control boundaries.
+- The new regression tests pass Ruff; changed source files introduce no new
+  Ruff diagnostics compared with the release base. `git diff --check` passes.
+- All 43 packaged source/asset files match the workspace, including the updated
+  image classifier and v1.64 manifest; `lark-oapi>=1.6.0` remains required.
+
 ## v1.63 (2026-11-20, personal fork)
 
 ### Fixed — IM card update frequency and recovery
