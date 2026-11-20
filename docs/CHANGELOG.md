@@ -4,6 +4,48 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.62 (2026-11-20, personal fork)
+
+### Fixed — Feishu card formatting, budgets and delivery
+
+- Preserve blank lines inside fenced and indented code blocks, including CRLF
+  and CR input. Keep source text intact across pagination; avoid cutting inline
+  code and render oversized table rows safely as literal text. Preserve normal
+  table headers and use component margins for paragraph/table spacing.
+- Apply shared UTF-8 byte and nested-element budgets to generated cards,
+  streaming previews and final pagination. Shorten oversized display labels;
+  keep full answers available through final continuation cards. Check complete
+  outgoing cards again after resolving brand images, without imposing a full-card
+  budget on CardKit batch actions.
+- Keep clarification cards within their budget, preserve original choice
+  indices, and retain free-text answers when all choices cannot fit. Validate
+  native callback authorization and persist accepted results consistently.
+- Serialize CardKit writes per card, honor write-rate limits and reuse request
+  UUIDs on retry. Treat missing acknowledgements as uncertain instead of blindly
+  duplicating cards or inserted elements; resume only undelivered continuations.
+- Keep approval results consistent with host validation, persist successful
+  results before recalling the card, and handle overlapping actions and display
+  failures without repeating the approval decision.
+- Align generated cards with documented JSON 2.0 component fields: use the
+  supported default Markdown text-size value and remove unsupported div-icon
+  size fields. Migrate the CI notification card to JSON 2.0 and report test or
+  notification failures correctly. Host-native approval cards retain their host
+  protocol and validation for compatibility.
+
+### Changed
+
+- Require `lark-oapi>=1.6.0`; use the Feishu China API domain
+  `https://open.feishu.cn/open-apis` exclusively.
+
+### Validation
+
+- Full default suite: **2,141 passed**, including real SDK request serialization
+  against mocked HTTP transport and Unicode/element-budget boundary tests.
+- Ruff comparison against the previous commit reports no new diagnostics;
+  `git diff --check` passes.
+- Live Feishu tenant rendering and production gateway deployment have not been
+  exercised as part of this release.
+
 ## v1.61 (2026-11-19, personal fork)
 
 ### Changed — localize and clear Feishu approval cards

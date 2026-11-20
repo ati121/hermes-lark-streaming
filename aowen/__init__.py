@@ -136,7 +136,6 @@ def _icon_div(icon_key: str, content: str, *, icon_color: str = "grey", text_siz
         "icon": {
             "tag": "standard_icon",
             "token": token,
-            "size": icon_size,
             "color": _COLOR_MAP.get(icon_color, "grey"),
         },
         "text": text,
@@ -155,7 +154,6 @@ def _metric_block(label: str, value: Any, *, icon_key: str = "info", color: str 
         "icon": {
             "tag": "standard_icon",
             "token": token,
-            "size": "20px 20px",
             "color": font_color or "grey",
         },
         "text": {

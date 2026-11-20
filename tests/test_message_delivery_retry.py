@@ -1,4 +1,4 @@
-"""IM creation survives transient transport failures without duplicate messages."""
+"""IM writes distinguish confirmed delivery from lost acknowledgements."""
 
 import asyncio
 import json
@@ -13,8 +13,11 @@ from hermes_lark_streaming.feishu.client import (
     _TRANSIENT_RETRY_DELAYS,
     FeishuAPIError,
     FeishuClient,
+    FeishuClientConfig,
+    MessageDeliveryUncertain,
 )
 from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+from lark_oapi.api.im.v1.resource import message as sdk_message
 
 
 def response(message_id="sent-message", code=0):
@@ -93,6 +96,72 @@ async def test_lost_response_reuses_server_deduplication_key(delivery):
 
 
 @pytest.mark.asyncio
+async def test_im_read_timeout_and_unacknowledged_retry_expose_uncertain_delivery(delivery):
+    delivery.reply.side_effect = [httpx.ReadTimeout("response lost"), response(code=230001)]
+
+    with pytest.raises(MessageDeliveryUncertain) as error:
+        await delivery.client.reply_card("anchor", {})
+
+    assert error.value.code == 230001
+    first, second = (call.args[0] for call in delivery.reply.await_args_list)
+    assert first.body.uuid and first.body.uuid == second.body.uuid
+
+
+@pytest.mark.asyncio
+async def test_im_response_body_cannot_be_decoded(delivery):
+    delivery.create.side_effect = json.JSONDecodeError("Invalid response", "", 0)
+    with pytest.raises(MessageDeliveryUncertain):
+        await delivery.client.send_card_to_chat("target-chat", {})
+
+
+@pytest.mark.asyncio
+async def test_im_gateway_error_without_api_code_is_uncertain(delivery):
+    gateway_error = response(code=None)
+    gateway_error.raw = SimpleNamespace(status_code=502)
+    delivery.create.return_value = gateway_error
+    with pytest.raises(MessageDeliveryUncertain):
+        await delivery.client.send_card_to_chat("target-chat", {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_code", [0, 230020, None], ids=["confirmed", "rejected", "superseded"])
+async def test_im_patch_after_lost_acknowledgement(monkeypatch, retry_code):
+    card = {"schema": "2.0", "body": {"elements": []}}
+    attempts = []
+
+    async def wire(request):
+        assert request.method == "PATCH"
+        assert request.url.path == "/open-apis/im/v1/messages/om_test"
+        assert json.loads(json.loads(request.content)["content"]) == card
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise httpx.ReadTimeout("response lost", request=request)
+        return httpx.Response(
+            400 if retry_code else 200,
+            json={"code": retry_code, "msg": "rejected" if retry_code else "ok", "error": {"log_id": "mock-feishu-log"}},
+        )
+
+    http_client = httpx.AsyncClient
+    transport = httpx.MockTransport(wire)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: http_client(transport=transport))
+    monkeypatch.setattr(sdk_message, "verify", lambda *_: None)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    client = FeishuClient(FeishuClientConfig("test-app", "test-secret"))
+
+    def should_update():
+        return retry_code is not None or not attempts
+
+    if retry_code == 0:
+        await client.update_card("om_test", card, should_update=should_update)
+    else:
+        with pytest.raises(MessageDeliveryUncertain) as error:
+            await client.update_card("om_test", card, should_update=should_update)
+        assert error.value.code == (retry_code or 0)
+        assert error.value.log_id == ("mock-feishu-log" if retry_code else "")
+    assert len(attempts) == (1 if retry_code is None else 2)
+
+
+@pytest.mark.asyncio
 async def test_independent_messages_get_different_keys(delivery):
     await delivery.client.reply_card("anchor", {})
     await delivery.client.reply_card("anchor", {})
@@ -149,7 +218,7 @@ async def test_cancellation_propagates_without_retry(delivery):
 @pytest.mark.asyncio
 async def test_missing_message_id_is_not_retried(delivery):
     delivery.reply.return_value = response(message_id=None)
-    with pytest.raises(FeishuAPIError, match="response missing message_id"):
+    with pytest.raises(MessageDeliveryUncertain, match="response missing message_id"):
         await delivery.client.reply_card("anchor", {})
     delivery.reply.assert_awaited_once()
     delivery.sleep.assert_not_awaited()

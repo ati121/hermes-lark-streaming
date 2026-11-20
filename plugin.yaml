@@ -1,6 +1,6 @@
 name: hermes-lark-streaming
-version: "1.61"
-description: "Feishu/Lark CardKit v2.0 streaming cards for Hermes Agent — real-time AI response display with typing effect, tool panels, reasoning, and more"
+version: "1.62"
+description: "Feishu CardKit v2.0 streaming cards for Hermes Agent — real-time AI response display with typing effect, tool panels, reasoning, and more"
 author: Aowen-Nowor
 kind: standalone
 provides_hooks:

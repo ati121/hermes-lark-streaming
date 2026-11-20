@@ -253,6 +253,7 @@ from .adapter import (  # noqa: E402
     _wrap_feishu_adapter_delete_reaction,
     _wrap_feishu_adapter_send_clarify,
     _wrap_handle_card_action_event,
+    _wrap_feishu_approval_card_ack,
     _wrap_feishu_interactive_authorization,
     _wrap_feishu_send_interactive_card,
     _wrap_feishu_build_resolved_approval_card,
@@ -655,6 +656,7 @@ def _apply_feishu_adapter_patches(FeishuAdapter) -> bool:
             ("_send_interactive_card", _wrap_feishu_send_interactive_card, None),
             ("_build_resolved_approval_card", _wrap_feishu_build_resolved_approval_card, None),
             ("_resolve_approval", _wrap_feishu_resolve_approval, None),
+            ("_handle_approval_card_action", _wrap_feishu_approval_card_ack, None),
             ("_handle_card_action_event", _wrap_handle_card_action_event, None),
             ("_handle_clarify_card_action", _wrap_native_clarify_card_action, None),
         ):

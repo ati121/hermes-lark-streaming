@@ -209,17 +209,26 @@ class TestFeishuBaseURL:
         with patch.dict(os.environ, {}, clear=True):
             assert cfg.feishu_base_url == "https://open.feishu.cn/open-apis"
 
-    def test_custom_url_from_config(self) -> None:
+    def test_ignores_custom_url_from_config(self) -> None:
         cfg = _make_config({"feishu": {"app_id": "id", "app_secret": "s", "base_url": "https://custom.com"}})
         with patch.dict(os.environ, {}, clear=True):
-            assert cfg.feishu_base_url == "https://custom.com"
+            assert cfg.feishu_base_url == "https://open.feishu.cn/open-apis"
 
-    def test_from_env(self) -> None:
+    @pytest.mark.parametrize("legacy_env", [
+        {"FEISHU_BASE_URL": "https://env.example"},
+        {"LARK_BASE_URL": "https://env.example"},
+        {"FEISHU_DOMAIN": "lark"},
+    ])
+    def test_legacy_environment_cannot_override_sdk_origin(self, legacy_env) -> None:
+        from hermes_lark_streaming.feishu import FeishuClient, FeishuClientConfig
+
         cfg = _make_config({})
         with patch.dict(
-            os.environ, {"FEISHU_APP_ID": "id", "FEISHU_APP_SECRET": "s", "FEISHU_BASE_URL": "https://env.com"}
+            os.environ, {"FEISHU_APP_ID": "id", "FEISHU_APP_SECRET": "s", **legacy_env}, clear=True,
         ):
-            assert cfg.feishu_base_url == "https://env.com"
+            assert cfg.feishu_base_url == "https://open.feishu.cn/open-apis"
+            client = FeishuClient(FeishuClientConfig(cfg.feishu_app_id, cfg.feishu_app_secret))
+            assert client._client._config.domain == "https://open.feishu.cn"
 
 
 class TestShowReasoning:
@@ -654,18 +663,7 @@ class TestGatewayPlatformShape:
         with patch.dict(os.environ, {}, clear=True):
             assert cfg._platform_cfg()["app_id"] == "lark_id"
 
-    def test_domain_lark_selects_larksuite(self) -> None:
-        from hermes_lark_streaming.config.reader import LARK_OPEN_API_BASE
-        cfg = _make_config({
-            "gateway": {"platforms": {"feishu": {
-                "domain": "lark",
-                "extra": {"app_id": "id", "app_secret": "s"},
-            }}},
-        })
-        with patch.dict(os.environ, {}, clear=True):
-            assert cfg._platform_cfg()["base_url"] == LARK_OPEN_API_BASE
-
-    def test_platform_base_url_wins_over_domain(self) -> None:
+    def test_nested_platform_domain_and_url_are_ignored(self) -> None:
         cfg = _make_config({
             "gateway": {"platforms": {"feishu": {
                 "base_url": "https://custom.example/open-apis",
@@ -673,7 +671,8 @@ class TestGatewayPlatformShape:
             }}},
         })
         with patch.dict(os.environ, {}, clear=True):
-            assert cfg._platform_cfg()["base_url"] == "https://custom.example/open-apis"
+            assert cfg.feishu_app_id == "id"
+            assert cfg.feishu_base_url == "https://open.feishu.cn/open-apis"
 
     def test_flat_shape_still_wins_over_nested(self) -> None:
         cfg = _make_config({

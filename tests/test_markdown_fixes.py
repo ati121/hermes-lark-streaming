@@ -6,14 +6,15 @@ from __future__ import annotations
 import re
 import time
 
-from hermes_lark_streaming.cardkit import build_cron_card, build_gateway_card
-from hermes_lark_streaming.cardkit import md
+import pytest
+from hermes_lark_streaming.cardkit import build_cron_card, build_gateway_card, md
 from hermes_lark_streaming.cardkit.elements import _build_error_panel
 from hermes_lark_streaming.cardkit.md import (
     _open_fence_at_end,
     _split_long_text,
     escape_markdown_asterisks,
     optimize_markdown_style,
+    split_markdown_source,
 )
 
 
@@ -40,7 +41,7 @@ def _reference_escape(text: str) -> str:
 
 
 class TestEscapeRestore:
-    CASES = [
+    CASES = (
         "2*3*4",
         "**粗体** 与 *斜体* 以及 2*3",
         "inline `a*b` then 4*5",
@@ -50,7 +51,7 @@ class TestEscapeRestore:
         "嵌套 **外 *内* 外** 1*2*3",
         "\x00P0P\x00 伪造占位符 *a* 2*3",
         "".join(f"**b{i}** `c{i}*` {i}*{i} " for i in range(200)),
-    ]
+    )
 
     def test_matches_reference_implementation(self) -> None:
         for text in self.CASES:
@@ -87,6 +88,26 @@ class TestOptimizeKeepsCodeBlankLines:
     def test_tilde_block_blank_lines_kept(self) -> None:
         text = "# T\n\n~~~\na\n\n\n\nb\n~~~\n"
         assert "a\n\n\n\nb" in optimize_markdown_style(text)
+
+    @pytest.mark.parametrize("ending", ["\n", "\r\n", "\r"])
+    def test_blank_line_compression_preserves_line_ending(self, ending: str) -> None:
+        assert optimize_markdown_style(f"first{ending * 4}last") == f"first{ending * 2}last"
+
+    @pytest.mark.parametrize("ending", ["\n", "\r\n"])
+    @pytest.mark.parametrize("indent", ["    ", "\t"])
+    def test_indented_code_blank_lines_kept(self, ending: str, indent: str) -> None:
+        code = f"{indent}first{ending * 4}{indent}second"
+        text = f"# T{ending * 3}{code}{ending * 4}正文"
+        result = optimize_markdown_style(text)
+        assert code in result
+        assert result.startswith(f"#### T{ending * 2}")
+        assert result.endswith(f"second{ending * 2}正文")
+
+    def test_indented_crlf_fence_is_preserved(self) -> None:
+        code = "  ```py\r\n# code\r\n\r\n\r\na = 1\r\n  ```"
+        result = optimize_markdown_style(f"# T\r\n\r\n{code}\r\n\r\n\r\n正文")
+        assert code in result
+        assert result.endswith("```\r\n\r\n正文")
 
 
 def _code_text(lines: int = 400, lang: str = "python") -> str:
@@ -143,6 +164,61 @@ class TestSplitLongTextTables:
         joined = "\n".join(_split_long_text(_table(150), limit=1000))
         for i in range(150):
             assert f"| {i} |" in joined
+
+    @pytest.mark.parametrize("ending", ["\n", "\r\n"])
+    def test_oversized_row_is_literal_and_keeps_exact_source(self, ending: str) -> None:
+        table = ending.join(("| A | B |", "|---|---|", f"| {'x' * 3000} | z |", "| q | r |"))
+        text = f"前言{ending * 2}{table}{ending * 2}结尾"
+        parts = split_markdown_source(text, limit=500)
+        assert "".join(source for source, _ in parts) == text
+        assert all(len(rendered) <= 500 for _, rendered in parts)
+        literal = [(source, rendered) for source, rendered in parts if source and source in table]
+        assert literal
+        for source, rendered in literal:
+            assert rendered.startswith("```\n")
+            assert rendered.endswith("\n```")
+            assert source in rendered
+            assert not _open_fence_at_end(rendered)
+        assert "".join(source for source, _ in literal) == table
+
+    def test_wide_header_is_repeated_when_one_row_still_fits(self) -> None:
+        header = f"| {'a' * 130} | B |\n|---|---|\n"
+        rows = [f"| {index} | {'x' * 25} |" for index in range(30)]
+        text = header + "\n".join(rows)
+        parts = split_markdown_source(text, limit=500)
+        assert "".join(source for source, _ in parts) == text
+        assert len(parts) > 1
+        assert all(rendered.startswith(header) and len(rendered) <= 500 for _, rendered in parts)
+
+
+class TestSplitLongTextInlineCode:
+    @pytest.mark.parametrize("delimiter", ["`", "``"])
+    def test_inline_code_moves_intact_across_chunk_boundary(self, delimiter: str) -> None:
+        code = f"{delimiter}command " + "x" * 90 + delimiter
+        text = "前" * 170 + " " + code + " 后" * 150
+        parts = split_markdown_source(text, limit=240)
+        assert "".join(source for source, _ in parts) == text
+        assert sum(code in rendered for _, rendered in parts) == 1
+        assert all(len(rendered) <= 240 for _, rendered in parts)
+        assert all(rendered.count(delimiter) in (0, 2) for _, rendered in parts)
+
+    def test_multiline_inline_code_is_not_cut_at_its_newline(self) -> None:
+        code = "`" + "x" * 70 + "\n" + "y" * 70 + "`"
+        text = "a" * 120 + code + "z" * 300
+        parts = split_markdown_source(text, limit=200)
+        assert "".join(source for source, _ in parts) == text
+        assert sum(code in rendered for _, rendered in parts) == 1
+        assert all(len(rendered) <= 200 for _, rendered in parts)
+
+    def test_oversized_inline_code_is_literal_and_keeps_source(self) -> None:
+        code = "``" + "x" * 1000 + "`inside`" + "y" * 1000 + "``"
+        text = "前言 " + code + " 结尾"
+        parts = split_markdown_source(text, limit=300)
+        assert "".join(source for source, _ in parts) == text
+        assert all(len(rendered) <= 300 for _, rendered in parts)
+        literal = [(source, rendered) for source, rendered in parts if rendered.startswith(("```\n", "~~~\n"))]
+        assert "".join(source for source, _ in literal) == code
+        assert all(source in rendered and not _open_fence_at_end(rendered) for source, rendered in literal)
 
 
 class TestStaticCards:

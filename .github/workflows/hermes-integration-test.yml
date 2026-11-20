@@ -116,12 +116,20 @@ jobs:
       - name: Run integration tests
         if: steps.compare.outputs.has_new_release == 'true'
         id: run_tests
+        shell: bash
         run: |
           export HERMES_SRC_DIR="$GITHUB_WORKSPACE/hermes-src"
           cd "$GITHUB_WORKSPACE"
+          set +e
           python -m pytest tests/integration/ -v --tb=short \
             --junitxml=integration_test_report.xml 2>&1 | tee integration_test_output.txt
-          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          exit_codes=("${PIPESTATUS[@]}")
+          set -e
+          printf 'exit_code=%s\n' "${exit_codes[0]}" >> "$GITHUB_OUTPUT"
+          if [ "${exit_codes[0]}" -ne 0 ]; then
+            exit "${exit_codes[0]}"
+          fi
+          exit "${exit_codes[1]}"
 
       # ── 10. Send Feishu notification (always when new release) ───────
       - name: Notify Feishu

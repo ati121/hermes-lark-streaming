@@ -5,25 +5,32 @@ from __future__ import annotations
 import ast
 from typing import Any
 
+from .budget import card_fits, split_plain_text, text_prefix
 from .cards import _build_summary
 from .elements import _escape_md
 from .i18n import _LOCALES, _T, _i18n
 from .md import (
     _MAX_CRON_TABLES,
     _downgrade_tables,
+    _enforce_markdown_table_budget,
     _normalize_list_markers,
     _split_long_text,
     escape_markdown_asterisks,
     optimize_markdown_style,
     split_answer_spacing_blocks,
+    split_markdown_source,
 )
 
 __all__ = [
-    'build_cron_card',
-    'build_gateway_card',
     'build_clarify_card',
-    'build_clarify_submitted_card',
     'build_clarify_confirmed_card',
+    'build_clarify_expired_card',
+    'build_clarify_submitted_card',
+    'build_cron_card',
+    'build_cron_cards',
+    'build_gateway_card',
+    'build_gateway_cards',
+    'clarify_choice_pairs',
     'normalize_clarify_choices',
 ]
 
@@ -79,16 +86,14 @@ def _extract_readable_from_dict(d: dict) -> str:
             return val.strip()
     return ""
 
+def clarify_choice_pairs(choices: list[str] | None) -> list[tuple[str, str]]:
+    """Keep the displayed option and exact answer aligned when dropping blank options."""
+    return [(label, str(choice)) for choice in choices or [] if (label := _normalize_choice(choice))]
+
+
 def normalize_clarify_choices(choices: list[str] | None) -> list[str]:
-    """Normalize choices for display + AI resolution. Filters empty."""
-    if not choices:
-        return []
-    normalized = []
-    for c in choices:
-        n = _normalize_choice(c)
-        if n:
-            normalized.append(n)
-    return normalized
+    """Normalize choice labels for display."""
+    return [label for label, _ in clarify_choice_pairs(choices)]
 
 def _static_markdown_chunks(content: str) -> list[str]:
     """Normalised, fence/table-safe markdown chunks for a static card.
@@ -116,11 +121,9 @@ def _static_markdown_elements(content: str) -> list[dict[str, Any]]:
 def _static_card_shell(elements: list[dict], *, streaming_mode: bool | None = None) -> dict[str, Any]:
     """schema-2.0 static card shell. streaming_mode=None keeps the key absent
     (cron/gateway cards omit it; clarify cards pin it to False)."""
-    config: dict[str, Any] = {"locales": _LOCALES}
+    config: dict[str, Any] = {"locales": _LOCALES, "update_multi": True}
     if streaming_mode is not None:
         config["streaming_mode"] = streaming_mode
-    from .md import _enforce_markdown_table_budget
-
     return {
         "schema": "2.0",
         "config": config,
@@ -128,13 +131,12 @@ def _static_card_shell(elements: list[dict], *, streaming_mode: bool | None = No
     }
 
 
-def _icon_div(token: str, color: str, text: dict[str, Any], *, size: str = "20px 20px") -> dict:
+def _icon_div(token: str, color: str, text: dict[str, Any]) -> dict:
     return {
         "tag": "div",
         "icon": {
             "tag": "standard_icon",
             "token": token,
-            "size": size,
             "color": color,
         },
         "text": text,
@@ -152,6 +154,50 @@ def build_cron_card(content: str) -> dict[str, Any]:
         card["config"]["summary"] = summary
     return card
 
+
+def _static_card_pages(content: str, whole: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    if card_fits(whole):
+        return [(content, whole)]
+
+    # Each fragment carries its exact source slice so a failed continuation
+    # can fall back without repeating any page already sent.
+    def page(elements, *, first: bool):
+        card = _static_card_shell(elements)
+        if first and "summary" in whole["config"]:
+            card["config"]["summary"] = whole["config"]["summary"]
+        return card
+
+    def fragments():
+        for source, fragment in split_markdown_source(content):
+            elements = _static_markdown_elements(fragment)
+            if card_fits(page(elements, first=False)):
+                yield source, elements
+                continue
+            # An unusually dense fragment can still exceed the card budget
+            # after Markdown spacing. Keep its source visible in plain text.
+            for part in split_plain_text(source):
+                yield part, [{"tag": "div", "text": {"tag": "plain_text", "content": part}}]
+
+    pages: list[tuple[str, dict[str, Any]]] = []
+    current = [element for element in whole["body"]["elements"] if element["tag"] != "markdown"]
+    source_parts: list[str] = []
+    for source, elements in fragments():
+        candidate = page([*current, *elements], first=not pages)
+        if current and not card_fits(candidate):
+            pages.append(("".join(source_parts), page(current, first=not pages)))
+            source_parts = []
+            current = []
+        current.extend(elements)
+        source_parts.append(source)
+    if source_parts or not pages:
+        pages.append(("".join(source_parts), page(current, first=not pages)))
+    return pages
+
+
+def build_cron_cards(content: str) -> list[tuple[str, dict[str, Any]]]:
+    return _static_card_pages(content, build_cron_card(content))
+
+
 def build_gateway_card(content: str, *, category: str = "", status_label: str = "", status_emoji: str = "") -> dict[str, Any]:
     """Gateway-internal message card — lightweight, static, no streaming. For slash
     command replies, auth, session, errors. category retained for reaction routing."""
@@ -163,7 +209,7 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
             "element_id": _GATEWAY_STATUS_ELEMENT_ID,
             "text": {
                 "tag": "plain_text",
-                "content": f"{status_emoji} {status_label}",
+                "content": text_prefix(f"{status_emoji} {status_label}", byte_limit=1_000),
                 "text_color": "turquoise",
                 "text_size": "notation",
             },
@@ -180,8 +226,35 @@ def build_gateway_card(content: str, *, category: str = "", status_label: str = 
 
     return card
 
-def build_clarify_card(*, question: str, choices: list[str] | None = None, clarify_id: str = "") -> dict[str, Any]:
+
+def build_gateway_cards(
+    content: str, *, category: str = "", status_label: str = "", status_emoji: str = "",
+) -> list[tuple[str, dict[str, Any]]]:
+    return _static_card_pages(content, build_gateway_card(
+        content, category=category, status_label=status_label, status_emoji=status_emoji,
+    ))
+
+def _clarify_display_text(text: str) -> str:
+    """Leave space for Markdown escaping and repeated locale variants."""
+    prefix = text_prefix(text, byte_limit=2_000)
+    return prefix.rstrip() + "…" if prefix != text else text
+
+
+def _checked_clarify_card(card: dict[str, Any]) -> dict[str, Any]:
+    if not card_fits(card):
+        # The adapter can use the host prompt if callback metadata itself is
+        # too large. Never truncate IDs or tokens and change their meaning.
+        raise ValueError("Clarify card exceeds the card delivery budget")
+    return card
+
+
+def _build_clarify_card(
+    *, question: str, choices: list[str] | None = None, clarify_id: str = "", callback_token: str = "",
+) -> dict[str, Any]:
     """构建 Clarify 待选择态卡片 (State 1: Pending): 标题、选项、快捷选择或下拉、自定义输入."""
+    callback_value = {"clarify_id": clarify_id}
+    if callback_token:
+        callback_value["clarify_token"] = callback_token
     elements: list[dict] = [
         _icon_div("info_outlined", "blue", {
             "tag": "lark_md",
@@ -189,8 +262,7 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
         }),
     ]
 
-    # Defense in depth: adapter also normalizes, but card builders must be safe.
-    normalized_choices = normalize_clarify_choices(choices)
+    normalized_choices = choices or []
 
     if normalized_choices:
         labels = [chr(ord("A") + i) if i < 26 else str(i + 1) for i in range(len(normalized_choices))]
@@ -225,9 +297,9 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
                         "behaviors": [{
                             "type": "callback",
                             "value": {
+                                **callback_value,
                                 "hermes_clarify_action": "choice",
                                 "choice_index": str(i),
-                                "clarify_id": clarify_id,
                             },
                         }],
                     }],
@@ -262,10 +334,7 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
                 "options": options,
                 "behaviors": [{
                     "type": "callback",
-                    "value": {
-                        "hermes_clarify_action": "select",
-                        "clarify_id": clarify_id,
-                    },
+                    "value": {**callback_value, "hermes_clarify_action": "select"},
                 }],
             })
 
@@ -282,32 +351,65 @@ def build_clarify_card(*, question: str, choices: list[str] | None = None, clari
         "name": "clarify_input",
         "behaviors": [{
             "type": "callback",
-            "value": {
-                "hermes_clarify_action": "input_submit",
-                "clarify_id": clarify_id,
-            },
+            "value": {**callback_value, "hermes_clarify_action": "input_submit"},
         }],
     }
     elements.append(input_el)
 
     return _static_card_shell(elements, streaming_mode=False)
 
+
+def build_clarify_card(
+    *, question: str, choices: list[str] | None = None, clarify_id: str = "", callback_token: str = "",
+) -> dict[str, Any]:
+    """Render the largest safe prefix of choices, preserving callback indices."""
+    question = _clarify_display_text(question)
+    normalized = normalize_clarify_choices(choices)
+
+    def candidate(count: int) -> dict[str, Any]:
+        card = _build_clarify_card(
+            question=question, choices=normalized[:count],
+            clarify_id=clarify_id, callback_token=callback_token,
+        )
+        if count < len(normalized):
+            en = f"Showing {count} of {len(normalized)} choices. You can type another answer below."
+            zh = f"已显示 {count}/{len(normalized)} 个选项，也可在下方输入其他答案。"
+            card["body"]["elements"].insert(-1, {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": en, "i18n_content": _i18n(en, zh)},
+            })
+        return card
+
+    # A dropdown option contributes a tagged text object. Capping the search
+    # also avoids constructing an arbitrarily large payload just to reject it.
+    lower, upper = 0, min(len(normalized), 200)
+    best = _checked_clarify_card(candidate(0))
+    while lower <= upper:
+        count = (lower + upper) // 2
+        card = candidate(count)
+        if card_fits(card):
+            best, lower = card, count + 1
+        else:
+            upper = count - 1
+    return best
+
+
 def _clarify_header_elements(question: str, selected: str, *, token: str, color: str) -> list[dict]:
     """Shared two-row header of the submitted/confirmed clarify cards."""
-    safe_selected = _escape_md(selected)
+    safe_selected = _escape_md(_clarify_display_text(selected))
     en_selected, zh_selected = _T["clarify_selected"]
     en_sel_label = en_selected.format(safe_selected)
     zh_sel_label = zh_selected.format(safe_selected)
     return [
         _icon_div(token, color, {
             "tag": "lark_md",
-            "content": f"**{_escape_md(question)}**",
+            "content": f"**{_escape_md(_clarify_display_text(question))}**",
         }),
         _icon_div(token, color, {
             "tag": "lark_md",
             "content": en_sel_label,
             "i18n_content": _i18n(en_sel_label, zh_sel_label),
-        }, size="16px 16px"),
+        }),
     ]
 
 def build_clarify_submitted_card(*, question: str, selected: str, clarify_id: str = "") -> dict[str, Any]:
@@ -327,27 +429,24 @@ def build_clarify_submitted_card(*, question: str, selected: str, clarify_id: st
             },
         },
         {
-            "tag": "action",
-            "actions": [{
-                "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": en_retry,
-                    "i18n_content": _i18n(en_retry, zh_retry),
+            "tag": "button",
+            "text": {
+                "tag": "plain_text",
+                "content": en_retry,
+                "i18n_content": _i18n(en_retry, zh_retry),
+            },
+            "type": "primary",
+            "behaviors": [{
+                "type": "callback",
+                "value": {
+                    "hermes_clarify_action": "retry_submit",
+                    "clarify_id": clarify_id,
                 },
-                "type": "primary",
-                "behaviors": [{
-                    "type": "callback",
-                    "value": {
-                        "hermes_clarify_action": "retry_submit",
-                        "clarify_id": clarify_id,
-                    },
-                }],
             }],
         },
     ]
 
-    return _static_card_shell(elements, streaming_mode=False)
+    return _checked_clarify_card(_static_card_shell(elements, streaming_mode=False))
 
 def build_clarify_confirmed_card(*, question: str, selected: str) -> dict[str, Any]:
     """构建 Clarify 已确认态卡片 (State 3: Confirmed/Hard Lock). 标题 + 选择 + "已确认"."""
@@ -365,4 +464,16 @@ def build_clarify_confirmed_card(*, question: str, selected: str) -> dict[str, A
         },
     ]
 
-    return _static_card_shell(elements, streaming_mode=False)
+    return _checked_clarify_card(_static_card_shell(elements, streaming_mode=False))
+
+
+def build_clarify_expired_card(*, question: str) -> dict[str, Any]:
+    """Retire controls when Hermes no longer has a waiter for this prompt."""
+    en = "This question is no longer accepting answers."
+    zh = "这条追问已停止接收回答。"
+    return _checked_clarify_card(_static_card_shell([
+        _icon_div("info_outlined", "grey", {
+            "tag": "lark_md", "content": f"**{_escape_md(_clarify_display_text(question))}**",
+        }),
+        {"tag": "div", "text": {"tag": "plain_text", "content": en, "i18n_content": _i18n(en, zh)}},
+    ], streaming_mode=False))

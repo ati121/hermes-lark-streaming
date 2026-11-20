@@ -8,8 +8,9 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
+from .budget import card_fits, count_elements, text_prefix
 from .i18n import _T, _i18n, _t
-from .md import _longest_backtick_run
+from .md import MAX_MARKDOWN_COMPONENT_TABLES, _downgrade_tables, _longest_backtick_run
 
 __all__ = [
     'STREAMING_ELEMENT_ID',
@@ -54,6 +55,7 @@ __all__ = [
     '_collapse_hint_counts',
     '_collapse_hint_text',
     'enforce_element_limit',
+    'limit_streaming_panel',
     '_role_text_size',
     'build_card_text_size_style',
 ]
@@ -148,16 +150,7 @@ def _set_text_size(element: dict[str, Any], text_size: str | None) -> dict[str, 
 
 def _count_tag_objects(obj: Any) -> int:
     """Recursively count JSON objects with tag key. Feishu Card 2.0 caps at 200 elements."""
-    count = 0
-    if isinstance(obj, dict):
-        if "tag" in obj:
-            count += 1
-        for v in obj.values():
-            count += _count_tag_objects(v)
-    elif isinstance(obj, list):
-        for item in obj:
-            count += _count_tag_objects(item)
-    return count
+    return count_elements(obj)
 
 
 def _collapse_hint(content: str, text_sizes: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -214,6 +207,24 @@ def _collapse_hint_text(rounds: int, tools: int, other: int = 0) -> str:
     if not parts:
         return "⚡ 还有 0 项已折叠"
     return "⚡ 还有 " + "、".join(parts) + "已折叠"
+
+
+def limit_streaming_panel(panel: dict[str, Any], text_sizes: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Reserve room in the same CardKit entity for its growing answer."""
+    fits = lambda: card_fits(panel, byte_limit=6_000, element_limit=120)
+    if fits():
+        return panel
+    children = panel["elements"]
+    hint = children[0] if children and children[0].get("element_id") == COLLAPSE_HINT_ELEMENT_ID else {}
+    rounds, tools, other = _collapse_hint_counts(hint)
+    if hint:
+        children.pop(0)
+    children.insert(0, _collapse_hint(_collapse_hint_text(rounds, tools, other), text_sizes))
+    while len(children) > 1 and not fits():
+        children.pop(1)
+        other += 1
+        children[0]["content"] = _collapse_hint_text(rounds, tools, other)
+    return panel
 
 
 def enforce_element_limit(
@@ -293,6 +304,12 @@ def enforce_element_limit(
     panel["elements"] = children
     return card
 
+def _display_prefix(text: str, *, byte_limit: int) -> str:
+    """Bound display labels without changing tool names used by the host."""
+    prefix = text_prefix(text, byte_limit=byte_limit - 3)
+    return prefix + "…" if prefix != text else text
+
+
 def _i18n_title(en: str, zh: str, *, color: str = "grey") -> dict:
     """i18n plain_text panel title — the shared shape of every panel header."""
     return {
@@ -348,7 +365,7 @@ def _streaming_element(
         "tag": "markdown",
         "content": content,
         "text_align": "left",
-        "text_size": _role_text_size(text_sizes, "body", default="normal_v2"),
+        "text_size": _role_text_size(text_sizes, "body", default="normal"),
         "margin": "0px 0px 0px 0px",
         "element_id": element_id,
     }
@@ -365,7 +382,7 @@ def build_answer_elements(
     elements = []
     for index, block in enumerate(split_answer_spacing_blocks(content)):
         element = _streaming_element(
-            content=block,
+            content=_downgrade_tables(block, limit=MAX_MARKDOWN_COMPONENT_TABLES),
             element_id=element_id if index == 0 else f"{element_id[:14]}_{index}",
             text_sizes=text_sizes,
         )
@@ -410,10 +427,12 @@ def _loading_status_text(
     # EN SPACEs, not ASCII: a leading ASCII run is the kind of thing a renderer
     # feels free to collapse, and this gap is doing layout work.
     pad = "  "
+    en_text = _display_prefix(f"{pad}{mark}{en_text}", byte_limit=192)
+    zh_text = _display_prefix(f"{pad}{mark}{zh_text}", byte_limit=192)
     text: dict[str, Any] = {
         "tag": "plain_text",
-        "content": f"{pad}{mark}{en_text}",
-        "i18n_content": _i18n(f"{pad}{mark}{en_text}", f"{pad}{mark}{zh_text}"),
+        "content": en_text,
+        "i18n_content": _i18n(en_text, zh_text),
         "text_color": "grey",
     }
     return _set_text_size(text, _role_text_size(text_sizes, "notice", default="notation"))
@@ -481,7 +500,6 @@ def _loading_element(
                     "icon": {
                         "tag": "custom_icon",
                         "img_key": _LOADING_IMG_KEY,
-                        "size": "16px 16px",
                     },
                 }],
             },
@@ -509,7 +527,6 @@ def _loading_hint_element(status_key: str = "loading_context") -> dict:
         "icon": openviking_icon() if status_key == "openviking_recall" else {
             "tag": "standard_icon",
             "token": "time_outlined",
-            "size": "16px 16px",
         },
         "text": {
             "tag": "lark_md",
@@ -576,7 +593,10 @@ def _panel_title_el(
         en_parts.append(en_tpl.format(active_tool[0]))
         zh_parts.append(zh_tpl.format(active_tool[1]))
 
-    return _i18n_title(" · ".join(en_parts), " · ".join(zh_parts))
+    return _i18n_title(
+        _display_prefix(" · ".join(en_parts), byte_limit=512),
+        _display_prefix(" · ".join(zh_parts), byte_limit=512),
+    )
 
 def build_panel_header(*, reasoning_rounds: list, current_reasoning_text: str = "", tool_steps: list[dict], tool_elapsed_ms: float = 0, total_elapsed_ms: float = 0, show_reasoning: bool = True, active_tool: tuple[str, str] | None = None) -> dict:
     """Build header dict for unified panel. Title computed from state (rounds/tools/elapsed)."""
@@ -1038,7 +1058,6 @@ def _build_reasoning_round_title(
         "icon": {
             "tag": "standard_icon",
             "token": "robot-add_outlined",
-            "size": "16px 16px",
             "color": "grey",
         },
         "text": {

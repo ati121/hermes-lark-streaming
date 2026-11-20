@@ -82,8 +82,6 @@ def normalize_text_sizes(
 
 
 FEISHU_OPEN_API_BASE = "https://open.feishu.cn/open-apis"
-LARK_OPEN_API_BASE = "https://open.larksuite.com/open-apis"
-DEFAULT_OPEN_API_BASE = FEISHU_OPEN_API_BASE
 
 
 def hermes_home() -> Path:
@@ -325,7 +323,7 @@ class Config:
 
     @property
     def feishu_base_url(self) -> str:
-        return str(self._platform_cfg().get("base_url", "https://open.feishu.cn/open-apis"))
+        return FEISHU_OPEN_API_BASE
 
     @property
     def card_duration_sec(self) -> int:
@@ -404,24 +402,16 @@ class Config:
         env_app_id = self.env_app_id
         env_app_secret = self.env_app_secret
         if env_app_id and env_app_secret:
-            base_url = _get_secret("FEISHU_BASE_URL") or _get_secret("LARK_BASE_URL") or ""
-            if not base_url:
-                domain = _get_secret("FEISHU_DOMAIN").lower()
-                base_url = (
-                    LARK_OPEN_API_BASE if domain == "lark" else FEISHU_OPEN_API_BASE
-                )
             return {
                 "app_id": env_app_id,
                 "app_secret": env_app_secret,
-                "base_url": base_url,
             }
         raw = self._load()
         for key in ("feishu", "lark"):
             pf = raw.get(key)
             if isinstance(pf, dict) and pf.get("app_id"):
                 return pf
-        # Hermes gateway 平台形状: gateway.platforms.<feishu|lark>.extra 或
-        # platforms.<feishu|lark>.extra (凭据在 extra 里, domain 决定 lark 域名).
+        # Hermes gateway 的嵌套配置在 platforms.<feishu|lark>.extra 保存凭据。
         candidate_parents: list[dict[str, Any]] = []
         gateway = raw.get("gateway")
         if isinstance(gateway, dict) and isinstance(gateway.get("platforms"), dict):
@@ -437,14 +427,7 @@ class Config:
                 extra = platform.get("extra")
                 if not isinstance(extra, dict) or not extra.get("app_id"):
                     continue
-                result = dict(extra)
-                if "base_url" not in result and platform.get("base_url"):
-                    result["base_url"] = platform["base_url"]
-                if "base_url" not in result:
-                    domain = str(extra.get("domain", platform.get("domain", ""))).lower()
-                    if domain == "lark":
-                        result["base_url"] = LARK_OPEN_API_BASE
-                return result
+                return extra
         return {}
 
     def _read_hermes_yaml(self, home: Any, context: str = "") -> dict[str, Any]:

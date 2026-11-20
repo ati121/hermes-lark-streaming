@@ -128,6 +128,8 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return
         session._disposed = True
         session.fallback_card = None
+        session.continuation_cards.clear()
+        session._streamed_answer = None
         task = session.seal_task
         session.seal_task = None
         if task is not None and not task.done():
@@ -244,7 +246,6 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     FeishuClientConfig(
                         app_id=app_id,
                         app_secret=app_secret,
-                        base_url=self._cfg.feishu_base_url,
                     )
                 )
                 self._initialized = True
@@ -1024,10 +1025,19 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     async def _apply_reasoning_snapshot(self, snap: dict, expanded: bool) -> bool:
         if self._client is None:
             return False
+        from ..cardkit.budget import (
+            CARD_BUDGET_BYTES,
+            CARD_ELEMENT_LIMIT,
+            card_fits,
+            count_elements,
+            json_size,
+            text_prefix,
+        )
         from ..cardkit.elements import (
             build_pinned_reasoning_elements_from_text,
             strip_reasoning_region,
         )
+        from ..cardkit.md import _enforce_markdown_table_budget
         full = snap.get("full") or ""
         msg_id = snap.get("card_msg_id")
         card = snap.get("card")
@@ -1046,9 +1056,25 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 expanded=bool(expanded),
                 preview=False,
             )
-            body["elements"] = new_els + strip_reasoning_region(els)
-            from ..cardkit.md import _enforce_markdown_table_budget
-            body["elements"] = _enforce_markdown_table_budget(body["elements"])
+            existing = strip_reasoning_region(els)
+            # Keep the answer's existing Markdown and assign any remaining
+            # table budget to the newly opened reasoning text.
+            def assemble():
+                budgeted = _enforce_markdown_table_budget([*existing, *new_els])[len(existing):]
+                body["elements"] = budgeted + existing
+                return card_fits(new_card)
+
+            if not assemble():
+                if len(new_els) < 2 or count_elements(new_card) > CARD_ELEMENT_LIMIT:
+                    return False
+                reasoning_text = new_els[-1]["text"]
+                raw = reasoning_text["content"]
+                available = json_size(raw) - (json_size(new_card) - CARD_BUDGET_BYTES) - 32
+                if available < 8:
+                    return False
+                reasoning_text["content"] = text_prefix(raw, byte_limit=available).rstrip() + "…"
+                if not assemble():
+                    return False
             await self._client.update_card(msg_id, new_card)
             snap["card"] = new_card
             _logger.info(
@@ -1061,7 +1087,9 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         if not card_id or card_id.startswith("im:"):
             return False
         from ..cardkit.elements import build_pinned_reasoning_refresh
-        els = build_pinned_reasoning_refresh(full, expanded=bool(expanded), text_sizes=snap.get("text_sizes"))
+        els = build_pinned_reasoning_refresh(
+            text_prefix(full, byte_limit=5_000), expanded=bool(expanded), text_sizes=snap.get("text_sizes"),
+        )
         actions = [
             {"action": "partial_update_element",
              "params": {"element_id": e["element_id"],
@@ -1617,8 +1645,15 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
 
     async def _send_background_review_card(self, chat_id: str, text: str) -> None:
         """Late reviews get their own card, never an old final-card PATCH."""
-        from ..cardkit import build_answer_elements, build_interactive_card_v2
+        from ..cardkit import (
+            build_answer_elements,
+            build_interactive_card_v2,
+            card_visible_text,
+            paginate_card,
+        )
+        from ..cardkit.budget import split_plain_text
         from ..cardkit.md import render_answer_markdown
+        from ..feishu.client import MessageDeliveryUncertain
 
         visible_text = strip_reasoning_tags(text).strip()
         if not visible_text:
@@ -1633,15 +1668,28 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 ),
                 summary=visible_text[:120], text_sizes=sizes,
             )
-            await self._client.send_card_to_chat(chat_id, card)
-            return
+            pages = paginate_card(card)
         except Exception:
-            _logger.warning("background review card failed, trying visible text", exc_info=True)
-        if self._client is not None:
+            pages = []
+            _logger.warning("background review card preparation failed", exc_info=True)
+        if self._client is None:
+            return
+        if not pages:
+            for part in split_plain_text(visible_text):
+                await self._client.send_text_to_chat(chat_id, part)
+            return
+        for page in pages:
             try:
-                await self._client.send_text_to_chat(chat_id, visible_text[:4000])
+                await self._client.send_card_to_chat(chat_id, page)
+            except MessageDeliveryUncertain:
+                _logger.warning("background review page delivery is uncertain")
             except Exception:
-                _logger.warning("background review text fallback failed", exc_info=True)
+                _logger.warning("background review card page failed, trying plain text", exc_info=True)
+                try:
+                    for part in split_plain_text(visible_text if len(pages) == 1 else card_visible_text(page)):
+                        await self._client.send_text_to_chat(chat_id, part)
+                except Exception:
+                    _logger.warning("background review text fallback failed", exc_info=True)
 
     def _cleanup(self, message_id: str) -> None:
         session = self._sess_pop(message_id)
@@ -1667,6 +1715,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
     def _release_session_data(self, session: CardSession) -> None:
         """完成后释放重数据，仅保留最小元数据供 TTL 追踪."""
         session.unified_state = None
+        session._streamed_answer = None
         if session.text is not None:
             session.text = TextState()  # type: ignore[assignment]
         session.tool_use = ToolUseTracker()  # type: ignore[assignment]
@@ -1694,10 +1743,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             session._completion_started = True
         # Snapshot fallback text before _do_linear_complete potentially releases it
         _fallback_text = ""
-        if session.error_message:
-            _fallback_text = session.error_message
-        elif session.unified_state and session.unified_state.answer_text:
+        if session.unified_state and session.unified_state.answer_text:
             _fallback_text = session.unified_state.answer_text
+        elif session.error_message:
+            _fallback_text = session.error_message
         elif session.text and session.text.display_text:
             _fallback_text = session.text.display_text
 
@@ -1718,7 +1767,7 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     text_sizes=session.text_sizes,
                 )
             result = await self._do_linear_complete(session)
-            if result:
+            if result or session._final_delivery_unconfirmed:
                 session.fallback_card = None
                 session._seal_recovery_fallback_text = ""
                 return
@@ -1742,6 +1791,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                 # The seal already scheduled its repair before failing here;
                 # it owns delivery now.
                 return
+            if session._final_delivery_unconfirmed:
+                session.fallback_card = None
+                session._seal_recovery_fallback_text = ""
+                return
             if not session.is_terminal_phase:
                 # Otherwise the session stays COMPLETING forever: only
                 # terminal sessions are pruned.
@@ -1756,12 +1809,33 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
         self, session: CardSession, *, fallback_text: str = "",
     ) -> None:
         """Reply with the final static card before falling back to plain text."""
+        from ..cardkit import paginate_card
+
         if session._disposed or session.state == TERMINATED or session.guard.should_skip("fallback"):
             session.fallback_card = None
+            session.continuation_cards.clear()
             return
         card = session.fallback_card
         session.fallback_card = None
+        continuations = session.continuation_cards
+        session.continuation_cards = []
         if self._client and card:
+            await self._deliver_final_pages(session, [*paginate_card(card), *continuations], fallback_text=fallback_text)
+            return
+        await self._send_text_fallback(session, fallback_text=fallback_text)
+
+    async def _deliver_final_pages(
+        self, session: CardSession, pages: list[dict], *, fallback_text: str = "",
+    ) -> bool:
+        from ..cardkit import card_visible_text
+        from ..feishu.client import MessageDeliveryUncertain
+
+        if not self._client:
+            return not pages
+        confirmed = True
+        for index, card in enumerate(pages):
+            if session._disposed or session.state == TERMINATED or session.guard.should_skip("final_page"):
+                return False
             try:
                 if session.standalone:
                     fallback_id = await self._client.send_card_to_chat(session.chat_id, card)
@@ -1769,7 +1843,10 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     reply_id = session.anchor_id or session.message_id
                     fallback_id = await self._client.reply_card(reply_id, card)
                 original = self._rsn_map().get(session.card_msg_id)
-                if isinstance(fallback_id, str) and fallback_id and isinstance(original, dict):
+                if (
+                    not index and isinstance(fallback_id, str) and fallback_id and isinstance(original, dict)
+                    and any(element.get("element_id") == "rsn_toggle" for element in card["body"]["elements"])
+                ):
                     # The replacement reply has its own reasoning buttons and
                     # must not redirect them to the original, still-frozen card.
                     self._rsn_map()[fallback_id] = {
@@ -1778,46 +1855,54 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
                     }
                     self._trim_rsn_map(self._rsn_map())
                 _logger.info(
-                    "static card fallback sent: msg=%s",
+                    "final card page sent: msg=%s",
                     (session.message_id or "?")[:12],
                 )
-                return
+            except MessageDeliveryUncertain:
+                confirmed = False
+                _logger.warning("final card page delivery is uncertain: msg=%s", (session.message_id or "?")[:12])
             except Exception:
                 _logger.warning(
-                    "static card fallback failed: msg=%s",
+                    "final card page failed, trying plain text: msg=%s",
                     (session.message_id or "?")[:12],
                     exc_info=True,
                 )
-        await self._send_text_fallback(session, fallback_text=fallback_text)
+                page_text = (fallback_text if len(pages) == 1 else "") or card_visible_text(card)
+                if page_text.strip():
+                    if not await self._send_text_fallback(session, fallback_text=page_text):
+                        confirmed = False
+                else:
+                    confirmed = False
+        return confirmed
 
-    async def _send_text_fallback(self, session: CardSession, *, fallback_text: str = "") -> None:
+    async def _send_text_fallback(self, session: CardSession, *, fallback_text: str = "") -> bool:
         """卡片不可用时，通过飞书 API 发送文本回复作为兜底."""
+        from ..cardkit.budget import split_plain_text
+
         if not self._client:
-            return
+            return False
         try:
             # 优先使用调用方传入的 fallback_text（在 _release_session_data 前快照的）
             # 其次从 session 读取（用于 _do_linear_complete_with_fallback 以外的调用路径）
             text = fallback_text or session.error_message or (session.text.display_text if session.text else "") or ""
             text = strip_reasoning_tags(text)
             if not text.strip():
-                return
-            # 限制长度避免过长
-            if len(text) > 4000:
-                text = text[:4000] + "..."
-            from ..cardkit.md import optimize_markdown_style
-            content = optimize_markdown_style(text) or text
-            if session.standalone:
-                await self._client.send_text_to_chat(session.chat_id, content)
-            else:
-                reply_id = session.anchor_id or session.message_id
-                await self._client.reply_text(reply_id, content)
+                return False
+            for part in split_plain_text(text):
+                if session.standalone:
+                    await self._client.send_text_to_chat(session.chat_id, part)
+                else:
+                    reply_id = session.anchor_id or session.message_id
+                    await self._client.reply_text(reply_id, part)
             _logger.info(
                 "text fallback sent: msg=%s len=%d",
                 (session.message_id or "?")[:12],
-                len(content),
+                len(text),
             )
+            return True
         except Exception:
-            _logger.debug("text fallback failed", exc_info=True)
+            _logger.warning("text fallback failed: msg=%s", (session.message_id or "?")[:12], exc_info=True)
+            return False
 
     def _prune_stale_sessions(self) -> None:
         """v1.1.1: 只清理已终态的过期 session，保护活跃 session."""

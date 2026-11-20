@@ -19,10 +19,10 @@ variable (set by the CI workflow).  If not set, all tests are skipped.
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -254,62 +254,34 @@ class TestAIAgent:
         )
 
     def test_aiagent_callback_attributes(self, hermes_src: Path) -> None:
-        """AIAgent should support the expected callback attributes.
-
-        These are set dynamically on AIAgent instances by Hermes's
-        conversation loop. We verify they are assigned somewhere in the
-        source by checking for attribute assignments in the AST.
-        """
-        # Callback attribute names the plugin wraps
-        callback_attrs = [
+        """Find the streaming callbacks in the constructor or delivery code."""
+        callback_attrs = {
             "stream_delta_callback",
             "interim_assistant_callback",
             "tool_progress_callback",
             "reasoning_callback",
-            "background_review_callback",
-        ]
-
-        # Check via import (instance attributes — look at __init__ or
-        # conversation_loop for assignments)
-        try:
-            from run_agent import AIAgent
-
-            # AIAgent instances set these dynamically, so we can only
-            # verify the class exists. Check that run_conversation or
-            # __init__ references these attributes in the source.
-            # Fall through to AST check for thoroughness.
-        except (ImportError, AttributeError):
-            pass
-
-        # AST check: verify these attribute names appear in run_agent.py
-        # or agent/conversation_loop.py
-        tree = _parse_ast(hermes_src, "run_agent")
-        cl_tree = _parse_ast(hermes_src, "agent.conversation_loop")
-
+        }
+        # Older releases set callbacks in AIAgent or the conversation loop.
+        # Hermes v0.23 delegates initialization and delivery to these modules.
+        modules = (
+            "run_agent", "agent.conversation_loop", "agent.agent_init",
+            "agent.stream_delivery", "gateway.run_turn_runner",
+        )
         found_attrs: set[str] = set()
-        for t in (tree, cl_tree):
-            if t is None:
+        for module in modules:
+            tree = _parse_ast(hermes_src, module)
+            if tree is None:
                 continue
-            for node in ast.walk(t):
-                if isinstance(node, ast.Attribute) and isinstance(node.attr, str):
-                    if node.attr in callback_attrs:
-                        found_attrs.add(node.attr)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr in callback_attrs:
+                    found_attrs.add(node.attr)
+                elif isinstance(node, ast.arg) and node.arg in callback_attrs:
+                    found_attrs.add(node.arg)
 
-        missing = set(callback_attrs) - found_attrs
-        if missing:
-            # Not all attributes found in AST — this is a soft warning,
-            # not a hard failure, because the attributes might be set
-            # via **kwargs or other dynamic patterns not visible in AST.
-            pass
-
-        # If at least some are found, the test passes. If NONE are found
-        # in either file, that's a stronger signal of breakage.
-        if not found_attrs and (tree is not None or cl_tree is not None):
-            pytest.fail(
-                f"None of the expected callback attributes ({callback_attrs}) "
-                f"were found in run_agent.py or agent/conversation_loop.py. "
-                f"The plugin's callback wrapping may be broken."
-            )
+        assert found_attrs & {"stream_delta_callback", "interim_assistant_callback"}, (
+            f"No answer streaming callback found in {modules}"
+        )
+        assert "tool_progress_callback" in found_attrs, f"No tool progress callback found in {modules}"
 
 
 # ── Tests: FeishuAdapter ─────────────────────────────────────────────
@@ -566,38 +538,27 @@ class TestMonkeyPatchTargets:
         )
 
 
-# ── v1.1.2: Hermes v0.17.0 兼容性验证 ──
-
-
-class TestV017SignatureChanges:
-    """v1.1.2: 验证 Hermes v0.17.0 的方法签名变化。
-
-    v0.17.0 (v2026.6.19) 新增/变更：
-    - _run_agent 新增 persist_user_message 参数
-    - run_conversation 内部重构（提取 prologue/finalizer），入口不变
-    - _session_key_for_source 内部处理 profile，签名不变
-    """
-
-    def test_run_agent_has_persist_user_timestamp_param(self, hermes_src: Path) -> None:
-        """_run_agent 应支持 persist_user_timestamp 参数（v0.16.0+）."""
-        import inspect
+class TestHermesTurnSignatures:
+    @pytest.mark.parametrize("field", ["persist_user_timestamp", "persist_user_message"])
+    def test_run_agent_accepts_turn_keyword(self, hermes_src: Path, field: str) -> None:
+        """Hermes may accept turn keywords on an inner call behind a wrapper."""
         from gateway.run import GatewayRunner
-        sig = inspect.signature(GatewayRunner._run_agent)
-        assert "persist_user_timestamp" in sig.parameters, (
-            "_run_agent 缺少 persist_user_timestamp 参数 "
-            "（插件用 inspect.signature 检测此参数是否存在）"
-        )
 
-    def test_run_agent_has_persist_user_message_param(self, hermes_src: Path) -> None:
-        """_run_agent 应支持 persist_user_message 参数（v0.17.0 新增）."""
-        import inspect
-        from gateway.run import GatewayRunner
-        sig = inspect.signature(GatewayRunner._run_agent)
-        if "persist_user_message" not in sig.parameters:
-            pytest.skip(
-                "_run_agent 无 persist_user_message 参数 "
-                "（Hermes < v0.17.0，插件用 inspect.signature 自动兼容）"
+        public = inspect.signature(GatewayRunner._run_agent)
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in public.parameters.values())
+        inner = getattr(GatewayRunner, "_run_agent_inner", None)
+        target = inspect.signature(inner) if field not in public.parameters and accepts_kwargs and inner else public
+        if field == "persist_user_message" and field not in target.parameters:
+            target_accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in target.parameters.values()
             )
+            if not target_accepts_kwargs:
+                pytest.skip("This Hermes release does not support an explicit persisted user message")
+        try:
+            public.bind_partial(**{field: None})
+            target.bind_partial(**{field: None})
+        except TypeError as error:
+            pytest.fail(f"GatewayRunner._run_agent does not accept {field}: {error}")
 
     def test_run_conversation_still_callable(self, hermes_src: Path) -> None:
         """run_conversation 仍可调用（v0.17.0 重构后验证入口没变）."""

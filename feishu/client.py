@@ -8,7 +8,9 @@ import json
 import logging
 import re
 import time as _time
-from collections.abc import Callable
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -38,12 +40,23 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
 )
 
+from ..cardkit.budget import CARD_ELEMENT_LIMIT, CARD_HARD_LIMIT_BYTES, count_elements
+from ..config.reader import FEISHU_OPEN_API_BASE
+
 # v1.3.4 fix (P1): lark_oapi SDK 的 Transport.aexecute 不捕获网络异常，
 try:
     import httpx
-    _NETWORK_ERROR_BASES: tuple = (httpx.RequestError, httpx.TimeoutException)
+    _NETWORK_ERROR_BASES: tuple = (httpx.RequestError,)
+    _PRE_REQUEST_ERRORS: tuple = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 except ImportError:  # 极端情况下 httpx 不可用（lark_oapi 依赖它，不应发生）
     _NETWORK_ERROR_BASES = ()
+    _PRE_REQUEST_ERRORS = ()
+try:
+    import requests
+    _NETWORK_ERROR_BASES += (requests.exceptions.RequestException,)
+    _PRE_REQUEST_ERRORS += (requests.exceptions.ConnectTimeout,)
+except ImportError:
+    pass
 try:
     from lark_oapi.core.exception import ObtainAccessTokenException
     _TOKEN_ERROR_BASES: tuple = (ObtainAccessTokenException,)
@@ -99,6 +112,15 @@ class FeishuAPIError(RuntimeError):
         # 兜底：返回完整消息
         return msg[:200]
 
+
+class CardKitAmbiguousWrite(FeishuAPIError):
+    """A CardKit write was sent and may have committed without an acknowledgement."""
+
+
+class MessageDeliveryUncertain(FeishuAPIError):
+    """An IM send, reply, or edit may have succeeded without acknowledgement."""
+
+
 CARDKIT_CONTENT_FAILED = 230099  # 卡片内容创建失败（通用码，需检查子错误）
 CARDKIT_ELEMENT_LIMIT = 11310  # 子码: 卡片元素数量超限
 CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property) OR element not found for insert_before
@@ -135,6 +157,55 @@ _FREQUENCY_LIMIT_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 _ELEMENT_NOT_FOUND_RETRY_DELAYS = (0.2, 0.2, 0.2)
 _ELEMENT_NOT_FOUND_MAX_RETRIES = len(_ELEMENT_NOT_FOUND_RETRY_DELAYS)
+_CARDKIT_WRITES_PER_SECOND = 10
+_UNACKNOWLEDGED_WRITE_CODES = frozenset({2200, 1663, 300000})
+
+
+def _validate_cardkit_length(operation: str, value: str, max_length: int) -> None:
+    if not 1 <= len(value) <= max_length:
+        raise FeishuAPIError(f"{operation}: payload must contain 1 to {max_length} characters")
+
+
+def _may_have_committed(error: Exception) -> bool:
+    if isinstance(error, FeishuAPIError):
+        return error.code in _UNACKNOWLEDGED_WRITE_CODES
+    if isinstance(error, _NETWORK_ERROR_BASES):
+        return not isinstance(error, _PRE_REQUEST_ERRORS)
+    return isinstance(error, json.JSONDecodeError)
+
+
+def _unclear_write_response(response: Any) -> bool:
+    status = getattr(getattr(response, "raw", None), "status_code", None)
+    return getattr(response, "code", None) is None or (isinstance(status, int) and status >= 500)
+
+
+def _unacknowledged_write(
+    error_type: type[FeishuAPIError], operation: str, error: Exception,
+) -> FeishuAPIError:
+    if isinstance(error, FeishuAPIError):
+        return error_type(f"commit not acknowledged: {error.args[0]}", error.code, error.log_id)
+    return error_type(f"{operation}: commit not acknowledged ({type(error).__name__})")
+
+
+class _CardKitWriteState:
+    """One FIFO lock and a rolling budget shared by all writes to a card."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.active = 0
+        self.finished_at: deque[float] = deque()
+        self.expiry: asyncio.TimerHandle | None = None
+
+    async def wait_for_slot(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            now = loop.time()
+            while self.finished_at and self.finished_at[0] + 1.0 <= now:
+                self.finished_at.popleft()
+            if len(self.finished_at) < _CARDKIT_WRITES_PER_SECOND:
+                return
+            await asyncio.sleep(self.finished_at[0] + 1.0 - now)
+
 
 def is_schema_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为卡片 Schema 非法属性错误。"""
@@ -160,7 +231,6 @@ def is_element_not_found_error(e: "FeishuAPIError") -> bool:
 class FeishuClientConfig:
     app_id: str
     app_secret: str
-    base_url: str = "https://open.feishu.cn/open-apis"
 
     def __post_init__(self) -> None:
         if not isinstance(self.app_id, str) or not self.app_id.strip():
@@ -198,15 +268,13 @@ class FeishuClient:
 
         self._brand_assets = BrandAssets()
         self.config = config
-        builder = lark.Client.builder().app_id(config.app_id).app_secret(config.app_secret)
-        # .domain() 只接受域名（如 https://open.feishu.cn），不带 /open-apis 后缀
-        # 默认域名 https://open.feishu.cn 不需要调 .domain()（SDK 默认就是它）
-        domain = config.base_url
-        if domain and "/open-apis" in domain:
-            domain = domain.split("/open-apis")[0]
-        if domain and domain != "https://open.feishu.cn":
-            builder = builder.domain(domain)
-        self._client = builder.build()
+        self._client = (
+            lark.Client.builder()
+            .app_id(config.app_id)
+            .app_secret(config.app_secret)
+            .domain(FEISHU_OPEN_API_BASE.removesuffix("/open-apis"))
+            .build()
+        )
         self._use_async_stream_element = callable(
             getattr(self._client.cardkit.v1.card_element, 'acontent', None)
         )
@@ -331,7 +399,91 @@ class FeishuClient:
         return json.dumps(obj, ensure_ascii=False)
 
     async def _card_json(self, payload: Any) -> str:
-        return self._dumps(await self._brand_assets.resolve(payload, self.upload_local_image))
+        resolved = await self._brand_assets.resolve(payload, self.upload_local_image)
+        content = self._dumps(resolved)
+        # CardKit batch actions are a list, not a complete card. Their own
+        # field-length check still applies, while whole-card limits belong to
+        # the rendered JSON after bundled image markers have been resolved.
+        if isinstance(resolved, dict) and any(key in resolved for key in ("schema", "body", "elements")):
+            if len(content.encode("utf-8")) > CARD_HARD_LIMIT_BYTES:
+                raise ValueError(f"complete card exceeds {CARD_HARD_LIMIT_BYTES} UTF-8 bytes")
+            if count_elements(resolved) > CARD_ELEMENT_LIMIT:
+                raise ValueError(f"complete card exceeds {CARD_ELEMENT_LIMIT} tagged elements")
+        return content
+
+    @asynccontextmanager
+    async def _serialize_cardkit_write(self, card_id: str) -> AsyncIterator[_CardKitWriteState]:
+        states: dict[str, _CardKitWriteState] = vars(self).setdefault("_cardkit_write_states", {})
+        state = states.get(card_id)
+        if state is None:
+            state = states[card_id] = _CardKitWriteState()
+        if state.expiry is not None:
+            state.expiry.cancel()
+            state.expiry = None
+        state.active += 1
+        try:
+            # Join before building the request. Image resolution may await while
+            # another caller already has the next sequence number for this card.
+            async with state.lock:
+                yield state
+        finally:
+            state.active -= 1
+            if state.active == 0:
+                if state.finished_at:
+                    state.expiry = asyncio.get_running_loop().call_at(
+                        state.finished_at[-1] + 1.0, states.pop, card_id, None,
+                    )
+                else:
+                    states.pop(card_id, None)
+
+    async def _send_cardkit_write(
+        self,
+        state: _CardKitWriteState,
+        operation: str,
+        request: Any,
+        send: Callable[[Any], Awaitable[Any]],
+        *,
+        retry_missing_element: bool = False,
+    ) -> None:
+        uncertain = False
+        loop = asyncio.get_running_loop()
+
+        async def attempt() -> None:
+            nonlocal uncertain
+            await state.wait_for_slot()
+            try:
+                response = await send(request)
+                unclear_response = _unclear_write_response(response)
+                uncertain |= unclear_response
+                self._check(response, operation)
+                if unclear_response:
+                    raise FeishuAPIError(f"{operation}: invalid write acknowledgement")
+            except Exception as error:
+                uncertain |= _may_have_committed(error)
+                raise
+            finally:
+                # The SDK may obtain a token or connect before transmitting.
+                # Counting until one second after each attempt ends therefore
+                # also bounds the actual rolling window on the wire.
+                state.finished_at.append(loop.time())
+
+        try:
+            retry_count = _ELEMENT_NOT_FOUND_MAX_RETRIES if retry_missing_element else 0
+            for retry in range(retry_count + 1):
+                try:
+                    await self._retry_transient(operation, attempt)
+                    return
+                except FeishuAPIError as error:
+                    if uncertain or retry == retry_count or not is_element_not_found_error(error):
+                        raise
+                    await asyncio.sleep(_ELEMENT_NOT_FOUND_RETRY_DELAYS[retry])
+        except Exception as error:
+            if uncertain:
+                # Feishu documents 200770 as a UUID collision and 300317 as
+                # a sequence conflict. Neither confirms that the first attempt
+                # applied. In particular, don't replay inserts with a new UUID.
+                raise _unacknowledged_write(CardKitAmbiguousWrite, operation, error) from error
+            raise
 
     async def _deliver_message(self, operation: str, request: Any, send: Callable) -> str:
         # Both IM create/reply endpoints deduplicate by body.uuid. Keep one key
@@ -339,15 +491,32 @@ class FeishuClient:
         # message, so transport retries cannot create duplicate cards/replies.
         if not request.request_body.uuid:
             request.request_body.uuid = uuid4().hex
+        uncertain = False
 
         async def _do() -> str:
-            resp = await send(request)
-            self._check(resp, operation)
+            nonlocal uncertain
+            try:
+                resp = await send(request)
+                unclear_response = _unclear_write_response(resp)
+                uncertain |= unclear_response
+                self._check(resp, operation)
+                if unclear_response:
+                    raise FeishuAPIError(f"{operation}: invalid send acknowledgement")
+            except Exception as error:
+                uncertain |= _may_have_committed(error)
+                raise
             if resp.data and resp.data.message_id:
                 return str(resp.data.message_id)
-            raise FeishuAPIError(f"{operation}: response missing message_id")
+            raise MessageDeliveryUncertain(f"{operation}: response missing message_id")
 
-        return await self._retry_transient(operation, _do)
+        try:
+            return await self._retry_transient(operation, _do)
+        except MessageDeliveryUncertain:
+            raise
+        except Exception as error:
+            if uncertain:
+                raise _unacknowledged_write(MessageDeliveryUncertain, operation, error) from error
+            raise
 
     async def _create_message(self, operation: str, request: Any) -> str:
         return await self._deliver_message(operation, request, self._client.im.v1.message.acreate)
@@ -457,7 +626,11 @@ class FeishuClient:
         流式刷新保持 False；只有终态封口那种「只有一次机会、失败就永久卡住」
         的调用才传 True。
         """
+        operation = "update_card"
+        uncertain_error: Exception | None = None
+
         async def _do() -> None:
+            nonlocal uncertain_error
             # Recheck after every backoff; the original session/card may have
             # been disposed, replaced, or stopped while this request slept.
             if should_update is not None and not should_update():
@@ -471,25 +644,46 @@ class FeishuClient:
                 .request_body(PatchMessageRequestBody.builder().content(content).build())
                 .build()
             )
-            resp = await self._client.im.v1.message.apatch(request)
-            self._check(resp, "update_card")
+            unclear_response = False
+            try:
+                resp = await self._client.im.v1.message.apatch(request)
+                unclear_response = _unclear_write_response(resp)
+                self._check(resp, operation)
+                if unclear_response:
+                    raise FeishuAPIError(f"{operation}: invalid write acknowledgement")
+            except Exception as error:
+                if unclear_response or _may_have_committed(error):
+                    uncertain_error = error
+                raise
+            uncertain_error = None
 
-        await self._retry_transient(
-            "update_card",
-            _do,
-            frequency_limit_delays=(
-                _FREQUENCY_LIMIT_RETRY_DELAYS if retry_frequency_limit else None
-            ),
-        )
+        try:
+            await self._retry_transient(
+                operation,
+                _do,
+                frequency_limit_delays=(
+                    _FREQUENCY_LIMIT_RETRY_DELAYS if retry_frequency_limit else None
+                ),
+            )
+        except Exception as error:
+            if uncertain_error is not None:
+                raise _unacknowledged_write(MessageDeliveryUncertain, operation, error) from error
+            raise
+        # The validity guard may skip a retry without confirming the original PATCH.
+        if uncertain_error is not None:
+            raise _unacknowledged_write(MessageDeliveryUncertain, operation, uncertain_error) from uncertain_error
 
     async def cardkit_create(self, card: dict[str, Any]) -> str:
         """创建 CardKit 实体，返回 card_id."""
+        content = await self._card_json(card)
+        _validate_cardkit_length("cardkit_create", content, 3_000_000)
+        request = (
+            CreateCardRequest.builder()
+            .request_body(CreateCardRequestBody.builder().type("card_json").data(content).build())
+            .build()
+        )
+
         async def _do():
-            request = (
-                CreateCardRequest.builder()
-                .request_body(CreateCardRequestBody.builder().type("card_json").data(await self._card_json(card)).build())
-                .build()
-            )
             t0 = _time.monotonic()
             resp = await self._client.cardkit.v1.card.acreate(request)
             elapsed_ms = (_time.monotonic() - t0) * 1000
@@ -510,48 +704,43 @@ class FeishuClient:
         sequence: int = 0,
     ) -> None:
         """流式更新卡片内指定 element 的内容（打字机效果）."""
-        async def _do():
-            body_builder = ContentCardElementRequestBody.builder().content(content)
-            body_builder = body_builder.sequence(sequence)
+        _validate_cardkit_length("cardkit_stream_element", content, 100_000)
+        async with self._serialize_cardkit_write(card_id) as state:
             request = (
                 ContentCardElementRequest.builder()
                 .card_id(card_id)
                 .element_id(element_id)
-                .request_body(body_builder.build())
+                .request_body(
+                    ContentCardElementRequestBody.builder()
+                    .content(content).sequence(sequence).uuid(uuid4().hex).build(),
+                )
                 .build()
             )
-            if self._use_async_stream_element:
-                resp = await self._client.cardkit.v1.card_element.acontent(request)
-            else:
-                resp = await asyncio.to_thread(
-                    self._client.cardkit.v1.card_element.content,
-                    request,
-                )
-            self._check(resp, "cardkit_stream_element")
+            send = (
+                self._client.cardkit.v1.card_element.acontent
+                if self._use_async_stream_element else self._sync_stream_content
+            )
+            await self._send_cardkit_write(
+                state, "cardkit_stream_element", request, send, retry_missing_element=True,
+            )
 
-        last_error: FeishuAPIError | None = None
-        for attempt in range(_ELEMENT_NOT_FOUND_MAX_RETRIES + 1):
-            try:
-                await self._retry_transient("cardkit_stream_element", _do)
-                # 成功时打 DEBUG 日志（降级自 INFO — 流式输出期间每 70ms 一次，
-                # 单次会话可产生数十条 INFO 日志，生产环境日志爆炸）
-                return
-            except FeishuAPIError as e:
-                if not is_element_not_found_error(e):
-                    raise
-                last_error = e
-                if attempt < _ELEMENT_NOT_FOUND_MAX_RETRIES:
-                    delay = _ELEMENT_NOT_FOUND_RETRY_DELAYS[attempt]
-                    _logger.info(
-                        "HLS: stream_element 300313 retry card=%s el=%s attempt=%d/%d delay=%.1fs",
-                        card_id[:12], element_id[:16],
-                        attempt + 1, _ELEMENT_NOT_FOUND_MAX_RETRIES, delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-        if last_error:
-            raise last_error  # unreachable
+    async def _sync_stream_content(self, request: ContentCardElementRequest) -> Any:
+        # Cancelling an executor future cannot stop an in-flight synchronous
+        # request. Hold the write queue until it has actually finished.
+        loop = asyncio.get_running_loop()
+        result = loop.run_in_executor(None, self._client.cardkit.v1.card_element.content, request)
+        cancelled = False
+        try:
+            while True:
+                try:
+                    return await asyncio.shield(result)
+                except asyncio.CancelledError:
+                    if result.cancelled():
+                        raise
+                    cancelled = True
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def cardkit_update(
         self,
@@ -560,16 +749,18 @@ class FeishuClient:
         sequence: int = 0,
     ) -> None:
         """全量更新 CardKit 卡片."""
-        async def _do():
-            body_builder = UpdateCardRequestBody.builder().card(
-                Card.builder().type("card_json").data(await self._card_json(card)).build()
+        async with self._serialize_cardkit_write(card_id) as state:
+            content = await self._card_json(card)
+            _validate_cardkit_length("cardkit_update", content, 1_000_000)
+            body = (
+                UpdateCardRequestBody.builder()
+                .card(Card.builder().type("card_json").data(content).build())
+                .sequence(sequence).uuid(uuid4().hex).build()
             )
-            body_builder = body_builder.sequence(sequence)
-            request = UpdateCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
-            resp = await self._client.cardkit.v1.card.aupdate(request)
-            self._check(resp, "cardkit_update")
-
-        await self._retry_transient("cardkit_update", _do)
+            request = UpdateCardRequest.builder().card_id(card_id).request_body(body).build()
+            await self._send_cardkit_write(
+                state, "cardkit_update", request, self._client.cardkit.v1.card.aupdate,
+            )
 
     async def cardkit_batch_update(
         self,
@@ -579,16 +770,17 @@ class FeishuClient:
         sequence: int = 0,
     ) -> None:
         """局部更新 CardKit 卡片（增删改组件）."""
-        async def _do():
-            body_builder = BatchUpdateCardRequestBody.builder().sequence(sequence).actions(await self._card_json(actions))
-            request = BatchUpdateCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
-            t0 = _time.monotonic()
-            resp = await self._client.cardkit.v1.card.abatch_update(request)
-            elapsed_ms = (_time.monotonic() - t0) * 1000
-            _logger.debug("perf: feishu_batch_update card=%s elapsed=%.0fms actions=%d", card_id[:12], elapsed_ms, len(actions))
-            self._check(resp, "cardkit_batch_update")
-
-        await self._retry_transient("cardkit_batch_update", _do)
+        async with self._serialize_cardkit_write(card_id) as state:
+            content = await self._card_json(actions)
+            _validate_cardkit_length("cardkit_batch_update", content, 1_000_000)
+            body = (
+                BatchUpdateCardRequestBody.builder().sequence(sequence)
+                .actions(content).uuid(uuid4().hex).build()
+            )
+            request = BatchUpdateCardRequest.builder().card_id(card_id).request_body(body).build()
+            await self._send_cardkit_write(
+                state, "cardkit_batch_update", request, self._client.cardkit.v1.card.abatch_update,
+            )
 
     @staticmethod
     def _summary_settings(summary: str) -> dict[str, Any]:
@@ -599,14 +791,17 @@ class FeishuClient:
         }
 
     async def _apply_card_settings(self, card_id: str, settings: dict[str, Any], operation: str, *, sequence: int = 0) -> None:
-        async def _do():
-            body_builder = SettingsCardRequestBody.builder().settings(self._dumps(settings))
-            body_builder = body_builder.sequence(sequence)
-            request = SettingsCardRequest.builder().card_id(card_id).request_body(body_builder.build()).build()
-            resp = await self._client.cardkit.v1.card.asettings(request)
-            self._check(resp, operation)
-
-        await self._retry_transient(operation, _do)
+        async with self._serialize_cardkit_write(card_id) as state:
+            content = self._dumps(settings)
+            _validate_cardkit_length(operation, content, 100_000)
+            body = (
+                SettingsCardRequestBody.builder().settings(content)
+                .sequence(sequence).uuid(uuid4().hex).build()
+            )
+            request = SettingsCardRequest.builder().card_id(card_id).request_body(body).build()
+            await self._send_cardkit_write(
+                state, operation, request, self._client.cardkit.v1.card.asettings,
+            )
 
     async def cardkit_close_streaming(
         self,

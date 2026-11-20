@@ -30,6 +30,7 @@ class CardSession:
         "_creation_stages",
         "_completion_started",
         "_disposed",
+        "_final_delivery_unconfirmed",
         "_first_flush_done",
         "_is_continuation",
         "_interactive_seal_started",
@@ -39,6 +40,7 @@ class CardSession:
         "_loading_label_supported",
         "_loading_status_key",
         "_loop",
+        "_native_requires_replace",
         "_memory_prefetch_requests",
         "_image_analysis_requests",
         "_has_native_image_input",
@@ -48,6 +50,7 @@ class CardSession:
         "_seal_recovery_fallback_text",
         "_streaming_closed",
         "_streaming_closed_logged",
+        "_streamed_answer",
         "_stream_lock",
         "_was_aborted",
         "anchor_id",
@@ -56,6 +59,7 @@ class CardSession:
         "card_msg_id",
         "card_trace_id",
         "chat_id",
+        "continuation_cards",
         "create_epoch",
         "created_at",
         "error_message",
@@ -106,6 +110,7 @@ class CardSession:
         self.flush = FlushController(loop=loop)
         self.footer: dict[str, Any] = {}
         self.fallback_card: dict[str, Any] | None = None
+        self.continuation_cards: list[dict[str, Any]] = []
         # Answer snapshot for the static reply a failed seal may still owe the
         # chat. Held here (not on the controller) so a deferred delivery can
         # outlive the completion coroutine that captured it.
@@ -114,6 +119,7 @@ class CardSession:
         self._completion_started = False
         self._interactive_seal_started = False
         self._disposed = False
+        self._final_delivery_unconfirmed = False
         self.text_sizes: dict[str, str | dict[str, str]] = {}
         self.sequence = 1
         self.created_at = time.time()
@@ -150,6 +156,8 @@ class CardSession:
         # only if no model activity arrived during compression.
         self._compression_previous_phase: str | None = None
         self._streaming_closed: bool = False
+        self._native_requires_replace = False
+        self._streamed_answer: str | None = None
         # v1.2.0 L1: "streaming closed" 日志去重——同一张卡第一次打 INFO，之后降 DEBUG
         self._streaming_closed_logged: bool = False
         # Streaming callbacks may arrive from Hermes worker threads while the

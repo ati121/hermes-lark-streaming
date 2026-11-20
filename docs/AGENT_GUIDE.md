@@ -8,10 +8,10 @@
 | 项目 | 值 |
 |------|-----|
 | 名称 | hermes-lark-streaming |
-| 作用 | Hermes Agent 的飞书/Lark CardKit v2.0 流式卡片插件 |
+| 作用 | Hermes Agent 的飞书 CardKit v2.0 流式卡片插件 |
 | 许可证 | MIT |
 | Python | >=3.11 |
-| 依赖 | lark-oapi>=1.4.0, PyYAML>=6.0 |
+| 依赖 | lark-oapi>=1.6.0, PyYAML>=6.0 |
 | 插件类型 | standalone |
 | 当前仓库 | https://github.com/ati121/hermes-lark-streaming |
 | 复刻来源 | https://github.com/Aowen-Nowor/hermes-lark-streaming |
@@ -92,17 +92,17 @@ hermes gateway restart
 
 ## 凭据配置
 
-插件复用 Hermes 已有的飞书/Lark 凭据，不要在仓库文件中写入真实值。
+插件复用 Hermes 已有的飞书凭据，固定请求飞书国内站 `https://open.feishu.cn/open-apis`。不要在仓库文件中写入真实凭据。
 
 ```bash
 # $HERMES_HOME/.env
 FEISHU_APP_ID=your_app_id
 FEISHU_APP_SECRET=your_app_secret
-FEISHU_DOMAIN=feishu          # 国内版；国际版使用 lark
 ```
 
 也可以使用环境变量，或在 `$HERMES_HOME/config.yaml` 的 `feishu`/`lark` 节中配置。
 优先级为：环境变量 > `.env` > 配置文件。
+Hermes 网关也须接入飞书国内站。如果在网关配置里设置了 `FEISHU_DOMAIN`，请使用 `feishu`。
 
 ## 配置项
 

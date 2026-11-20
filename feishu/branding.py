@@ -13,17 +13,17 @@ GITHUB_ASSET = "hls-asset:github"
 _ASSETS: dict[str, tuple[str, dict]] = {
     OPENVIKING_ASSET: (
         "openviking.png",
-        {"tag": "standard_icon", "token": "doc-search_outlined", "size": "16px 16px"},
+        {"tag": "standard_icon", "token": "doc-search_outlined"},
     ),
     GITHUB_ASSET: (
         "github.png",
-        {"tag": "standard_icon", "token": "setting_outlined", "size": "16px 16px"},
+        {"tag": "standard_icon", "token": "setting_outlined"},
     ),
 }
 
 
 def _icon(asset: str) -> dict:
-    return {"tag": "custom_icon", "img_key": asset, "size": "16px 16px"}
+    return {"tag": "custom_icon", "img_key": asset}
 
 
 def openviking_icon() -> dict:
@@ -46,7 +46,7 @@ def brand_icon(brand: str) -> dict:
     factory = _BRAND_ICONS.get(brand)
     if factory:
         return factory()
-    return {"tag": "standard_icon", "token": "setting_outlined", "size": "16px 16px"}
+    return {"tag": "standard_icon", "token": "setting_outlined"}
 
 
 class BrandAssets:

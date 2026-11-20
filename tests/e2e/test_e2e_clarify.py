@@ -125,15 +125,7 @@ class TestClarifyCardNormalization:
             assert msg_id
 
     async def test_clarify_submitted_card_escaped(self, runner):
-        """Submitted card with special chars in selected text must be escaped.
-
-        Note: the submitted card uses an ``action``+``button`` element for the
-        retry button. In production, this card is returned as a CallBackCard
-        response (card action callback API), NOT sent via ``send_card_to_chat``
-        (IM message API). The IM message API rejects ``action`` tags in V2
-        schema (code 230099). So this test only verifies the card JSON
-        structure (escaping) without sending it via the IM API.
-        """
+        """The legacy retry card keeps escaped text and a JSON 2.0 button."""
         card = build_clarify_submitted_card(
             question="Which option?",
             selected="/mnt/nas/backup[1]",
@@ -141,6 +133,7 @@ class TestClarifyCardNormalization:
         )
 
         elements = card["body"]["elements"]
+        assert elements[-1]["tag"] == "button"
         # Find the selected text element (second div with lock icon)
         selected_el = elements[1]
         content = selected_el["text"]["content"]

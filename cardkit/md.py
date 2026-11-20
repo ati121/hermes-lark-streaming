@@ -8,7 +8,8 @@ from typing import Any
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
-_MAX_CARD_TABLES = 20  # 流式卡片：20表降级阈值（流式增量内容，飞书宽松执行）
+_MAX_CARD_TABLES = 20  # Preprocessing cap before final CardKit answer layout.
+MAX_MARKDOWN_COMPONENT_TABLES = 4
 _MAX_CRON_TABLES = 5   # 静态卡片：5表降级阈值（飞书 Card 2.0 单卡硬限）
 _MAX_INTERACTIVE_TABLES = _MAX_CRON_TABLES  # Whole-card writes share the static-card limit.
 _MAX_CHUNK_CHARS = 2400
@@ -27,8 +28,8 @@ _RE_CODE_BLOCK_EXTRACT = re.compile(r"(^|\n)(`{3,}|~{3,})([^\n`]*)\n[\s\S]*?(?:\
 _RE_H1_TO_H3 = re.compile(r"^#{1,3} ", re.MULTILINE)
 _RE_HEADING_DEMOTE = re.compile(r"^#{2,6} (.+)$", re.MULTILINE)
 _RE_H1_DEMOTE = re.compile(r"^# (.+)$", re.MULTILINE)
-_RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
-_RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|\n{3,}')
+_RE_MULTI_NEWLINE = re.compile(r"(?:\r\n|\r|\n){3,}")
+_RE_SHORT_MD_CHECK = re.compile(r'^#{1,6} |\n#{1,6} |```|!\[|(?:\r\n|\r|\n){3,}')
 # v1.3.0: placeholder pattern for restoring protected code/bold/italic blocks
 _RE_PROTECTED_PLACEHOLDER = re.compile(r'\x00P(\d+)P\x00')
 _RE_BACKTICK_RUN = re.compile(r"`+")
@@ -54,6 +55,14 @@ __all__ = [
     "split_table_spacing_blocks",
 ]
 
+def _is_table_delimiter(line: str, *, min_dashes: int = 1) -> bool:
+    line = line.strip()
+    return "|" in line and all(
+        re.fullmatch(rf":?-{{{min_dashes},}}:?", cell.strip())
+        for cell in line.strip("|").split("|")
+    )
+
+
 def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
     """Find pipe tables outside fenced code, including CRLF and optional edges."""
     lines = text.splitlines(keepends=True)
@@ -77,12 +86,7 @@ def _find_tables_outside_code_blocks(text: str) -> list[tuple[int, int, str]]:
         if fence_char or index + 1 >= len(lines) or len(line) - len(line.lstrip(" ")) > 3:
             index += 1
             continue
-        delimiter = lines[index + 1].strip()
-        cells = delimiter.strip("|").split("|")
-        if (
-            "|" not in line or "|" not in delimiter
-            or not all(re.fullmatch(r":?-+:?", cell.strip()) for cell in cells)
-        ):
+        if "|" not in line or not _is_table_delimiter(lines[index + 1]):
             index += 1
             continue
         end_index = index + 2
@@ -155,7 +159,9 @@ def _enforce_markdown_table_budget(elements: list[dict], *, limit: int = _MAX_IN
             if not isinstance(source, str):
                 source = content
             count = len(_find_tables_outside_code_blocks(source)) if "|" in source else 0
-            rendered[locale] = _downgrade_tables(source, limit=remaining[locale])
+            rendered[locale] = _downgrade_tables(
+                source, limit=min(remaining[locale], MAX_MARKDOWN_COMPONENT_TABLES),
+            )
             remaining[locale] = max(0, remaining[locale] - count)
         result["content"] = rendered[""]
         localized = {locale: rendered[locale] for locale in locales if locale and (
@@ -219,35 +225,86 @@ def escape_markdown_asterisks(text: str) -> str:
 
     return text
 
+def _code_block_ranges(text: str) -> list[tuple[int, int]]:
+    """Locate fenced/indented literal blocks without changing their line endings.
+
+    Blank lines between indented code lines belong to that code block; trailing
+    blank lines remain outside so ordinary paragraph spacing can be compressed.
+    """
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        body = lines[index].rstrip("\r\n")
+        fence = _RE_FENCE_LINE.match(body)
+        if fence:
+            run, _ = fence.groups()
+            end = index + 1
+            while end < len(lines):
+                closing = _RE_FENCE_LINE.match(lines[end].rstrip("\r\n"))
+                if closing:
+                    close_run, suffix = closing.groups()
+                    if close_run[0] == run[0] and len(close_run) >= len(run) and not suffix.strip():
+                        end += 1
+                        break
+                end += 1
+            ranges.append((offsets[index], offsets[end - 1] + len(lines[end - 1].rstrip("\r\n"))))
+            index = end
+            continue
+        if body.strip() and (len(body) - len(body.lstrip(" ")) >= 4 or body.startswith("\t")):
+            end = index + 1
+            last_code = index
+            while end < len(lines):
+                following = lines[end].rstrip("\r\n")
+                if following.strip():
+                    if len(following) - len(following.lstrip(" ")) < 4 and not following.startswith("\t"):
+                        break
+                    last_code = end
+                end += 1
+            ranges.append((offsets[index], offsets[last_code] + len(lines[last_code].rstrip("\r\n"))))
+            index = end
+            continue
+        index += 1
+    return ranges
+
+
+def _inline_ranges_outside_blocks(text: str) -> list[tuple[int, int]]:
+    # Mask literal blocks before pairing backticks, otherwise a fence or a code
+    # example can accidentally pair with a later real inline-code delimiter.
+    masked: list[str] = []
+    cursor = 0
+    for start, end in _code_block_ranges(text):
+        masked.append(text[cursor:start])
+        masked.append(re.sub(r"[^\r\n]", " ", text[start:end]))
+        cursor = end
+    masked.append(text[cursor:])
+    return _inline_code_ranges("".join(masked))
+
+
 def optimize_markdown_style(text: str) -> str:
-    """1. 提取代码块用占位符保护"""
+    """Normalise prose while retaining literal code and its original blank lines."""
     if len(text) < 100 and not _RE_SHORT_MD_CHECK.search(text):
         return text
     try:
-        # 1. 提取代码块
-        mark = "___CB_"
-        code_blocks: list[str] = []
+        def prose(value: str) -> str:
+            if _RE_H1_TO_H3.search(value):
+                value = _RE_HEADING_DEMOTE.sub(r'##### \1', value)
+                value = _RE_H1_DEMOTE.sub(r'#### \1', value)
+            return _RE_MULTI_NEWLINE.sub(
+                lambda match: ("\r\n" if "\r\n" in match[0] else "\r" if "\r" in match[0] else "\n") * 2,
+                value,
+            )
 
-        def _extract(m: re.Match) -> str:
-            prefix = m.group(1) or ""
-            block = m.group(0)[len(prefix) :]
-            idx = len(code_blocks)
-            code_blocks.append(block)
-            return f"{prefix}{mark}{idx}___"
-
-        r = _RE_CODE_BLOCK_EXTRACT.sub(_extract, text)
-
-        # 2. 标题降级（仅当存在 H1-H3 时）
-        if _RE_H1_TO_H3.search(text):
-            r = _RE_HEADING_DEMOTE.sub(r'##### \1', r)
-            r = _RE_H1_DEMOTE.sub(r'#### \1', r)
-
-        # 3. 压缩多余空行（在还原前进行，代码块内的空行保持原样）
-        r = _RE_MULTI_NEWLINE.sub("\n\n", r)
-
-        # 4. 还原代码块
-        for i, block in enumerate(code_blocks):
-            r = r.replace(f"{mark}{i}___", block)
+        parts: list[str] = []
+        cursor = 0
+        for start, end in _code_block_ranges(text):
+            parts.extend((prose(text[cursor:start]), text[start:end]))
+            cursor = end
+        parts.append(prose(text[cursor:]))
+        r = "".join(parts)
 
         # 5. 剥离无效图片 key
         r = _strip_invalid_image_keys(r)
@@ -273,7 +330,9 @@ def render_answer_markdown(text: str, *, final: bool = False, table_limit: int =
     """
     if not text:
         return " "
-    rendered = _downgrade_tables(optimize_markdown_style(text), limit=table_limit) if final else text
+    rendered = optimize_markdown_style(text) if final else text
+    if final or table_limit != _MAX_CARD_TABLES:
+        rendered = _downgrade_tables(rendered, limit=table_limit)
     return escape_markdown_asterisks(_normalize_list_markers(rendered)) or " "
 
 
@@ -509,20 +568,25 @@ def split_table_spacing_blocks(text: str) -> list[str]:
         if fence_char or index + 1 >= len(lines):
             index += 1
             continue
-        header = line.strip()
-        delimiter = lines[index + 1].strip()
-        cells = delimiter.strip("|").split("|")
+        header = line.rstrip("\r\n")
+        delimiter = lines[index + 1].rstrip("\r\n")
         if (
-            len(line) - len(line.lstrip(" ")) > 3
-            or not header.startswith("|")
-            or not delimiter.startswith("|")
-            or not all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in cells)
+            len(header) - len(header.lstrip(" ")) > 3
+            or "|" not in header
+            or not _is_table_delimiter(delimiter, min_dashes=3)
         ):
             index += 1
             continue
         start = offsets[index]
         end_index = index + 2
-        while end_index < len(lines) and lines[end_index].lstrip(" ").startswith("|"):
+        while end_index < len(lines):
+            row = lines[end_index].rstrip("\r\n")
+            if (
+                not row.strip()
+                or "|" not in row
+                or len(row) - len(row.lstrip(" ")) > 3
+            ):
+                break
             end_index += 1
         end = offsets[end_index] - (len(lines[end_index - 1]) - len(lines[end_index - 1].rstrip("\r\n")))
         before = re.search(r"(?:\r?\n[ \t]*){2,}$", text[:start])
@@ -555,10 +619,6 @@ def _open_fence_at_end(text: str) -> str:
     return opener
 
 
-def _is_table_line(line: str) -> bool:
-    return line.lstrip(" ").startswith("|")
-
-
 def _pick_cut(text: str, limit: int) -> int:
     cut = text.rfind("\n\n", 0, limit)
     if cut < limit // 2:
@@ -569,6 +629,69 @@ def _pick_cut(text: str, limit: int) -> int:
 
 
 def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
+    return [rendered for _, rendered in split_markdown_source(text, limit=limit)]
+
+
+def _literal_markdown_source(text: str, limit: int) -> list[tuple[str, str]]:
+    """Render an oversized syntax unit literally, preserving exact source slices."""
+    # Either delimiter is valid for a fenced block. Pick the shorter safe one
+    # so embedded backticks (including inline-code delimiters) stay visible.
+    backticks = "`" * max(3, _longest_backtick_run(text) + 1)
+    tildes = "~" * max(3, max((len(run) for run in re.findall(r"~+", text)), default=0) + 1)
+    fence = min((backticks, tildes), key=len)
+    budget = limit - 2 * len(fence) - 2
+    if budget <= 0:
+        # A pathological delimiter run can itself exceed a chunk. Slice first
+        # so each piece can choose a different, shorter safe fence.
+        if len(text) <= 1 or limit < 10:
+            raise ValueError("limit is too small for literal Markdown")
+        middle = len(text) // 2
+        return _literal_markdown_source(text[:middle], limit) + _literal_markdown_source(text[middle:], limit)
+    chunks: list[tuple[str, str]] = []
+    while text:
+        cut = len(text) if len(text) <= budget else max(1, _pick_cut(text, budget))
+        source, text = text[:cut], text[cut:]
+        chunks.append((source, f"{fence}\n{source}\n{fence}"))
+    return chunks
+
+
+def split_markdown_source(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[tuple[str, str]]:
+    """Split Markdown safely, retaining the exact source slice for each result."""
+    if len(text) <= limit:
+        return [(text, text)]
+    literal_ranges: list[tuple[int, int]] = []
+    for start, end, table in _find_tables_outside_code_blocks(text):
+        rows = table.splitlines()
+        # Repeating a header cannot repair a row wider than a complete chunk.
+        # Keep the entire table readable as literal source instead of emitting
+        # a dangling cell or a continuation with no valid table header.
+        header_size = len(rows[0]) + len(rows[1]) + 1
+        if any(len(row) + header_size + 2 > limit for row in rows[2:]) or header_size >= limit:
+            literal_ranges.append((start, end))
+    literal_ranges.extend(
+        (start, end) for start, end in _inline_ranges_outside_blocks(text) if end - start > limit
+    )
+    if not literal_ranges:
+        return _split_markdown_source_regular(text, limit)
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(literal_ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    chunks: list[tuple[str, str]] = []
+    cursor = 0
+    for start, end in merged:
+        if start > cursor:
+            chunks.extend(_split_markdown_source_regular(text[cursor:start], limit))
+        chunks.extend(_literal_markdown_source(text[start:end], limit))
+        cursor = end
+    if cursor < len(text):
+        chunks.extend(_split_markdown_source_regular(text[cursor:], limit))
+    return chunks
+
+
+def _split_markdown_source_regular(text: str, limit: int) -> list[tuple[str, str]]:
     """将超长文本按段落/换行拆分为多个不超过 limit 字符的块.
 
     Each chunk becomes its own markdown element, so a cut must not leave a
@@ -578,8 +701,10 @@ def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
     chunk — falls between rows and repeats the header rows in the next chunk.
     """
     if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
+        return [(text, text)]
+    source = text
+    source_index = 0
+    chunks: list[tuple[str, str]] = []
     carry = ""  # fence opener / table header re-emitted at the next chunk head
     while text:
         head = 0
@@ -588,10 +713,14 @@ def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
             head = len(carry) + 1
             carry = ""
         if len(text) <= limit:
-            chunks.append(text)
+            chunks.append((source[source_index:], text))
             break
         cut = _pick_cut(text, limit)
         opener = _open_fence_at_end(text[:cut])
+        if opener and len(opener) >= limit // 4:
+            # An abnormally long fence cannot be repeated within the budget.
+            # The source chunk is still available for literal-text fallback.
+            opener = ""
         if opener:
             close = re.match(r"`+|~+", opener).group(0)
             # Reserve room for the closing fence so the chunk stays in budget.
@@ -602,33 +731,42 @@ def _split_long_text(text: str, limit: int = _MAX_CHUNK_CHARS) -> list[str]:
         if opener:
             close = re.match(r"`+|~+", opener).group(0)
             body = text[:cut].rstrip("\n")
-            chunks.append(f"{body}\n{close}")
-            carry = opener
+            rendered = f"{body}\n{close}"
+            carry = opener if len(opener) < limit // 4 else ""
         else:
+            for start, end in _inline_ranges_outside_blocks(text):
+                if start < cut < end:
+                    # A span that fits by itself moves intact to the next
+                    # component. At the start, include it in this component.
+                    cut = start if start > head else end
+                    break
             line_start = text.rfind("\n", 0, cut) + 1
             at_boundary = cut == len(text) or text[cut] == "\n"
             current = text[line_start:cut]
-            following = text[cut + 1:].split("\n", 1)[0] if at_boundary else ""
-            in_table = _is_table_line(current) and (not at_boundary or _is_table_line(following))
+            next_break = text.find("\n", cut + 1)
+            following = text[cut + 1:next_break if next_break != -1 else len(text)] if at_boundary else ""
+            in_table = "|" in current and (not at_boundary or "|" in following)
             if in_table:
                 table_start = line_start
                 while table_start > 0:
                     prev_start = text.rfind("\n", 0, table_start - 1) + 1
-                    if not _is_table_line(text[prev_start:table_start - 1]):
+                    if "|" not in text[prev_start:table_start - 1]:
                         break
                     table_start = prev_start
-                if table_start > head and text[:table_start].strip():
-                    cut = table_start
-                else:
-                    if not at_boundary and line_start - 1 > max(head, table_start):
-                        cut = line_start - 1  # never split a row mid-line
-                    rows = text[table_start:].split("\n", 2)
-                    if (
-                        len(rows) > 2
-                        and _RE_TABLE_DELIMITER.match(rows[1])
-                        and cut > table_start + len(rows[0]) + len(rows[1]) + 1
-                    ):
-                        carry = f"{rows[0]}\n{rows[1]}"
-            chunks.append(text[:cut].rstrip("\n"))
-        text = text[cut:].lstrip("\n")
+                rows = text[table_start:].split("\n", 2)
+                if len(rows) > 2 and _is_table_delimiter(rows[1]):
+                    if table_start > head and text[:table_start].strip():
+                        cut = table_start
+                    else:
+                        if not at_boundary and line_start - 1 > max(head, table_start):
+                            cut = line_start - 1
+                        header = f"{rows[0]}\n{rows[1]}"
+                        if len(header) < limit and cut > table_start + len(header):
+                            carry = header
+            rendered = text[:cut].rstrip("\n")
+        rest = text[cut:]
+        text = rest.lstrip("\n")
+        source_next = source_index + cut - head + len(rest) - len(text)
+        chunks.append((source[source_index:source_next], rendered))
+        source_index = source_next
     return chunks

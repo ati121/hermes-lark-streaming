@@ -1,14 +1,12 @@
 """Tests for Clarify interactive card feature (three-state design).
 
-Tests the card builders (build_clarify_card, build_clarify_submitted_card,
-build_clarify_confirmed_card) and the monkey-patch wrappers
-(_wrap_feishu_adapter_send_clarify, _wrap_handle_card_action_event,
-_schedule_clarify_resolve_and_confirm).
+Tests the card builders and the Feishu adapter's clarify callback paths.
 """
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,6 +22,7 @@ from hermes_lark_streaming.cardkit.special import (
     _CLARIFY_MAX_CHOICE_LEN,
     _normalize_choice,
 )
+from hermes_lark_streaming.patching import adapter as adapter_patch
 
 
 # ── build_clarify_card (Pending state) ──
@@ -275,13 +274,10 @@ class TestBuildClarifySubmittedCard:
     def test_retry_button_present(self) -> None:
         card = build_clarify_submitted_card(question="Q", selected="A", clarify_id="cid_retry")
         elements = card["body"]["elements"]
-        # Fourth element: action with retry button
-        assert elements[3]["tag"] == "action"
-        actions = elements[3]["actions"]
-        assert len(actions) == 1
-        assert actions[0]["tag"] == "button"
-        assert actions[0]["type"] == "primary"
-        behaviors = actions[0]["behaviors"]
+        button = elements[3]
+        assert button["tag"] == "button"
+        assert button["type"] == "primary"
+        behaviors = button["behaviors"]
         assert behaviors[0]["value"]["hermes_clarify_action"] == "retry_submit"
         assert behaviors[0]["value"]["clarify_id"] == "cid_retry"
 
@@ -378,48 +374,48 @@ class TestWrapFeishuAdapterSendClarify:
 
         orig.assert_called_once()
 
-    def test_stores_choices_for_callback(self) -> None:
-        """When card is sent, choices should be stored in _clarify_choices."""
-        from hermes_lark_streaming.patching import _clarify_choices, _clarify_questions, _wrap_feishu_adapter_send_clarify
-
+    @pytest.mark.asyncio
+    async def test_stores_choices_for_callback(self, monkeypatch) -> None:
+        client = SimpleNamespace(send_card_to_chat=AsyncMock(return_value="msg_123"))
+        ctrl = SimpleNamespace(enabled=True, _client_ok=lambda: True, _client=client, _sess_items_snapshot=list)
+        monkeypatch.setattr("hermes_lark_streaming.controller.get_controller", lambda: ctrl)
+        monkeypatch.setattr(adapter_patch, "_clarify_host_helpers", lambda: (MagicMock(),) * 4)
+        adapter = SimpleNamespace(_validate_card_action=MagicMock())
         orig = AsyncMock()
-        wrapped = _wrap_feishu_adapter_send_clarify(orig)
+        wrapped = adapter_patch._wrap_feishu_adapter_send_clarify(orig)
+        cid = "test_clarify_id"
+        try:
+            await wrapped(adapter, "chat_123", "Which?", ["Fast", "Slow"], cid, "session_1")
+            orig.assert_not_awaited()
+            assert adapter_patch._clarify_choices[cid] == ["Fast", "Slow"]
+            owner, state = adapter_patch._legacy_clarify_prompts[cid]
+            assert owner is adapter
+            assert state["question"] == "Which?"
+        finally:
+            with adapter_patch._clarify_lock:
+                adapter_patch._clear_clarify_locked(cid)
 
-        mock_client = AsyncMock()
-        mock_client.send_card_to_chat = AsyncMock(return_value="msg_123")
 
-        mock_ctrl = MagicMock()
-        mock_ctrl.enabled = True
-        mock_ctrl._client_ok.return_value = True
-        mock_ctrl._client = mock_client
+@pytest.fixture
+def legacy_clarify(monkeypatch):
+    pending = SimpleNamespace(session_key="session")
+    resolve = MagicMock(return_value=True)
+    self_check = MagicMock(return_value=None)
+    refusal_text = MagicMock(return_value="Ask the requester")
+    patch_result = AsyncMock()
+    monkeypatch.setattr(adapter_patch, "_clarify_host_helpers", lambda: (
+        self_check, refusal_text, lambda cid: pending, resolve,
+    ))
+    monkeypatch.setattr(adapter_patch, "_update_interactive_result", patch_result)
 
-        # Clean up any previous test data
-        _clarify_choices.pop("test_clarify_id", None)
-        _clarify_questions.pop("test_clarify_id", None)
+    def remember(adapter, cid, choices):
+        adapter._validate_card_action = MagicMock(return_value=("user_1", "chat", "User", "uid", "union"))
+        monkeypatch.setitem(adapter_patch._clarify_choices, cid, choices)
+        monkeypatch.setitem(adapter_patch._legacy_clarify_prompts, cid, (adapter, {
+            "session_key": "session", "message_id": "card", "chat_id": "chat", "question": "Q?",
+        }))
 
-        with (
-            patch("hermes_lark_streaming.controller.get_controller", return_value=mock_ctrl),
-            patch("hermes_lark_streaming.patching._register_gateway_card"),
-        ):
-            import asyncio
-            try:
-                asyncio.get_event_loop().run_until_complete(
-                    wrapped(
-                        MagicMock(), "chat_123", "Which?", ["Fast", "Slow"],
-                        "test_clarify_id", "session_1",
-                    )
-                )
-            except Exception:
-                pass  # May fail on SendResult import
-
-        # Check that choices were stored
-        assert "test_clarify_id" in _clarify_choices
-        assert _clarify_choices["test_clarify_id"] == ["Fast", "Slow"]
-        assert _clarify_questions["test_clarify_id"] == "Which?"
-
-        # Cleanup
-        _clarify_choices.pop("test_clarify_id", None)
-        _clarify_questions.pop("test_clarify_id", None)
+    return remember, resolve, self_check, patch_result
 
 
 class TestWrapHandleCardActionEventV142:
@@ -495,7 +491,7 @@ class TestWrapHandleCardActionEventV142:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("action", ["select", "choice"])
-    async def test_clarify_action_handled_and_original_not_called(self, action) -> None:
+    async def test_clarify_action_handled_and_original_not_called(self, action, legacy_clarify) -> None:
         """v1.4.2: clarify action → 复用 _handle_clarify_card_action, 不调用原生."""
         from hermes_lark_streaming.patching import (
             _wrap_handle_card_action_event,
@@ -519,28 +515,28 @@ class TestWrapHandleCardActionEventV142:
             mock_event.action = mock_action
             mock_event.operator = MagicMock()
             mock_event.operator.open_id = "user_1"
+            mock_event.context = SimpleNamespace(open_chat_id="chat", open_message_id="card")
 
             mock_data = MagicMock()
             mock_data.event = mock_event
 
             mock_adapter = MagicMock()
-            mock_adapter._is_interactive_operator_authorized.return_value = True
-            mock_adapter._loop = None
-
-            mock_cg = MagicMock()
-            mock_cg.resolve_gateway_clarify = MagicMock()
-
-            with patch.dict("sys.modules", {
-                "tools": MagicMock(),
-                "tools.clarify_gateway": mock_cg,
-            }):
-                await wrapped(mock_adapter, mock_data)
+            remember, resolve, authority, patch_result = legacy_clarify
+            remember(mock_adapter, "v142_cid", ["A", "B"])
+            await wrapped(mock_adapter, mock_data)
 
             # original (native _handle_card_action_event) must NOT be called —
             # clarify is handled by _handle_clarify_card_action, /card suppressed
             original.assert_not_called()
             # clarify resolution should be called with the selected choice
-            mock_cg.resolve_gateway_clarify.assert_called_once_with("v142_cid", "A")
+            authority.assert_called_once_with("v142_cid", "uid", extra=mock_adapter.config.extra)
+            resolve.assert_called_once_with("v142_cid", "A")
+            patch_result.assert_awaited_once()
+            _, message_id, card = patch_result.await_args.args
+            assert message_id == "card"
+            assert card["schema"] == "2.0"
+            assert card["config"]["update_multi"] is True
+            assert "resolve_filled" in str(card)
         finally:
             _clarify_questions.pop("v142_cid", None)
             _clarify_choices.pop("v142_cid", None)
@@ -579,6 +575,24 @@ class TestWrapHandleCardActionEventV142:
 
         original.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_legacy_prompt_refusal_keeps_prompt_open(self, legacy_clarify) -> None:
+        remember, resolve, authority, patch_result = legacy_clarify
+        authority.return_value = "requester"
+        adapter = SimpleNamespace(config=SimpleNamespace(extra={}))
+        remember(adapter, "legacy-refusal", ["A"])
+        value = {"hermes_clarify_action": "select", "clarify_id": "legacy-refusal"}
+        event = SimpleNamespace(action=SimpleNamespace(value=value, option="0"),
+                                context=SimpleNamespace(open_chat_id="chat", open_message_id="card"))
+        original = AsyncMock()
+
+        await adapter_patch._wrap_handle_card_action_event(original)(adapter, SimpleNamespace(event=event))
+
+        resolve.assert_not_called()
+        patch_result.assert_not_awaited()
+        original.assert_not_awaited()
+        assert "legacy-refusal" in adapter_patch._legacy_clarify_prompts
+
 
 class TestStaleBoundMethodSimulation:
     """v1.4.2: Simulate the SDK stale bound method scenario end-to-end.
@@ -589,7 +603,7 @@ class TestStaleBoundMethodSimulation:
     """
 
     @pytest.mark.asyncio
-    async def test_stale_on_card_action_trigger_calls_patched_handle_event(self) -> None:
+    async def test_stale_on_card_action_trigger_calls_patched_handle_event(self, legacy_clarify) -> None:
         """Simulate: SDK holds stale _on_card_action_trigger (unpatched), but
         _handle_card_action_event is patched on the class. The stale method's
         body does self._handle_card_action_event(data) → hits the patch."""
@@ -635,6 +649,8 @@ class TestStaleBoundMethodSimulation:
                     return "NATIVE /card GENERATED (should NOT happen)"
 
             adapter = FakeAdapter()
+            remember, resolve, _authority, patch_result = legacy_clarify
+            remember(adapter, "stale_cid", ["X", "Y"])
 
             # Capture the stale bound method (simulating SDK registration)
             stale_bound_method = adapter._on_card_action_trigger
@@ -652,28 +668,21 @@ class TestStaleBoundMethodSimulation:
             mock_event.action = mock_action
             mock_event.operator = MagicMock()
             mock_event.operator.open_id = "user_1"
+            mock_event.context = SimpleNamespace(open_chat_id="chat", open_message_id="card")
 
             mock_data = MagicMock()
             mock_data.event = mock_event
 
-            mock_cg = MagicMock()
-            mock_cg.resolve_gateway_clarify = MagicMock()
-
             # SDK dispatches via the STALE bound method (not via class attribute).
             # The stale method's body calls self._handle_card_action_event(data)
             # which should hit the PATCHED version (dynamic lookup via self.).
-            with patch.dict("sys.modules", {
-                "tools": MagicMock(),
-                "tools.clarify_gateway": mock_cg,
-            }):
-                result = stale_bound_method(mock_data)
-                # stale_bound_method scheduled a coroutine via _submit_on_loop;
-                # let it execute
-                await asyncio.sleep(0.05)
+            assert stale_bound_method(mock_data) == "empty_response"
+            await asyncio.sleep(0)
 
             # The clarify should have been resolved (patched _handle_card_action_event
             # called _handle_clarify_card_action which called resolve_gateway_clarify)
-            mock_cg.resolve_gateway_clarify.assert_called_once_with("stale_cid", "X")
+            resolve.assert_called_once_with("stale_cid", "X")
+            patch_result.assert_awaited_once()
         finally:
             _clarify_questions.pop("stale_cid", None)
             _clarify_choices.pop("stale_cid", None)

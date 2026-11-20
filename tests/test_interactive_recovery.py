@@ -195,7 +195,7 @@ async def test_230429_sdk_response_reaches_retry_and_repair_without_second_card(
         success=lambda: False, code=230429, msg="This operation triggers the frequency limit.",
         get_log_id=lambda: "synthetic-log-id",
     )
-    accepted = SimpleNamespace(success=lambda: True)
+    accepted = SimpleNamespace(success=lambda: True, code=0)
     patch_message = AsyncMock(side_effect=[rejected] * rejections + [accepted])
     real_client._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(
         message=SimpleNamespace(apatch=patch_message),
@@ -389,6 +389,7 @@ async def test_seal_backoff_spans_long_window(monkeypatch):
     async def update(request):
         if sum(delays) < 15:
             raise frequency_error()
+        return SimpleNamespace(code=0)
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
     patch_request.side_effect = update

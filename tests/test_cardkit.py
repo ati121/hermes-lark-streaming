@@ -492,7 +492,7 @@ class TestBuildStreamingCardV2:
             for element in card["body"]["elements"]
             if element.get("element_id") == "answer_content"
         )
-        assert answer["text_size"] == "normal_v2"
+        assert answer["text_size"] == "normal"
 
     def test_device_text_sizes_emit_cardkit_aliases(self) -> None:
         text_sizes = {

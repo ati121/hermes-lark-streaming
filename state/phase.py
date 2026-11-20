@@ -33,6 +33,7 @@ class TerminalReason:
     ABORT = "abort"                # Explicitly cancelled by user
     UNAVAILABLE = "unavailable"    # Source message was deleted/recalled
     CREATION_FAILED = "creation_failed"  # Card creation failed
+    DELIVERY_UNCONFIRMED = "delivery_unconfirmed"
 
 PHASE_TRANSITIONS: dict[str, frozenset[str]] = {
     CardPhase.IDLE: frozenset({CardPhase.CREATING, CardPhase.ABORTED, CardPhase.TERMINATED}),

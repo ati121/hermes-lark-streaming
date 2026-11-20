@@ -76,7 +76,6 @@
 | Hermes 安装方式 | <!-- 如 pip install / pip editable / 源码运行 / Docker；可通过 `which hermes` 和 `pip show hermes-agent` 确认 --> |
 | Python 版本 | <!-- 如 3.11.5 --> |
 | 操作系统 | <!-- 如 Ubuntu 22.04 / macOS 14 / Termux --> |
-| 飞书/Lark | <!-- 国内版 / 国际版 --> |
 | 线性模式 | <!-- 开启 / 关闭（默认开启，统一面板架构） --> |
 | 统一面板 | <!-- 是否显示推理内容（display.show_reasoning） --> |
 

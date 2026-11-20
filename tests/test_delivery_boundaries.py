@@ -278,3 +278,115 @@ async def test_gateway_status_uses_latest_edited_content(delivery_card):
         assert "old content" not in payload
     finally:
         _unregister_gateway_card(message_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_first", [True, False])
+async def test_concurrent_gateway_status_and_content_keep_both_updates(delivery_card, status_first):
+    from hermes_lark_streaming.patching.adapter import _unregister_gateway_card
+
+    ctrl, session = delivery_card
+    ctrl._client.send_card_to_chat.return_value = "om_concurrent_edit"
+    message_id, _ = await ctrl._do_gateway_deliver(session.chat_id, "old content")
+    first_patch, release_patch, second_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def patch_card(*args, **kwargs):
+        if not first_patch.is_set():
+            first_patch.set()
+            await release_patch.wait()
+
+    async def edit_content():
+        return await ctrl._do_gateway_card_update(
+            chat_id=session.chat_id, card_msg_id=message_id, content="new content",
+        )
+
+    async def edit_status():
+        return await ctrl._do_gateway_card_status(card_msg_id=message_id, status_label="Done", emoji="👍")
+
+    async def start_second():
+        second_started.set()
+        return await (edit_content() if status_first else edit_status())
+
+    ctrl._client.update_card.side_effect = patch_card
+    first = asyncio.create_task(edit_status() if status_first else edit_content())
+    second = asyncio.create_task(start_second())
+    try:
+        await second_started.wait()
+        assert ctrl._client.update_card.await_count == 1
+        release_patch.set()
+        assert await asyncio.gather(first, second) == [True, True]
+        payload = ctrl._client.update_card.await_args.args[1]
+        elements = payload["body"]["elements"]
+        assert elements[0]["text"]["content"] == "👍 Done"
+        assert elements[1]["content"] == "new content"
+    finally:
+        release_patch.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        _unregister_gateway_card(message_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cron", [True, False], ids=["cron", "gateway"])
+@pytest.mark.parametrize("uncertain", [False, True], ids=["refused", "unconfirmed"])
+async def test_static_partial_delivery_falls_back_only_after_definite_refusal(
+    delivery_card, monkeypatch, cron, uncertain,
+):
+    from hermes_lark_streaming.cardkit import build_cron_cards, build_gateway_cards
+    from hermes_lark_streaming.feishu import MessageDeliveryUncertain
+    from hermes_lark_streaming.patching import _cron_delivery_ctx
+
+    ctrl, session = delivery_card
+    monkeypatch.setattr("hermes_lark_streaming.controller.get_controller", lambda: ctrl)
+    monkeypatch.setattr("hermes_lark_streaming.patching.adapter._get_config", lambda: ctrl._cfg)
+    monkeypatch.setattr("hermes_lark_streaming.patching.adapter._send_result", SimpleNamespace)
+
+    text = "先到\n\n" + "长正文🙂\n" * 3000 + "\n最后一行"
+    pages = (build_cron_cards if cron else build_gateway_cards)(text)
+    assert len(pages) > 1
+    error = MessageDeliveryUncertain("response lost") if uncertain else FeishuAPIError("card refused")
+    ctrl._client.send_card_to_chat.side_effect = ["om_first_page", error]
+    orig_send = AsyncMock()
+    adapter_type = type("Adapter", (), {})
+    _patched_feishu_classes.add(adapter_type)
+    adapter = adapter_type()
+    token = _cron_delivery_ctx.set({"job_id": "test"} if cron else None)
+    msg_token = _msg_ctx.set(None)
+    try:
+        result = await _wrap_feishu_adapter_send(orig_send)(adapter, session.chat_id, text)
+        if uncertain:
+            assert not result.success
+            assert result.raw_response == {"ambiguous": True}
+            orig_send.assert_not_awaited()
+        else:
+            orig_send.assert_awaited_once_with(
+                adapter, session.chat_id, text[len(pages[0][0]):], reply_to=None, metadata=None,
+            )
+        assert ctrl._client.send_card_to_chat.await_count == 2
+    finally:
+        _msg_ctx.reset(msg_token)
+        _cron_delivery_ctx.reset(token)
+        _patched_feishu_classes.discard(adapter_type)
+
+
+@pytest.mark.asyncio
+async def test_editing_a_split_gateway_card_clears_its_obsolete_pages(delivery_card):
+    from hermes_lark_streaming.patching.adapter import _unregister_gateway_card
+
+    ctrl, session = delivery_card
+    ids = iter(f"om_gateway_page_{i}" for i in range(100))
+    ctrl._client.send_card_to_chat.side_effect = lambda *args: next(ids)
+    message_id, _ = await ctrl._do_gateway_deliver(session.chat_id, "长正文🙂\n" * 3000)
+    count = ctrl._client.send_card_to_chat.await_count
+    delete_message = AsyncMock(return_value=True)
+    assert count > 1
+    try:
+        assert await ctrl._do_gateway_card_update(
+            chat_id=session.chat_id, card_msg_id=message_id, content="finished", delete_message=delete_message,
+        )
+        assert ctrl._client.update_card.await_args.args[0] == message_id
+        assert "finished" in json.dumps(ctrl._client.update_card.await_args.args[1])
+        assert [call.args for call in delete_message.await_args_list] == [
+            (session.chat_id, f"om_gateway_page_{i}") for i in reversed(range(1, count))
+        ]
+    finally:
+        _unregister_gateway_card(message_id)

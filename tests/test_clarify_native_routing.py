@@ -1,10 +1,12 @@
 """Regressions for Hermes' native synchronous clarify dispatch (0.23+)."""
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from hermes_lark_streaming.cardkit import build_clarify_card
+from hermes_lark_streaming.feishu import MessageDeliveryUncertain
 from hermes_lark_streaming.patching import _apply_feishu_adapter_patches
 from hermes_lark_streaming.patching import adapter as patch_adapter
 
@@ -34,6 +36,9 @@ def native_adapter(monkeypatch):
         def _card_response(self, card=None):
             return SimpleNamespace(card=card)
 
+        def _card_toast(self, content):
+            return SimpleNamespace(card=None, toast=content)
+
         send = AsyncMock()
         send_clarify = AsyncMock()
 
@@ -48,9 +53,10 @@ def native_adapter(monkeypatch):
         "message_id": "card",
     }
     pending = SimpleNamespace(session_key="image-session")
-    gateway = SimpleNamespace(get_pending=Mock(return_value=pending), resolve_gateway_clarify=Mock(return_value=True))
-    import sys
+    gateway = SimpleNamespace(get_pending=Mock(return_value=pending), resolve_gateway_clarify=Mock(return_value=True),
+                              clarify_refusal=Mock(return_value=None), refusal_text=Mock(return_value="Ask the requester"))
     monkeypatch.setitem(sys.modules, "tools.clarify_gateway", gateway)
+    monkeypatch.setitem(sys.modules, "gateway.approval_actor", gateway)
     monkeypatch.setitem(patch_adapter._clarify_questions, "cid", "Restart?")
     monkeypatch.setitem(patch_adapter._clarify_choices, "cid", ["Yes", "No"])
     monkeypatch.setitem(patch_adapter._clarify_card_msg_ids, "cid", "card")
@@ -58,13 +64,13 @@ def native_adapter(monkeypatch):
     patch_adapter._clarify_selections.pop("cid", None)
 
 
-def click(callback, action="select", *, value=None, **kwargs):
+def click(callback, action="select", *, value=None, message_id="card", chat_id="chat", **kwargs):
     if value is None:
         value = {"hermes_clarify_action": action, "clarify_id": "cid"}
     event = SimpleNamespace(
         action=SimpleNamespace(value=value, **kwargs),
         operator=SimpleNamespace(open_id="user", user_id="uid", union_id="union"),
-        context=SimpleNamespace(open_chat_id="chat"),
+        context=SimpleNamespace(open_chat_id=chat_id, open_message_id=message_id),
     )
     return callback(SimpleNamespace(event=event))
 
@@ -130,6 +136,40 @@ def test_unauthorized_or_wrong_chat_is_rejected(native_adapter):
     assert "cid" in adapter._clarify_state
 
 
+def test_prompt_refusal_leaves_card_and_waiter_unchanged(native_adapter):
+    adapter, callback, gateway = native_adapter
+    adapter.config = SimpleNamespace(extra={"scope": "profile"})
+    gateway.clarify_refusal.return_value = "requester"
+
+    result = click(callback, option="0")
+
+    assert result.toast == "Ask the requester"
+    assert result.card is None
+    gateway.clarify_refusal.assert_called_once_with("cid", "uid", extra={"scope": "profile"})
+    gateway.resolve_gateway_clarify.assert_not_called()
+    assert "cid" in adapter._clarify_state
+
+
+@pytest.mark.parametrize("context", [{"message_id": "other"}, {"chat_id": "other"}])
+def test_callback_must_match_the_recorded_message_and_chat(native_adapter, context):
+    adapter, callback, gateway = native_adapter
+    assert click(callback, option="0", **context).card is None
+    gateway.resolve_gateway_clarify.assert_not_called()
+    assert "cid" in adapter._clarify_state
+
+
+def test_long_choice_is_displayed_as_a_label_and_resolved_verbatim(native_adapter, monkeypatch):
+    _, callback, gateway = native_adapter
+    prefix = "/projects/" + "nested/" * 14
+    first, second = prefix + "choice-a.json", prefix + "choice-b.json"
+    monkeypatch.setitem(patch_adapter._clarify_choices, "cid", [first, second])
+
+    result = click(callback, option="1")
+
+    gateway.resolve_gateway_clarify.assert_called_once_with("cid", second)
+    assert "…" in result.card["body"]["elements"][1]["text"]["content"]
+
+
 @pytest.mark.parametrize("invalid", ["-1", "2", "garbage", ""])
 def test_invalid_option_does_not_answer(native_adapter, invalid):
     _, callback, gateway = native_adapter
@@ -142,7 +182,8 @@ def test_expired_card_does_not_report_success(native_adapter):
     gateway.get_pending.return_value = None
     result = click(callback, option="0")
     gateway.resolve_gateway_clarify.assert_not_called()
-    assert "resolve_filled" not in str(result.card)
+    assert "no longer accepting answers" in str(result.card)
+    assert "select_static" not in str(result.card)
 
 
 def test_other_session_does_not_answer(native_adapter):
@@ -156,7 +197,7 @@ def test_racing_answer_does_not_report_false_success(native_adapter):
     _, callback, gateway = native_adapter
     gateway.resolve_gateway_clarify.return_value = False
     result = click(callback, option="0")
-    assert "resolve_filled" not in str(result.card)
+    assert "no longer accepting answers" in str(result.card)
 
 
 def test_duplicate_click_only_resolves_once(native_adapter):
@@ -210,14 +251,85 @@ def test_recreated_adapter_is_patched_when_class_id_is_reused(monkeypatch, via_f
 
 @pytest.mark.asyncio
 async def test_sent_card_registers_native_retirement_and_authorization_state(monkeypatch):
-    adapter = SimpleNamespace(_clarify_state={})
+    adapter = SimpleNamespace(_clarify_state={}, _validate_card_action=Mock())
     client = SimpleNamespace(send_card_to_chat=AsyncMock(return_value="sent-card"))
     ctrl = SimpleNamespace(enabled=True, _client_ok=lambda: True, _client=client, _sess_items_snapshot=list)
     monkeypatch.setattr("hermes_lark_streaming.controller.get_controller", lambda: ctrl)
-    import sys
-    monkeypatch.setitem(sys.modules, "tools.clarify_gateway", SimpleNamespace(mark_awaiting_text=Mock()))
+    host = SimpleNamespace(mark_awaiting_text=Mock(), get_pending=Mock(), resolve_gateway_clarify=Mock(),
+                           clarify_refusal=Mock(), refusal_text=Mock())
+    monkeypatch.setitem(sys.modules, "tools.clarify_gateway", host)
+    monkeypatch.setitem(sys.modules, "gateway.approval_actor", host)
     send = patch_adapter._wrap_feishu_adapter_send_clarify(AsyncMock())
-    await send(adapter, "chat", "Question", ["Yes", "No"], "sent-cid", "image-session")
-    assert adapter._clarify_state["sent-cid"] == {
-        "chat_id": "chat", "session_key": "image-session", "question": "Question", "message_id": "sent-card",
-    }
+    long = "/projects/" + "nested/" * 13 + "selection.json"
+    raw = "{'label': 'Use the default', 'value': 'default'}"
+    try:
+        await send(adapter, "chat", "Question", [long, "", raw], "sent-cid", "image-session")
+        assert adapter._clarify_state["sent-cid"] == {
+            "chat_id": "chat", "session_key": "image-session", "question": "Question", "message_id": "sent-card",
+        }
+        assert patch_adapter._clarify_choices["sent-cid"] == [long, raw]
+        sent = client.send_card_to_chat.await_args.args[1]
+        assert "Use the default" in sent["body"]["elements"][1]["content"]
+        assert long not in sent["body"]["elements"][1]["content"]
+    finally:
+        with patch_adapter._clarify_lock:
+            patch_adapter._clear_clarify_locked("sent-cid")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["choice", "select", "input"])
+async def test_lost_send_ack_leaves_the_original_card_answerable(native_adapter, monkeypatch, kind):
+    adapter, callback, gateway = native_adapter
+    sender = AsyncMock(side_effect=MessageDeliveryUncertain("connection closed after send"))
+    client = SimpleNamespace(send_card_to_chat=sender)
+    ctrl = SimpleNamespace(enabled=True, _client_ok=lambda: True, _client=client, _sess_items_snapshot=list)
+    monkeypatch.setattr("hermes_lark_streaming.controller.get_controller", lambda: ctrl)
+    monkeypatch.setattr(patch_adapter, "_send_result", SimpleNamespace)
+    gateway.mark_awaiting_text = Mock()
+    original = AsyncMock()
+    send = patch_adapter._wrap_feishu_adapter_send_clarify(original)
+    choices = ["A", "B", "C", "D"] if kind == "select" else ["A", "B"]
+
+    result = await send(adapter, "chat", "Do this?", choices, "cid", "image-session")
+
+    assert result.success is False
+    assert result.raw_response["ambiguous"] is True
+    original.assert_not_awaited()
+    gateway.mark_awaiting_text.assert_called_once_with("cid")
+    assert adapter._clarify_state["cid"]["message_id"] == ""
+
+    elements = sender.await_args.args[1]["body"]["elements"]
+    if kind == "choice":
+        row = next(element for element in elements if element["tag"] == "column_set")
+        control = row["columns"][0]["elements"][0]
+        fields = {}
+    else:
+        tag = "select_static" if kind == "select" else "input"
+        control = next(element for element in elements if element["tag"] == tag)
+        fields = {"option": "0"} if kind == "select" else {"input_value": "A"}
+    value = control["behaviors"][0]["value"]
+    assert value["clarify_token"] == adapter._clarify_state["cid"]["callback_token"]
+
+    assert click(callback, value={**value, "clarify_token": "wrong"}, **fields).card is None
+    assert click(callback, value=value, chat_id="other", **fields).card is None
+    assert click(callback, value=value, message_id="", **fields).card is None
+    gateway.resolve_gateway_clarify.assert_not_called()
+
+    assert "Selected: A" in str(click(callback, value=value, **fields).card)
+    gateway.resolve_gateway_clarify.assert_called_once_with("cid", "A")
+    assert "cid" not in adapter._clarify_state
+
+
+@pytest.mark.asyncio
+async def test_old_host_without_authority_renders_its_native_prompt(monkeypatch):
+    client = SimpleNamespace(send_card_to_chat=AsyncMock())
+    ctrl = SimpleNamespace(enabled=True, _client_ok=lambda: True, _client=client)
+    monkeypatch.setattr("hermes_lark_streaming.controller.get_controller", lambda: ctrl)
+    monkeypatch.setitem(sys.modules, "gateway.approval_actor", None)
+    adapter = SimpleNamespace(_validate_card_action=Mock())
+    original = AsyncMock(return_value="legacy prompt")
+    send = patch_adapter._wrap_feishu_adapter_send_clarify(original)
+
+    assert await send(adapter, "chat", "Question", ["Yes"], "cid", "image-session") == "legacy prompt"
+    original.assert_awaited_once()
+    client.send_card_to_chat.assert_not_awaited()

@@ -23,20 +23,31 @@ from ..cardkit import (
     build_streaming_card_v2,
     build_unified_panel,
     enforce_element_limit,
+    limit_streaming_panel,
+    paginate_card,
 )
+from ..cardkit.budget import CARD_BUDGET_BYTES, card_fits, json_size, text_prefix
 from ..cardkit.md import (
+    MAX_MARKDOWN_COMPONENT_TABLES,
+    _downgrade_tables,
+    _enforce_markdown_table_budget,
+    _open_fence_at_end,
     render_answer_markdown,
 )
 from ..feishu import (
+    CARDKIT_CONTENT_FAILED,
+    CARDKIT_ELEMENT_LIMIT,
     CARDKIT_SEQUENCE_CONFLICT,
     CARDKIT_STREAMING_CLOSED,
     FeishuAPIError,
+    MessageDeliveryUncertain,
     is_element_not_found_error,
     is_frequency_limit,
     is_schema_error,
     is_terminal_api_code,
     is_unavailable,
 )
+from ..feishu.client import CardKitAmbiguousWrite
 from ..state.linear import UnifiedLinearState
 from ..state.phase import TerminalReason
 from ..state.text import split_reasoning_text
@@ -58,6 +69,28 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
+_CARDKIT_ANSWER_BYTES = 15_000
+_CARDKIT_CARD_LIMIT_ERRORS = {200860, 300305}
+
+
+def _is_card_limit_error(error: FeishuAPIError) -> bool:
+    return error.code in _CARDKIT_CARD_LIMIT_ERRORS or (
+        error.code == CARDKIT_CONTENT_FAILED and error.extract_sub_code() == CARDKIT_ELEMENT_LIMIT
+    )
+
+
+def _streaming_preview(text: str, *, table_limit: bool = True) -> str:
+    """Keep the live frame within its budget; final delivery uses the full answer."""
+    source = text_prefix(text, byte_limit=_CARDKIT_ANSWER_BYTES - 256)
+    rendered = render_answer_markdown(source)
+    if table_limit:
+        rendered = _downgrade_tables(rendered, limit=MAX_MARKDOWN_COMPONENT_TABLES)
+    prefix = text_prefix(rendered, byte_limit=_CARDKIT_ANSWER_BYTES - 256)
+    if (source != text or prefix != rendered) and (opener := _open_fence_at_end(prefix)):
+        close = opener[:len(opener) - len(opener.lstrip(opener[0]))]
+        if len(close) <= 64:
+            prefix = f"{prefix.rstrip()}\n{close}"
+    return prefix
 
 def _uses_interactive_card_transport(text_sizes: dict[str, Any] | None) -> bool:
     """飞书只在普通 IM 卡片传输中可靠应用 Markdown 字号。"""
@@ -158,11 +191,14 @@ async def _write_answer_stream(
     near-identical copies of this block, including the restore-on-failure
     rules. Returns ``False`` when the caller must stop writing this flush.
     """
+    if content == session._streamed_answer:
+        return True
     session.sequence += 1
     try:
         await client.cardkit_stream_element(
             session.card_id, ANSWER_ELEMENT_ID, content, sequence=session.sequence,
         )
+        session._streamed_answer = content
         return True
     except asyncio.CancelledError:
         _restore_answer_flush_snapshot(session, state)
@@ -252,7 +288,7 @@ def _take_answer_flush_snapshot(
     with session._stream_lock:
         if not state.answer_dirty:
             return None
-        content = render_answer_markdown(state.answer_text)
+        content = _streaming_preview(state.answer_text)
         state.answer_dirty = False
         return content
 
@@ -369,6 +405,7 @@ class UnifiedControllerMixin:
         current_reasoning_text: str | None = None,
         show_reasoning: bool | None = None,
         active_tool: tuple[str, str] | None = None,
+        for_streaming: bool = True,
     ) -> dict[str, Any]:
         """Single entry point for every panel the linear path renders.
 
@@ -379,7 +416,7 @@ class UnifiedControllerMixin:
         differently means a flush can visibly undo a seal, so the defaults
         live here and callers only override what genuinely differs.
         """
-        return build_unified_panel(
+        panel = build_unified_panel(
             reasoning_rounds=state.reasoning_rounds,
             current_reasoning_text=(
                 state.current_reasoning_text
@@ -396,6 +433,13 @@ class UnifiedControllerMixin:
             text_sizes=session.text_sizes,
             active_tool=self._active_tool_for_header(session) if active_tool is None else active_tool,
         )
+        if for_streaming:
+            if not session.interactive_mode:
+                # A native card's single live answer component can occupy four
+                # table slots. Keep room for it when updating the process panel.
+                panel = _enforce_markdown_table_budget([panel], limit=1)[0]
+            panel = limit_streaming_panel(panel, session.text_sizes)
+        return panel
 
     def _build_interactive_linear_card(
         self,
@@ -409,13 +453,14 @@ class UnifiedControllerMixin:
         error_message: str = "",
         footer_fields: list[list[str]] | None = None,
         footer_show_label: bool = False,
+        native: bool = False,
     ) -> dict[str, Any]:
         """为普通 interactive 消息渲染完整线性卡片。"""
         state = session.unified_state
         elements: list[dict[str, Any]] = []
 
         # 老大 2026-09-20: 思考过程常显在折叠面板外面，几行预览 + 展开按钮
-        if state is not None and self._cfg.show_reasoning:
+        if state is not None and self._cfg.show_reasoning and not native:
             try:
                 from ..cardkit.elements import (
                     build_pinned_reasoning_elements_from_text,
@@ -439,19 +484,21 @@ class UnifiedControllerMixin:
         # CardKit 实体卡路径没有顶部思考块，仍由面板承载推理，不受影响。
         _tool_steps = session.tool_use.build_display_steps() if state is not None else []
         _total_elapsed_ms = _footer_elapsed_ms(footer_data) if final else 0.0
-        if state is not None and state.panel_visible and _tool_steps:
+        if state is not None and state.panel_visible and (native or _tool_steps):
             elements.append(self._build_session_panel(
                 session, state,
                 current_reasoning_text="" if final else None,
                 total_elapsed_ms=_total_elapsed_ms,
-                show_reasoning=False,
+                show_reasoning=self._cfg.show_reasoning if native else False,
                 expanded=self._cfg.panel_expanded if final else None,
                 active_tool=None,
+                for_streaming=not final,
             ))
 
         if state is not None and state.answer_text:
             elements.extend(build_answer_elements(
-                content=render_answer_markdown(state.answer_text, final=final),
+                content=render_answer_markdown(state.answer_text, final=True) if final else
+                _streaming_preview(state.answer_text, table_limit=False),
                 element_id=ANSWER_ELEMENT_ID,
                 text_sizes=session.text_sizes,
             ))
@@ -495,12 +542,16 @@ class UnifiedControllerMixin:
             summary=summary,
             text_sizes=session.text_sizes,
         )
+        if native:
+            _card["config"]["streaming_mode"] = False
+            return _card
+        first_page = paginate_card(_card)[0]
         # 老大 2026-09-20: 留整卡快照 —— 会话回收后按钮还要能重渲染这张卡
         try:
-            self._remember_card_snapshot(session, _card)
+            self._remember_card_snapshot(session, first_page)
         except Exception:
             _logger.debug("remember card snapshot failed", exc_info=True)
-        return _card
+        return _card if final else first_page
 
     async def _do_create_linear_card(self, session: CardSession) -> None:
         """Create the initial placeholder card — loading hint only, no panel."""
@@ -737,6 +788,8 @@ class UnifiedControllerMixin:
         if session.interactive_mode:
             await self._flush_interactive(session, state)
             return
+        if session._native_requires_replace:
+            return
 
         # Before the phase work: every phase below has early returns, so a call
         # placed after them never runs on the tool-event path.
@@ -862,6 +915,11 @@ class UnifiedControllerMixin:
                     session.existing_elements.add(UNIFIED_PANEL_ELEMENT_ID)
                 if not _keep_preparation_hint:
                     session.existing_elements.discard(_LOADING_HINT_ELEMENT_ID)
+            except CardKitAmbiguousWrite:
+                # This batch inserts stable IDs; its response can be lost
+                # after Feishu applied it. Finish by replacing the saved card.
+                session._native_requires_replace = True
+                return False
             except FeishuAPIError as e:
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     self._flush_streaming_closed(session)
@@ -982,6 +1040,9 @@ class UnifiedControllerMixin:
                 if "panel" not in session._creation_stages and state.panel_visible:
                     session._creation_stages.add("panel")
                     session.existing_elements.add(UNIFIED_PANEL_ELEMENT_ID)
+            except CardKitAmbiguousWrite:
+                session._native_requires_replace = True
+                return
             except FeishuAPIError as e:
                 if e.code == CARDKIT_STREAMING_CLOSED:
                     self._flush_streaming_closed(session)
@@ -1278,6 +1339,7 @@ class UnifiedControllerMixin:
         actions: list[dict[str, Any]] = []
         panel: dict[str, Any] | None = None
         panel_insert: dict[str, Any] | None = None
+        answer_update_index = None
         # The streaming flush is the only place that creates the panel/answer
         # elements, and it stops at COMPLETING. A short reply that finished
         # while the card was being created (or whose first Phase 2 failed)
@@ -1292,6 +1354,7 @@ class UnifiedControllerMixin:
                     total_elapsed_ms=_footer_elapsed_ms(footer_data),
                     expanded=self._cfg.panel_expanded,
                     active_tool=None,
+                    for_streaming=False,
                 )
                 if "panel" in session._creation_stages:
                     actions.append(_panel_update_action(panel))
@@ -1308,7 +1371,12 @@ class UnifiedControllerMixin:
                     render_answer_markdown(state.answer_text, final=True),
                     text_sizes=session.text_sizes,
                 )
-                actions.append(_answer_update_action(answer_elements[0]["content"]))
+                answer_update_index = len(actions)
+                partial_answer = _answer_update_action(answer_elements[0]["content"])
+                # Include the existing answer in the budget pass below, even
+                # though a partial update cannot send its tag to Feishu.
+                partial_answer["params"]["partial_element"]["tag"] = "markdown"
+                actions.append(partial_answer)
                 if len(answer_elements) > 1:
                     actions.append({
                         "action": "add_elements",
@@ -1350,6 +1418,9 @@ class UnifiedControllerMixin:
                 text_sizes=session.text_sizes,
                 label=trim_label,
             )
+        actions = _enforce_markdown_table_budget(actions)
+        if answer_update_index is not None:
+            del actions[answer_update_index]["params"]["partial_element"]["tag"]
         return actions
 
     async def _flush_panel_once(
@@ -1425,7 +1496,10 @@ class UnifiedControllerMixin:
             return
         if skip_if_closed and session._streaming_closed:
             return
-        content = render_answer_markdown(state.answer_text)
+        content = _streaming_preview(state.answer_text)
+        if content == session._streamed_answer:
+            state.answer_dirty = False
+            return
         try:
             session.sequence += 1
             _logger.info(
@@ -1436,6 +1510,7 @@ class UnifiedControllerMixin:
                 session.card_id, ANSWER_ELEMENT_ID, content,
                 sequence=session.sequence,
             )
+            session._streamed_answer = content
             state.answer_dirty = False
         except FeishuAPIError as e:
             if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
@@ -1462,10 +1537,71 @@ class UnifiedControllerMixin:
                 )
                 if ok or not clear_only_on_ok:
                     state.answer_dirty = False
+                if ok:
+                    session._streamed_answer = content
             else:
                 _logger.warning("HLS: %s answer failed: %s", source, e)
                 if not clear_only_on_ok:
                     state.answer_dirty = False
+
+    async def _replace_native_seal(
+        self, session: CardSession, card: dict[str, Any], summary: str, *, original_uncertain: bool = False,
+    ) -> bool:
+        """Recover a known final state without replaying a possibly applied batch."""
+        assert self._client is not None and session.card_id is not None
+        pages = paginate_card(card)
+        if not session._streaming_closed:
+            session.sequence += 1
+            try:
+                await self._client.cardkit_close_streaming(session.card_id, sequence=session.sequence, summary=summary)
+                session._streaming_closed = True
+            except Exception:
+                # The full replacement below also sets streaming_mode=False.
+                _logger.warning("could not close streaming before final card replacement", exc_info=True)
+        unconfirmed = original_uncertain
+        for attempt in range(3):
+            session.sequence += 1
+            try:
+                await self._client.cardkit_update(session.card_id, pages[0], sequence=session.sequence)
+                session._streaming_closed = True
+                unconfirmed = False
+                break
+            except CardKitAmbiguousWrite:
+                # Retrying a full replacement can confirm delivery without
+                # inserting duplicate elements. A later rejection cannot rule
+                # out the earlier attempt having landed.
+                unconfirmed = True
+            except FeishuAPIError as error:
+                if error.code == CARDKIT_SEQUENCE_CONFLICT and attempt < 2:
+                    continue
+                _logger.warning("final CardKit replacement was rejected: %s", error)
+                if not unconfirmed:
+                    return False
+                break
+            except Exception:
+                _logger.warning("final CardKit replacement failed", exc_info=True)
+                if not unconfirmed:
+                    return False
+                break
+        remaining_confirmed = await self._deliver_final_pages(session, pages[1:])
+        if unconfirmed or not remaining_confirmed:
+            self._mark_final_delivery_unconfirmed(session, "native_seal")
+            return False
+        return True
+
+    @staticmethod
+    def _mark_final_delivery_unconfirmed(session: CardSession, source: str) -> None:
+        if session._disposed or session.state == TERMINATED:
+            return
+        session._final_delivery_unconfirmed = True
+        session.state = CREATION_FAILED
+        if session.terminal_reason == TerminalReason.CREATION_FAILED:
+            # A deferred seal already invalidated the old create epoch.
+            session.terminal_reason = TerminalReason.DELIVERY_UNCONFIRMED
+            session.terminal_source = source
+        else:
+            session.enter_terminal(TerminalReason.DELIVERY_UNCONFIRMED, source)
+        _logger.warning("final answer delivery unconfirmed: source=%s msg=%s", source, session.message_id[:12])
 
     async def _preservative_seal(
         self,
@@ -1486,12 +1622,23 @@ class UnifiedControllerMixin:
         # The footer rows carry no element_id, so a retry that replays a
         # delivered batch would show the footer twice.
         seal_batch_sent = False
+        state = session.unified_state
+        final_card = None
+        seal_summary = _build_seal_summary(state)
+
+        def build_final_card():
+            return self._build_interactive_linear_card(
+                session, final=True, partial=partial, footer_data=footer_data,
+                is_error=is_error, is_aborted=is_aborted, error_message=error_message,
+                footer_fields=footer_fields, footer_show_label=footer_show_label, native=True,
+            )
 
         try:
             # Before closing streaming, we MUST flush any remaining dirty
             # "footer appears before content finishes" bug.
-            state = session.unified_state
-            if state is not None and (state.answer_dirty or state.panel_dirty or state.tool_steps_dirty):
+            if state is not None and not session._native_requires_replace and (
+                state.answer_dirty or state.panel_dirty or state.tool_steps_dirty
+            ):
                 _logger.warning(
                     "preservative seal: dirty data detected at seal time "
                     "answer_dirty=%s panel_dirty=%s tool_steps_dirty=%s card=%s — "
@@ -1531,6 +1678,12 @@ class UnifiedControllerMixin:
             # ── Step 1: Update unified panel to final state (non-streaming) ──
             if state is not None:
                 state.finalize()
+            final_card = build_final_card()
+            seal_summary = _build_seal_summary(state)
+            # Inserts can coexist briefly with loading rows that the tail of
+            # the batch deletes. Reserve extra component space for those rows.
+            if session._native_requires_replace or not card_fits(final_card, element_limit=185):
+                return await self._replace_native_seal(session, final_card, seal_summary)
 
             seal_actions = self._build_seal_actions(
                 session, state,
@@ -1543,6 +1696,8 @@ class UnifiedControllerMixin:
                 footer_show_label=footer_show_label,
                 trim_label="preservative seal",
             )
+            if json_size(seal_actions) > CARD_BUDGET_BYTES:
+                return await self._replace_native_seal(session, final_card, seal_summary)
 
             if seal_actions:
                 session.sequence += 1
@@ -1555,8 +1710,6 @@ class UnifiedControllerMixin:
             # bug the user reported.
             # CRITICAL: Only call close_streaming ONCE per card lifecycle.
             # updated to config.summary.content.  The summary MUST be
-            seal_summary = _build_seal_summary(state)
-
             if not session._streaming_closed:
                 session.sequence += 1
                 _logger.info(
@@ -1596,7 +1749,13 @@ class UnifiedControllerMixin:
 
             return True
 
+        except CardKitAmbiguousWrite:
+            return await self._replace_native_seal(
+                session, final_card or build_final_card(), seal_summary, original_uncertain=True,
+            )
         except FeishuAPIError as e:
+            if _is_card_limit_error(e):
+                return await self._replace_native_seal(session, final_card or build_final_card(), seal_summary)
             if e.code == CARDKIT_SEQUENCE_CONFLICT:
                 _logger.warning(
                     "preservative seal: sequence conflict, retrying... card=%s seq=%d",
@@ -1638,7 +1797,13 @@ class UnifiedControllerMixin:
                             retry + 1, card_id[:12],
                         )
                         return True
+                    except CardKitAmbiguousWrite:
+                        return await self._replace_native_seal(
+                            session, final_card or build_final_card(), seal_summary, original_uncertain=True,
+                        )
                     except FeishuAPIError as retry_e:
+                        if _is_card_limit_error(retry_e):
+                            return await self._replace_native_seal(session, final_card or build_final_card(), seal_summary)
                         if retry_e.code == CARDKIT_SEQUENCE_CONFLICT:
                             continue
                         # v1.3.4 fix (P1): retry 路径 300309 应与主路径一致 return False
@@ -1690,6 +1855,7 @@ class UnifiedControllerMixin:
         for _drain_round in range(_MAX_DRAIN_ROUNDS):
             if not (
                 state is not None
+                and not session._native_requires_replace
                 and session.card_id
                 and "answer" in session._creation_stages
                 and (state.answer_dirty or state.panel_dirty or state.tool_steps_dirty)
@@ -1813,7 +1979,8 @@ class UnifiedControllerMixin:
             except Exception:
                 _logger.debug('metrics: record_card_completed failed', exc_info=True)
         else:
-            self._fail_creation(session, "_do_linear_complete_seal_failed")
+            if session.state != TERMINATED and not session._final_delivery_unconfirmed:
+                self._fail_creation(session, "_do_linear_complete_seal_failed")
             # v1.1.1: 失败也释放重数据
             self._release_session_data_safe(session)
             # v1.1.0: Record metrics
@@ -1867,7 +2034,7 @@ class UnifiedControllerMixin:
         try:
             while self._interactive_seal_is_current(session, message_id, epoch):
                 is_aborted = session._was_aborted or session.state == ABORTED
-                card = self._build_interactive_linear_card(
+                completion_card = self._build_interactive_linear_card(
                     session,
                     final=True,
                     footer_data=footer_data,
@@ -1877,6 +2044,7 @@ class UnifiedControllerMixin:
                     footer_fields=self._cfg.footer_fields,
                     footer_show_label=self._cfg.footer_show_label,
                 )
+                card, *session.continuation_cards = paginate_card(completion_card)
                 session.fallback_card = card
                 await self._client.update_card(
                     message_id, card, retry_frequency_limit=True,
@@ -1891,6 +2059,7 @@ class UnifiedControllerMixin:
                 # snapshot. Rebuild once with the now-stopped terminal status.
             if not self._interactive_seal_is_current(session, message_id, epoch):
                 session.fallback_card = None
+                session.continuation_cards.clear()
                 return True
         except Exception as e:
             _logger.warning(
@@ -1900,30 +2069,40 @@ class UnifiedControllerMixin:
             if isinstance(e, FeishuAPIError) and is_terminal_api_code(e.code):
                 session.guard.terminate("interactive_seal", err=e)
                 session.fallback_card = None
+                session.continuation_cards.clear()
                 return True
             if not self._interactive_seal_is_current(session, message_id, epoch):
                 session.fallback_card = None
+                session.continuation_cards.clear()
                 return True
             if card is not None and (session._was_aborted or session.state == ABORTED) != is_aborted:
                 # A stop can arrive during the last rejected HTTP request,
                 # not only during backoff. Fallback/repair must carry it too.
-                card = self._build_interactive_linear_card(
+                completion_card = self._build_interactive_linear_card(
                     session, final=True, footer_data=footer_data,
                     is_error=is_error, is_aborted=True,
                     error_message=error_message,
                     footer_fields=self._cfg.footer_fields,
                     footer_show_label=self._cfg.footer_show_label,
                 )
+                card, *session.continuation_cards = paginate_card(completion_card)
                 session.fallback_card = card
             self._fail_creation(session, "_do_interactive_linear_complete_seal_failed")
-            if isinstance(e, FeishuAPIError) and is_frequency_limit(e) and card:
-                self._schedule_interactive_seal_recovery(session, message_id, card)
+            if card and isinstance(e, FeishuAPIError):
+                first_page_uncertain = isinstance(e, MessageDeliveryUncertain)
+                if first_page_uncertain or is_frequency_limit(e):
+                    self._schedule_interactive_seal_recovery(
+                        session, message_id, card, first_page_uncertain=first_page_uncertain,
+                    )
             self._release_session_data(session)
             return False
 
         session.fallback_card = None
-        self._finish_interactive_seal(session)
-        return True
+        continuations = session.continuation_cards
+        session.continuation_cards = []
+        confirmed = await self._deliver_final_pages(session, continuations)
+        self._finish_interactive_seal(session, confirmed=confirmed)
+        return confirmed
 
     def _interactive_seal_is_current(
         self, session: CardSession, message_id: str, epoch: int,
@@ -1942,6 +2121,7 @@ class UnifiedControllerMixin:
 
     def _schedule_interactive_seal_recovery(
         self, session: CardSession, message_id: str, card: dict[str, Any],
+        *, first_page_uncertain: bool,
     ) -> None:
         if session.seal_task is not None or session._disposed:
             return
@@ -1949,6 +2129,7 @@ class UnifiedControllerMixin:
             self._recover_interactive_seal(
                 session, message_id, card,
                 epoch=session.create_epoch, was_aborted=session._was_aborted,
+                first_page_uncertain=first_page_uncertain,
             ),
         )
         session.seal_task = task
@@ -1957,7 +2138,7 @@ class UnifiedControllerMixin:
 
     async def _recover_interactive_seal(
         self, session: CardSession, message_id: str, card: dict[str, Any],
-        *, epoch: int, was_aborted: bool,
+        *, epoch: int, was_aborted: bool, first_page_uncertain: bool,
     ) -> None:
         """Bounded repair of the original frozen card.
 
@@ -1965,8 +2146,8 @@ class UnifiedControllerMixin:
         holds its static reply until this verdict lands, because that reply
         repeats the answer the repaired card is about to show (DXP4800,
         2026-10-20: reply at +39s, original sealed at +59s). The held reply is
-        sent only when the repair gives up, so a card that stays frozen still
-        ends up with a readable answer.
+        sent when every update was rejected. A lost acknowledgement can mean
+        the first page is visible already, so deliver only its continuations.
         """
 
         def still_current() -> bool:
@@ -1990,6 +2171,9 @@ class UnifiedControllerMixin:
                     if is_terminal_api_code(e.code):
                         session.guard.terminate("interactive_seal_recovery", err=e)
                         return
+                    if isinstance(e, MessageDeliveryUncertain):
+                        first_page_uncertain = True
+                        continue
                     if not is_frequency_limit(e):
                         _logger.warning("interactive seal recovery rejected", exc_info=True)
                         break
@@ -1998,11 +2182,22 @@ class UnifiedControllerMixin:
                     _logger.warning("interactive seal recovery failed", exc_info=True)
                     break
                 if still_current():
-                    self._finish_interactive_seal(session)
-                    _logger.info("interactive seal recovered: msg=%s", message_id[:12])
+                    continuations = session.continuation_cards
+                    session.continuation_cards = []
+                    confirmed = await self._deliver_final_pages(session, continuations)
+                    self._finish_interactive_seal(session, confirmed=confirmed)
+                    if confirmed:
+                        _logger.info("interactive seal recovered: msg=%s", message_id[:12])
                 return
             _logger.warning("interactive seal recovery exhausted: msg=%s", message_id[:12])
-            if still_current():
+            if not still_current():
+                return
+            if first_page_uncertain:
+                continuations = session.continuation_cards
+                session.continuation_cards = []
+                await self._deliver_final_pages(session, continuations)
+                self._finish_interactive_seal(session, confirmed=False)
+            else:
                 await self._send_card_or_text_fallback(
                     session, fallback_text=session._seal_recovery_fallback_text,
                 )
@@ -2010,12 +2205,19 @@ class UnifiedControllerMixin:
             session._seal_recovery_fallback_text = ""
             session.seal_task = None
 
-    def _finish_interactive_seal(self, session: CardSession) -> None:
+    def _finish_interactive_seal(self, session: CardSession, *, confirmed: bool) -> None:
         session.fallback_card = None
-        session.state = ABORTED if session._was_aborted else COMPLETED
-        session.terminal_reason = TerminalReason.ABORT if session._was_aborted else TerminalReason.NORMAL
-        session.terminal_source = "interactive_seal"
+        session.continuation_cards.clear()
+        if not session._disposed and session.state != TERMINATED:
+            if confirmed:
+                session.state = ABORTED if session._was_aborted else COMPLETED
+                session.terminal_reason = TerminalReason.ABORT if session._was_aborted else TerminalReason.NORMAL
+                session.terminal_source = "interactive_seal"
+            else:
+                self._mark_final_delivery_unconfirmed(session, "interactive_seal")
         self._release_session_data_safe(session, context="interactive ")
+        if not confirmed:
+            return
         try:
             from ..aowen import record_card_completed
             record_card_completed()

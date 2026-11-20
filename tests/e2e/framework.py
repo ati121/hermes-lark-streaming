@@ -20,7 +20,6 @@ Environment variables (3 required for real mode):
   FEISHU_E2E_CHAT_ID      — Real chat_id (test group where cards appear)
 
 Optional:
-  FEISHU_E2E_BASE_URL     — Feishu API base URL (default: https://open.feishu.cn/open-apis)
 
 Usage:
     from tests.e2e.framework import E2ETestRunner
@@ -151,7 +150,6 @@ class E2ETestRunner:
         """Configure controller with mock FeishuClient."""
         cfg.feishu_app_id = "mock_app_id"
         cfg.feishu_app_secret = "mock_app_secret"
-        cfg.feishu_base_url = "https://mock.feishu.cn"
         cfg.env_app_id = ""
         cfg.env_app_secret = ""
 
@@ -175,13 +173,8 @@ class E2ETestRunner:
         app_secret = os.environ["FEISHU_E2E_APP_SECRET"]
         chat_id = os.environ["FEISHU_E2E_CHAT_ID"]
         open_id = os.environ.get("FEISHU_E2E_OPEN_ID", "")
-        base_url = os.environ.get(
-            "FEISHU_E2E_BASE_URL", "https://open.feishu.cn/open-apis"
-        )
-
         cfg.feishu_app_id = app_id
         cfg.feishu_app_secret = app_secret
-        cfg.feishu_base_url = base_url
         cfg.env_app_id = app_id
         cfg.env_app_secret = app_secret
 
@@ -193,7 +186,6 @@ class E2ETestRunner:
         client = FeishuClient(FeishuClientConfig(
             app_id=app_id,
             app_secret=app_secret,
-            base_url=base_url,
         ))
         self._controller._client = client
         self._controller._initialized = True

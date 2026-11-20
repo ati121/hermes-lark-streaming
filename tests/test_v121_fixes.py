@@ -333,7 +333,7 @@ class TestUnavailableCacheLockThreadSafety:
     """Test that unavailable cache operations are thread-safe."""
 
     def test_concurrent_mark_and_check(self):
-        from feishu.guard import mark_unavailable, is_unavailable
+        from hermes_lark_streaming.feishu.guard import is_unavailable, mark_unavailable
         errors = []
 
         def mark_many():

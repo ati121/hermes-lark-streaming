@@ -14,15 +14,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
+import sys
 import time
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
 _REPORT_PATH = "integration_test_report.xml"
 _MAX_FAILED_LINES = 15
 _MAX_FAILURE_MESSAGE = 80
+_WEBHOOK_TIMEOUT_SEC = 15
 
 
 def _read(name: str, default: str = "") -> str:
@@ -54,7 +58,7 @@ def _collect_failures() -> tuple[list[str], int, int]:
     failed = 0
     try:
         root = ET.parse(_REPORT_PATH).getroot()
-    except Exception:
+    except (OSError, ET.ParseError):
         return failed_lines, total, failed
 
     for case in root.iter("testcase"):
@@ -73,20 +77,22 @@ def _collect_failures() -> tuple[list[str], int, int]:
 
 def _build_card(*, version: str, color: str, elements: list[dict]) -> dict:
     return {
+        "schema": "2.0",
+        "config": {"update_multi": True},
         "header": {
             "title": {"tag": "plain_text", "content": f"Hermes 集成测试·{version}"},
             "template": color,
         },
-        "elements": elements,
+        "body": {"elements": elements},
     }
 
 
-def main() -> None:
+def main() -> int:
     webhook = _read("FEISHU_WEBHOOK")
     secret = _read("FEISHU_SIGN_SECRET")
     if not webhook or not secret:
         print("Feishu webhook not configured; skipping notification.")
-        return
+        return 0
 
     version = _read("HERMES_VERSION", "unknown")
     outcome = _read("TEST_OUTCOME", "skipped")
@@ -134,13 +140,10 @@ def main() -> None:
 
     elements.append({"tag": "hr"})
     elements.append({
-        "tag": "action",
-        "actions": [{
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "🔗 查看 Actions 详情"},
-            "url": run_url,
-            "type": "primary",
-        }],
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "🔗 查看 Actions 详情"},
+        "behaviors": [{"type": "open_url", "default_url": run_url}],
+        "type": "primary",
     })
 
     timestamp = str(int(time.time()))
@@ -151,17 +154,31 @@ def main() -> None:
         "card": _build_card(version=version, color=color, elements=elements),
     }
 
-    request = urllib.request.Request(
-        webhook,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
     try:
-        with urllib.request.urlopen(request) as response:
-            print(f"Feishu notified: {response.read().decode()}")
-    except Exception as exc:
-        print(f"Failed to notify Feishu: {exc}")
+        request = urllib.request.Request(
+            webhook,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=_WEBHOOK_TIMEOUT_SEC) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        print(f"Failed to notify Feishu (HTTP {exc.code})", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        print(f"Failed to notify Feishu ({type(exc).__name__})", file=sys.stderr)
+        return 1
+
+    code = result.get("code", result.get("StatusCode")) if isinstance(result, dict) else None
+    if type(code) is not int or code != 0:
+        # A webhook can return HTTP 200 for a rejected message. Keep the
+        # configured webhook URL and untrusted body out of the runner log.
+        label = code if type(code) is int else "missing or invalid code"
+        print(f"Failed to notify Feishu ({label})", file=sys.stderr)
+        return 1
+    print("Feishu notified")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
