@@ -13,6 +13,7 @@ from hermes_lark_streaming.patching.image_labels import (
     _selected_image_model,
     _terminal_calls_image_handler,
     _terminal_calls_zimage_api,
+    _terminal_known_zimage_script,
     image_display_args,
 )
 from hermes_lark_streaming.state.tooluse import ToolUseTracker, _tool_display_names
@@ -120,6 +121,40 @@ def test_timeout_wrapper_without_python_stays_terminal(runtime):
     command = 'timeout 300 echo "from zimage_gen import gen; gen(\\"a cat\\")"'
     assert not _terminal_calls_image_handler(command, None)
     assert image_display_args("terminal", {"command": command}) == {"command": command}
+
+
+def test_remote_image_profile_scratch_script_is_labelled_without_reading_host(
+    runtime, monkeypatch
+):
+    _, terminal = runtime
+    terminal._get_env_config.return_value["env_type"] = "ssh"
+    command = (
+        "cd /opt/data/.hermes/profiles/image/cache/scratch && "
+        "timeout 300 python3 z_run12.py"
+    )
+    monkeypatch.setattr(
+        "hermes_lark_streaming.patching.image_labels._read_script",
+        Mock(side_effect=AssertionError("remote script must not be read")),
+    )
+    assert _terminal_known_zimage_script(command)
+    snapshot = image_display_args("terminal", {"command": command})
+    assert snapshot["_hls_image_generate"] is True
+    assert snapshot["_hls_image_detail"] == "Zimage API"
+    assert snapshot["model"] == "z-image-turbo"
+    assert _tool_display_names("terminal", args=snapshot) == (
+        "Zimage · Generate image",
+        "Zimage · 生成图片",
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "cd /opt/data/.hermes/profiles/image/cache/scratch && python3 z_run12.py --help",
+    "cd /opt/data/.hermes/profiles/image/cache/scratch && python3 z_run12.py -h",
+    "cd /opt/data/.hermes/profiles/image/cache/scratch && python3 -c 'print(1)'",
+    "cd /tmp && python3 z_run12.py",
+])
+def test_remote_zimage_fallback_stays_conservative(command):
+    assert not _terminal_known_zimage_script(command)
 
 
 @pytest.mark.parametrize("command", [

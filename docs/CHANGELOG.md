@@ -4,6 +4,22 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.66 (2026-11-21, personal fork)
+
+### Fixed — Zimage labels for remote image-profile scripts
+
+- Recognize the image profile's generated `z_run<N>.py` scratch entry points
+  from the terminal command itself, including `timeout` wrappers.
+- Keep the Zimage label, model and safe `Zimage API` detail when the terminal
+  backend is remote or containerized and the plugin cannot read its script.
+- Keep the fallback limited to the known image-profile paths and exclude help,
+  inline Python and unrelated scratch directories.
+
+### Validation
+
+- Image-label and callback regression tests pass, including remote-backend
+  no-read coverage; Ruff passes for changed files.
+
 ## v1.65 (2026-11-20, personal fork)
 
 ### Fixed — Zimage wrapper calls from terminal scripts

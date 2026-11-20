@@ -26,6 +26,15 @@ _IMAGE_HANDLER = _IMAGE_MODULE + "._handle_image_generate"
 _IMAGE_WRAPPER_CALLS = {"zimage_gen.gen"}
 _ZIMAGE_MODEL = "z-image-turbo"
 _ZIMAGE_ENDPOINT = "/v1/images/generations"
+# Image-profile scratch jobs use generated ``z_run<N>.py`` entry points.  A
+# terminal may execute them in a remote/container backend where reading the
+# script from this process would be unsafe or impossible, so keep a narrow
+# path/name fallback for that known profile shape.
+_ZIMAGE_SCRATCH_PATH = re.compile(
+    r"(?:^|[\\/])(?:\.hermes[\\/]profiles[\\/]image[\\/]|AI[\\/]Zimage[\\/])",
+    re.IGNORECASE,
+)
+_ZIMAGE_SCRATCH_SCRIPT = re.compile(r"z_run\d+\.py", re.IGNORECASE)
 _TIMEOUT_DURATION = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[smhd])?", re.IGNORECASE)
 _PYTHON_HEREDOC_RE = re.compile(
     r"^\s*(?:(?:env|exec|command|nohup)\s+)*"
@@ -231,6 +240,32 @@ def _terminal_calls_zimage_wrapper(command: str, cwd: str | None) -> bool:
         _calls_image_handler(source, allowed_calls=_IMAGE_WRAPPER_CALLS)
         for source in _terminal_python_sources(command, cwd)
     )
+
+
+def _terminal_known_zimage_script(command: str) -> bool:
+    """Recognize generated image-profile scripts without reading their files.
+
+    DXP/CC terminal backends can be remote from the plugin process.  The
+    ``z_run<N>.py`` files are generated only under the image profile's scratch
+    paths, so this narrow fallback preserves the label without probing a host
+    filesystem or executing user code.  Help/inspection commands are excluded
+    by the same Python-argument handling used by the source scanner.
+    """
+    if len(command) > _SOURCE_LIMIT:
+        return False
+    path_hint = bool(_ZIMAGE_SCRATCH_PATH.search(command))
+    if not path_hint:
+        return False
+    for tokens in _image_command_segments(command):
+        script_args = _python_arguments(tokens)
+        if not script_args or script_args[0] in ("-c", "-m"):
+            continue
+        script = Path(script_args[0]).name
+        if _ZIMAGE_SCRATCH_SCRIPT.fullmatch(script) and not any(
+            flag in ("-h", "--help") for flag in script_args[1:]
+        ):
+            return True
+    return False
 
 
 def _python_heredoc_sources(command: str) -> list[str]:
@@ -474,6 +509,11 @@ def image_display_args(tool_name: str, args: dict[str, Any] | None, session_id: 
         if not isinstance(command, str) or len(command) > _SOURCE_LIMIT:
             return args
         if _terminal_calls_zimage_api(command):
+            snapshot["_hls_image_generate"] = True
+            snapshot["_hls_image_detail"] = "Zimage API"
+            snapshot["model"] = _ZIMAGE_MODEL
+            return snapshot
+        if _terminal_known_zimage_script(command):
             snapshot["_hls_image_generate"] = True
             snapshot["_hls_image_detail"] = "Zimage API"
             snapshot["model"] = _ZIMAGE_MODEL
