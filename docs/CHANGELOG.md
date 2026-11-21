@@ -4,6 +4,35 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.67 (2026-11-21, personal fork)
+
+### Fixed — preserve Hindsight's native memory status messages
+
+- Exempt Hermes' dedicated status-send coroutine from answer suppression, so
+  Hindsight recall notices reach Feishu even after a streaming card is created.
+- Preserve native send/update routing, thread metadata, real delivery failures
+  and message IDs used by Hermes' progress cleanup.
+- Scope the exemption to each status coroutine and share it across profile
+  plugin copies; concurrent answer sends still use the existing suppression.
+- Keep Hindsight's indicator settings, injected-memory counts, reflect wording
+  and retain queue notices under the official integration's control.
+- Document the checked upstream contracts and automatic-recall behavior in
+  [Hindsight compatibility](HINDSIGHT_COMPAT.md).
+
+### Validation
+
+- Full default suite: **2,306 passed**.
+- Behavior regressions cover status delivery before and after card creation,
+  native updates and cleanup, failure/cancellation, concurrent answers and
+  multiple profile plugin copies.
+- Frozen upstream status contracts match Hermes 0.21.4 canary and v0.23.3;
+  callback and receipt-cleanup fixtures match the checked official source.
+- New helper and regression files pass Ruff; existing changed files introduce
+  no new Ruff diagnostics compared with v1.66. `git diff --check` passes.
+- Clean wheel payload: all **44** source/asset files match the workspace;
+  installed import and status-scope checks pass. SDK minimum remains
+  `lark-oapi>=1.6.0`.
+
 ## v1.66 (2026-11-21, personal fork)
 
 ### Fixed — Zimage labels for remote image-profile scripts

@@ -13,6 +13,7 @@ from typing import Any, Callable
 from .. import __version__
 from . import (
     _cron_delivery_ctx,
+    _gateway_status_ctx,
     _msg_ctx,
     _gateway_cards,
     _gateway_cards_lock,
@@ -106,6 +107,12 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
 
         # ── Guard: skip empty content ──
         if not content.strip():
+            return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
+
+        # Hermes' dedicated status channel carries provider notices rather than
+        # the agent's answer. Keep the native receipt/message id so status edits
+        # and progress cleanup can address the message that was actually sent.
+        if _gateway_status_ctx.get():
             return await orig_send(self_feishu, chat_id, content, reply_to=reply_to, metadata=metadata, **kwargs)
 
         from ..controller.mixin import PartialCardDelivery

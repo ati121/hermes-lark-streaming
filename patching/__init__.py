@@ -27,6 +27,7 @@ __all__ = [
     '_logger',
     '_msg_ctx',
     '_cron_delivery_ctx',
+    '_gateway_status_ctx',
     '_started_msg_ids',
     '_started_msg_ids_lock',
     '_gateway_cards',
@@ -137,6 +138,14 @@ _cron_delivery_ctx: contextvars.ContextVar[dict[str, Any] | None] = shared_objec
     lambda: contextvars.ContextVar("hermes_lark_streaming_cron_delivery", default=None),
 )
 
+# The official gateway status sender can be wrapped by a different profile copy
+# than the adapter. Share its task-local marker without changing a shared adapter
+# instance or the agent's reply context.
+_gateway_status_ctx: contextvars.ContextVar[bool] = shared_object(
+    "patching.gateway_status_ctx",
+    lambda: contextvars.ContextVar("hermes_lark_streaming_gateway_status", default=False),
+)
+
 _started_msg_ids: set[str] = shared_object("patching.started_msg_ids", set)
 _started_msg_ids_lock = shared_object("patching.started_msg_ids.lock", threading.Lock)
 
@@ -243,6 +252,7 @@ from .gateway import (  # noqa: E402
 from .callbacks import (  # noqa: E402
     _maybe_wrap_callbacks,
 )
+from .status import _wrap_gateway_status_send
 from .adapter import (  # noqa: E402
     _classify_gateway_message,
     _wrap_feishu_adapter_send,
@@ -471,11 +481,27 @@ def _patch_feishu(compat: Any) -> bool:
     return _feishu_patched
 
 
+def _patch_gateway_status(compat: Any | None = None) -> bool:
+    """Protect the host's status sender, including dynamically imported calls."""
+    module = _try_import("gateway.run")
+    original = getattr(module, "_send_or_update_status_coro", None)
+    if not callable(original):
+        return False
+    if _already_wrapped(original):
+        return True
+    module._send_or_update_status_coro = _mark_wrapped(
+        _wrap_gateway_status_send(original)
+    )
+    _logger.info("hermes-lark-streaming: gateway status sender patched ✓")
+    return True
+
+
 # Targets the deferred thread retries, in application order.  Each entry is
 # (name, apply_fn, critical) — ``critical`` decides whether a miss at the
 # deadline is logged as an error or as informational.
 def _patch_targets() -> tuple[tuple[str, Any, bool], ...]:
     return (
+        ("gateway_status", _patch_gateway_status, False),
         ("gateway_runner", _apply_gateway_runner_patches, True),
         ("conversation_loop", _patch_conversation_loop, False),
         ("aiagent", _apply_direct_agent_patch, False),
@@ -603,6 +629,7 @@ def apply_patches() -> None:
     _patch_status = {
         "version": __version__,
         "gateway_runner": _mark("gateway_runner"),
+        "gateway_status": _mark("gateway_status"),
         "conversation_loop": (
             "✓" if results.get("conversation_loop") else "n/a (direct AIAgent)"
         ),
@@ -615,7 +642,8 @@ def apply_patches() -> None:
     }
     _logger.info(
         "HLS: patch summary v%s — GatewayRunner=%s conversation_loop=%s "
-        "AIAgent=%s cron=%s background=%s FeishuAdapter=%s create_adapter_hook=%s layout=%s",
+        "AIAgent=%s cron=%s background=%s FeishuAdapter=%s create_adapter_hook=%s "
+        "gateway_status=%s layout=%s",
         __version__,
         _patch_status["gateway_runner"],
         _patch_status["conversation_loop"],
@@ -624,6 +652,7 @@ def apply_patches() -> None:
         _patch_status["background_task"],
         _patch_status["feishu_adapter"],
         _patch_status["create_adapter_hook"],
+        _patch_status["gateway_status"],
         layout,
     )
 
