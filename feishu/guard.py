@@ -14,9 +14,14 @@ from .client import MSG_NOT_FOUND
 _logger = logging.getLogger("hermes_lark_streaming")
 
 _TERMINAL_MESSAGE_CODES = {
-    231003,  # message deleted
+    231003,  # message deleted (legacy / openclaw-lark)
     MSG_NOT_FOUND,
     230011,  # message recalled
+    230110,  # IM PATCH: Action unavailable as the message has been deleted
+    232009,  # IM PATCH: Your request specifies a chat which has already been dissolved
+    230031,  # IM PATCH: Message can only be modified within 14 days after sending
+    200740,  # CardKit: The card entity does not exist
+    200750,  # CardKit: The card entity has expired (14 days)
 }
 
 _unavailable_cache: dict[str, dict[str, Any]] = {}

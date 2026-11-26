@@ -181,7 +181,7 @@ class ControllerMixin:
 
                 card = pages[0][1]
                 await self._update_gateway_card(
-                    card, card_id=info.get("card_id") or card_id, card_msg_id=card_msg_id,
+                    card, card_id=info.get("card_id") or card_id, card_msg_id=card_msg_id, info=info,
                 )
                 info.update(card=card, category=category)
 
@@ -200,11 +200,21 @@ class ControllerMixin:
             _logger.debug("gateway card content update failed", exc_info=True)
             return False
 
-    async def _update_gateway_card(self, card: dict, *, card_id: str | None, card_msg_id: str) -> None:
+    async def _update_gateway_card(
+        self,
+        card: dict,
+        *,
+        card_id: str | None,
+        card_msg_id: str,
+        info: dict | None = None,
+    ) -> None:
         """CardKit 容器走 cardkit_update，否则 IM PATCH."""
         assert self._client is not None
         if card_id:
-            await self._client.cardkit_update(card_id, card)
+            seq = int((info or {}).get("sequence", 0)) + 1
+            if info is not None:
+                info["sequence"] = seq
+            await self._client.cardkit_update(card_id, card, sequence=seq)
         else:
             await self._client.update_card(card_msg_id, card)
 
@@ -247,7 +257,7 @@ class ControllerMixin:
                     return False
                 if card != saved_card:
                     await self._update_gateway_card(
-                        card, card_id=info.get("card_id") or card_id, card_msg_id=card_msg_id,
+                        card, card_id=info.get("card_id") or card_id, card_msg_id=card_msg_id, info=info,
                     )
                 info.update(card=card, status=(status_label, emoji))
             _logger.info(

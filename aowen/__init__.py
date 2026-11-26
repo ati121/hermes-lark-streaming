@@ -128,9 +128,10 @@ _COLOR_MAP: dict[str, str | None] = {
 def _icon_div(icon_key: str, content: str, *, icon_color: str = "grey", text_size: str = "normal", text_color: str | None = None, icon_size: str = "16px 16px") -> dict:
     """Build div with standard_icon + lark_md text."""
     token = _ICON_TOKENS.get(icon_key, "info_outlined")
-    text: dict = {"tag": "lark_md", "content": content, "text_size": text_size}
     if text_color:
-        text["text_color"] = text_color
+        mapped = _COLOR_MAP.get(text_color, text_color)
+        content = f"<font color='{mapped}'>{content}</font>"
+    text: dict = {"tag": "lark_md", "content": content, "text_size": text_size}
     return {
         "tag": "div",
         "icon": {
@@ -168,8 +169,8 @@ def _two_col(left: dict, right: dict) -> dict:
         "tag": "column_set",
         "flex_mode": "stretch",
         "columns": [
-            {"tag": "column", "width": "weighted", "weight": 1, "elements": [left]},
-            {"tag": "column", "width": "weighted", "weight": 1, "elements": [right]},
+            {"tag": "column", "elements": [left]},
+            {"tag": "column", "elements": [right]},
         ],
     }
 
@@ -179,20 +180,20 @@ def _three_col(c1: dict, c2: dict, c3: dict) -> dict:
         "tag": "column_set",
         "flex_mode": "stretch",
         "columns": [
-            {"tag": "column", "width": "weighted", "weight": 1, "elements": [c1]},
-            {"tag": "column", "width": "weighted", "weight": 1, "elements": [c2]},
-            {"tag": "column", "width": "weighted", "weight": 1, "elements": [c3]},
+            {"tag": "column", "elements": [c1]},
+            {"tag": "column", "elements": [c2]},
+            {"tag": "column", "elements": [c3]},
         ],
     }
 
 def _section_title(text: str, *, color: str = "grey") -> dict:
     """Build section title — bold colored small text."""
+    mapped = _COLOR_MAP.get(color, "grey") or "grey"
     return {
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": f"**{text}**",
-            "text_color": _COLOR_MAP.get(color, "grey") or "grey",
+            "content": f"<font color='{mapped}'>**{text}**</font>",
             "text_size": "notation",
         },
     }
@@ -231,9 +232,8 @@ def _footer_note(content: str) -> dict:
         "tag": "div",
         "text": {
             "tag": "lark_md",
-            "content": content,
+            "content": f"<font color='grey'>{content}</font>",
             "text_size": "notation",
-            "text_color": "grey",
         },
     }
 
@@ -277,9 +277,8 @@ def build_help_card() -> dict[str, Any]:
             "tag": "div",
             "text": {
                 "tag": "lark_md",
-                "content": "所有命令以 `/aowen` 开头，不经过 Hermes AI，直接由插件处理。无参数的 `/aowen` 同 `/aowen help`。",
+                "content": "<font color='grey'>所有命令以 `/aowen` 开头，不经过 Hermes AI，直接由插件处理。无参数的 `/aowen` 同 `/aowen help`。</font>",
                 "text_size": "notation",
-                "text_color": "grey",
             },
         },
         {"tag": "hr"},
@@ -548,8 +547,8 @@ def _handle_config_reload() -> dict:
                               icon_color="red", icon_size="20px 20px"),
                     {"tag": "hr"},
                     _fold("错误详情（点击展开）", [
-                        {"tag": "div", "text": {"tag": "lark_md",
-                          "content": f"```\n{err_text}\n```", "text_size": "notation"}},
+                        {"tag": "markdown",
+                         "content": f"```\n{err_text}\n```", "text_size": "notation"},
                     ], expanded=False, border_color="red"),
                 ])
 

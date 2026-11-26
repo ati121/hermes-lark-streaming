@@ -36,15 +36,14 @@ from ..cardkit.md import (
     render_answer_markdown,
 )
 from ..feishu import (
-    CARDKIT_CONTENT_FAILED,
-    CARDKIT_ELEMENT_LIMIT,
     CARDKIT_SEQUENCE_CONFLICT,
-    CARDKIT_STREAMING_CLOSED,
     FeishuAPIError,
     MessageDeliveryUncertain,
+    is_card_limit_sub_error,
     is_element_not_found_error,
     is_frequency_limit,
     is_schema_error,
+    is_streaming_closed_error,
     is_terminal_api_code,
     is_unavailable,
 )
@@ -75,9 +74,7 @@ _CARDKIT_CARD_LIMIT_ERRORS = {200860, 300305}
 
 
 def _is_card_limit_error(error: FeishuAPIError) -> bool:
-    return error.code in _CARDKIT_CARD_LIMIT_ERRORS or (
-        error.code == CARDKIT_CONTENT_FAILED and error.extract_sub_code() == CARDKIT_ELEMENT_LIMIT
-    )
+    return error.code in _CARDKIT_CARD_LIMIT_ERRORS or is_card_limit_sub_error(error)
 
 
 def _streaming_preview(text: str, *, table_limit: bool = True) -> str:
@@ -206,7 +203,7 @@ async def _write_answer_stream(
         raise
     except FeishuAPIError as e:
         _restore_answer_flush_snapshot(session, state)
-        if e.code == CARDKIT_STREAMING_CLOSED:
+        if is_streaming_closed_error(e):
             if session._streaming_closed_logged:
                 _logger.debug("HLS: answer stream closed (already logged): card=%s",
                               (session.card_id or "?")[:12])
@@ -967,7 +964,7 @@ class UnifiedControllerMixin:
                 session._native_requires_replace = True
                 return False
             except FeishuAPIError as e:
-                if e.code == CARDKIT_STREAMING_CLOSED:
+                if is_streaming_closed_error(e):
                     self._flush_streaming_closed(session)
                     return False
                 if is_schema_error(e):
@@ -1090,7 +1087,7 @@ class UnifiedControllerMixin:
                 session._native_requires_replace = True
                 return
             except FeishuAPIError as e:
-                if e.code == CARDKIT_STREAMING_CLOSED:
+                if is_streaming_closed_error(e):
                     self._flush_streaming_closed(session)
                     return
                 if is_schema_error(e):
@@ -1244,7 +1241,7 @@ class UnifiedControllerMixin:
             )
             session._loading_hint_state = status_key
         except FeishuAPIError as e:
-            if e.code == CARDKIT_STREAMING_CLOSED:
+            if is_streaming_closed_error(e):
                 session._streaming_closed = True
                 return
             _logger.debug("HLS: loading context update failed: %s", e)
@@ -1296,7 +1293,7 @@ class UnifiedControllerMixin:
             session._loading_status_key = status_key
             session._loading_brand = brand
         except FeishuAPIError as e:
-            if e.code == CARDKIT_STREAMING_CLOSED:
+            if is_streaming_closed_error(e):
                 session._streaming_closed = True
                 return
             if is_schema_error(e):
@@ -1559,22 +1556,23 @@ class UnifiedControllerMixin:
             session._streamed_answer = content
             state.answer_dirty = False
         except FeishuAPIError as e:
-            if e.code == CARDKIT_STREAMING_CLOSED or is_element_not_found_error(e):
-                if e.code == CARDKIT_STREAMING_CLOSED:
+            streaming_closed = is_streaming_closed_error(e)
+            if streaming_closed or is_element_not_found_error(e):
+                if streaming_closed:
                     session._streaming_closed = True
                 log_it = not (
                     dedupe_closed_log
-                    and e.code == CARDKIT_STREAMING_CLOSED
+                    and streaming_closed
                     and session._streaming_closed_logged
                 )
                 if log_it:
                     _logger.info(
                         "HLS: %s answer — %s, falling back to partial_update_element %s=%s",
                         source,
-                        "streaming closed" if e.code == CARDKIT_STREAMING_CLOSED else "300313",
+                        "streaming closed" if streaming_closed else "300313",
                         log_key, log_id,
                     )
-                    if dedupe_closed_log and e.code == CARDKIT_STREAMING_CLOSED:
+                    if dedupe_closed_log and streaming_closed:
                         session._streaming_closed_logged = True
                 session.sequence += 1
                 ok = await _fallback_write_answer(
@@ -1702,7 +1700,7 @@ class UnifiedControllerMixin:
                     except Exception as e:
                         # Network errors too: the seal batch below rewrites the
                         # final panel, so a failed drain must not abort it.
-                        if isinstance(e, FeishuAPIError) and e.code == CARDKIT_STREAMING_CLOSED:
+                        if isinstance(e, FeishuAPIError) and is_streaming_closed_error(e):
                             _logger.info("seal drain: streaming already closed, skipping panel flush")
                             session._streaming_closed = True
                         else:
@@ -1852,8 +1850,8 @@ class UnifiedControllerMixin:
                             return await self._replace_native_seal(session, final_card or build_final_card(), seal_summary)
                         if retry_e.code == CARDKIT_SEQUENCE_CONFLICT:
                             continue
-                        # v1.3.4 fix (P1): retry 路径 300309 应与主路径一致 return False
-                        if retry_e.code == CARDKIT_STREAMING_CLOSED:
+                        # v1.3.4 fix (P1): retry 路径 300309/200850/200510 应与主路径一致 return False
+                        if is_streaming_closed_error(retry_e):
                             session._streaming_closed = True
                             return False
                         # Re-raising here escaped the sibling ``except
@@ -1875,7 +1873,7 @@ class UnifiedControllerMixin:
                     card_id[:12],
                 )
                 return False
-            if e.code == CARDKIT_STREAMING_CLOSED:
+            if is_streaming_closed_error(e):
                 session._streaming_closed = True
             return False
         except Exception:
@@ -1923,7 +1921,7 @@ class UnifiedControllerMixin:
                     try:
                         await self._flush_panel_once(session, state)
                     except FeishuAPIError as e:
-                        if e.code == CARDKIT_STREAMING_CLOSED:
+                        if is_streaming_closed_error(e):
                             # v1.2.0 Y3: drain 阶段也用 _streaming_closed_logged 去重
                             if session._streaming_closed_logged:
                                 _logger.debug("drain: streaming already closed (already logged)")

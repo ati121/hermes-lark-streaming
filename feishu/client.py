@@ -128,11 +128,20 @@ class MessageDeliveryUncertain(FeishuAPIError):
 
 
 CARDKIT_CONTENT_FAILED = 230099  # 卡片内容创建失败（通用码，需检查子错误）
-CARDKIT_ELEMENT_LIMIT = 11310  # 子码: 卡片元素数量超限
+CARDKIT_ELEMENT_LIMIT = 11310  # 子码: 元素/表格超限，或卡片交互锁定 (card action is lock)
+CARDKIT_TAG_IMMUTABLE = 300312  # 更新组件属性时不能修改 tag
 CARDKIT_SCHEMA_ERROR = 300315  # 卡片 Schema 非法属性 (unknown property) OR element not found for insert_before
 CARDKIT_STREAMING_CLOSED = 300309  # 卡片流式模式已关闭
+CARDKIT_STREAMING_TIMEOUT = 200850  # 流式更新文本接口：流式模式超时自动关闭（10 分钟）
+CARDKIT_STREAMING_ADD_TIMEOUT = 200510  # 新增组件接口：流式模式超时自动关闭
+CARDKIT_STREAMING_CLOSED_CODES = frozenset({
+    CARDKIT_STREAMING_CLOSED,
+    CARDKIT_STREAMING_TIMEOUT,
+    CARDKIT_STREAMING_ADD_TIMEOUT,
+})
+CARDKIT_INTERACTION_LOCKED = 200810  # 卡片正在交互回调中，暂时无法更新
 CARDKIT_SEQUENCE_CONFLICT = 300317  # sequence 冲突
-CARDKIT_ELEMENT_NOT_FOUND = 300313  # 元素不存在（add_elements 后服务端尚未持久化时的竞态）
+CARDKIT_ELEMENT_NOT_FOUND = 300313  # 更新组件属性失败（常见于 add_elements 后服务端尚未持久化时的竞态）
 CARDKIT_ELEMENT_NOT_FOUND_ALT = 300314  # delete_elements 不存在的元素
 MSG_NOT_FOUND = 1000023  # 消息不存在/已删除
 # IM 通道频控（含单条消息更新过于频繁）。
@@ -143,14 +152,19 @@ IM_FREQUENCY_LIMITS = frozenset({IM_FREQUENCY_LIMIT, 230429})
 
 # v1.3.1 fix: 300315 错误码有两种含义：
 _RE_ELEMENT_NOT_FOUND = re.compile(r"not find elementID", re.IGNORECASE)
+_RE_CARD_ACTION_LOCKED = re.compile(r"card action is lock", re.IGNORECASE)
+_RE_CARD_LIMIT_EXCEEDED = re.compile(r"(?:element|table)[^;\n]*limit", re.IGNORECASE)
 
-# 参考 Cheerwhy / openclaw-lark: 这三个错误码是飞书 CardKit 的瞬态错误，
+# 参考 Cheerwhy / openclaw-lark: 这组错误码是飞书 CardKit 的瞬态错误，
 # v1.3.4 fix (P1): 新增 99991400 (接口频率限制) — 飞书开放平台对单个 API
+# CardKit 2.0: 新增 200810（卡片交互中锁定）与 300120（服务端内部瞬态错误）
 CARDKIT_TRANSIENT_CODES = {
-    2200,     # CardKit 内部超时
-    1663,     # CardKit 服务端瞬态错误
-    300000,   # CardKit 通用内部错误
-    99991400, # 接口频率限制（per-API rate limit，HTTP 400）
+    2200,                        # CardKit 内部超时
+    1663,                        # CardKit 服务端瞬态错误
+    300000,                      # CardKit 通用内部错误
+    300120,                      # CardKit Server Internal Error（官方建议稍后重试）
+    CARDKIT_INTERACTION_LOCKED,  # 200810: 卡片正在交互回调中，等待后可重试
+    99991400,                    # 接口频率限制（per-API rate limit，HTTP 400）
 }
 
 # 瞬态错误重试策略 — 指数退避
@@ -176,6 +190,11 @@ _UNACKNOWLEDGED_WRITE_CODES = frozenset({2200, 1663, 300000})
 def _validate_cardkit_length(operation: str, value: str, max_length: int) -> None:
     if not 1 <= len(value) <= max_length:
         raise FeishuAPIError(f"{operation}: payload must contain 1 to {max_length} characters")
+
+
+def _validate_cardkit_sequence(operation: str, sequence: int) -> None:
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or not 1 <= sequence <= 2_147_483_647:
+        raise FeishuAPIError(f"{operation}: sequence must be an integer between 1 and 2147483647")
 
 
 def _may_have_committed(error: Exception) -> bool:
@@ -288,13 +307,34 @@ class _CardKitWriteState:
 
 
 def is_schema_error(e: "FeishuAPIError") -> bool:
-    """判断 FeishuAPIError 是否为卡片 Schema 非法属性错误。"""
+    """判断 FeishuAPIError 是否为卡片 Schema 非法属性/非法 tag 变更错误。"""
+    if e.code == CARDKIT_TAG_IMMUTABLE:
+        return True
     if e.code != CARDKIT_SCHEMA_ERROR:
         return False
     # 排除 "not find elementID" 的情况——这是 element not found，不是 schema error
     if _RE_ELEMENT_NOT_FOUND.search(str(e)):
         return False
     return True
+
+
+def is_streaming_closed_error(e: FeishuAPIError) -> bool:
+    """判断 FeishuAPIError 是否为 CardKit 流式模式已关闭或超时自动关闭。"""
+    return e.code in CARDKIT_STREAMING_CLOSED_CODES
+
+
+def is_card_limit_sub_error(e: FeishuAPIError) -> bool:
+    """判断 230099/11310 是否属于卡片元素/表格超限（排除 card action is lock 与模板权限）。"""
+    if e.code != CARDKIT_CONTENT_FAILED or e.extract_sub_code() != CARDKIT_ELEMENT_LIMIT:
+        return False
+    msg = str(e)
+    if _RE_CARD_ACTION_LOCKED.search(msg):
+        return False
+    if "template is not visible" in msg.lower():
+        return False
+    # 兼容未携带标准 ErrMsg 文本的简写报错（仅 11310）以及 element/table 超限
+    return _RE_CARD_LIMIT_EXCEEDED.search(msg) is not None or "ErrMsg:" not in msg
+
 
 def is_element_not_found_error(e: "FeishuAPIError") -> bool:
     """判断 FeishuAPIError 是否为"元素不存在"错误。"""
@@ -334,10 +374,10 @@ def _is_transient_error(e: FeishuAPIError) -> bool:
     """判断 FeishuAPIError 是否为 CardKit 瞬态错误（可重试）."""
     if e.code in CARDKIT_TRANSIENT_CODES:
         return True
-    # 230099 是通用码，需检查子错误码：11310(元素超限)不可重试
-    if e.code == CARDKIT_CONTENT_FAILED:
-        sub = e.extract_sub_code()
-        return sub is not None and sub not in (CARDKIT_ELEMENT_LIMIT,)
+    # 230099 下绝大部分子码（100290/200380/200381/200550/200570/200621/200732/200861/200914）
+    # 都是永久性内容校验错误，仅 11310 + "card action is lock"（交互回调锁定中）为瞬态可重试。
+    if e.code == CARDKIT_CONTENT_FAILED and e.extract_sub_code() == CARDKIT_ELEMENT_LIMIT:
+        return _RE_CARD_ACTION_LOCKED.search(str(e)) is not None
     return False
 
 class FeishuClient:
@@ -876,9 +916,10 @@ class FeishuClient:
         element_id: str,
         content: str,
         *,
-        sequence: int = 0,
+        sequence: int = 1,
     ) -> None:
         """流式更新卡片内指定 element 的内容（打字机效果）."""
+        _validate_cardkit_sequence("cardkit_stream_element", sequence)
         _validate_cardkit_length("cardkit_stream_element", content, 100_000)
         async with self._serialize_cardkit_write(card_id) as state:
             request = (
@@ -921,9 +962,10 @@ class FeishuClient:
         self,
         card_id: str,
         card: dict[str, Any],
-        sequence: int = 0,
+        sequence: int = 1,
     ) -> None:
         """全量更新 CardKit 卡片."""
+        _validate_cardkit_sequence("cardkit_update", sequence)
         async with self._serialize_cardkit_write(card_id) as state:
             content = await self._card_json(card)
             _validate_cardkit_length("cardkit_update", content, 1_000_000)
@@ -942,9 +984,10 @@ class FeishuClient:
         card_id: str,
         actions: list[dict[str, Any]],
         *,
-        sequence: int = 0,
+        sequence: int = 1,
     ) -> None:
         """局部更新 CardKit 卡片（增删改组件）."""
+        _validate_cardkit_sequence("cardkit_batch_update", sequence)
         async with self._serialize_cardkit_write(card_id) as state:
             content = await self._card_json(actions)
             _validate_cardkit_length("cardkit_batch_update", content, 1_000_000)
@@ -965,7 +1008,8 @@ class FeishuClient:
             "i18n_content": {"zh_cn": truncated, "en_us": truncated},
         }
 
-    async def _apply_card_settings(self, card_id: str, settings: dict[str, Any], operation: str, *, sequence: int = 0) -> None:
+    async def _apply_card_settings(self, card_id: str, settings: dict[str, Any], operation: str, *, sequence: int = 1) -> None:
+        _validate_cardkit_sequence(operation, sequence)
         async with self._serialize_cardkit_write(card_id) as state:
             content = self._dumps(settings)
             _validate_cardkit_length(operation, content, 100_000)
@@ -981,7 +1025,7 @@ class FeishuClient:
     async def cardkit_close_streaming(
         self,
         card_id: str,
-        sequence: int = 0,
+        sequence: int = 1,
         *,
         summary: str = "",
     ) -> None:
@@ -1000,7 +1044,7 @@ class FeishuClient:
         card_id: str,
         summary: str,
         *,
-        sequence: int = 0,
+        sequence: int = 1,
     ) -> None:
         """Update the card summary text WITHOUT closing streaming mode."""
         if not summary:

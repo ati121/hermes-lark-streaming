@@ -4,6 +4,52 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.68 (2026-11-26, personal fork)
+
+### Fixed — strict Card JSON 2.0 output and CardKit error handling
+
+- Enable `config.update_multi` on the streaming card, matching the interactive
+  builder, so a card entity shared across messages or chats stays updatable.
+- Stop emitting the unsupported `text_color` property inside `lark_md`; colored
+  icons, section titles, footer notes and the help notice now use inline
+  `<font color='…'>` markup instead.
+- Render fenced code blocks with a `markdown` component instead of embedding
+  them in `lark_md`: `/aowen config reload` error details and tool-step output
+  rows (`tag: markdown`, keeping role text size and 22px indent) are affected.
+- Remove legacy `column` `width`/`weight` under non-`none` `flex_mode` and the
+  `width: auto` on clarify choice columns, all of which are rejected or ignored
+  by the 2.0 schema.
+- Treat the 10-minute streaming auto-close timeouts (200850 from the text
+  stream API, 200510 from the add-element API) like 300309, so drain, seal and
+  loading paths fall back to `partial_update_element` instead of retrying.
+- Disambiguate 230099/11310: `card action is lock` is now a transient retry,
+  `template is not visible` is permanent, and only genuine element/table limit
+  reports trigger the card-limit recovery path.
+- Classify the remaining 230099 content sub-codes (100290, 200380, 200381,
+  200550, 200570, 200621, 200732, 200861, 200914) as permanent instead of
+  retrying them.
+- Add 300120 (server internal error) and 200810 (card locked during an
+  interaction callback) to the transient retry policy, and treat 300312
+  (element tag cannot be changed) as a schema error so rebuild paths engage.
+- Validate CardKit `sequence` values (`1..2147483647`), default them to `1`
+  instead of `0`, and send an incrementing sequence for gateway card updates to
+  avoid 300317 conflicts.
+- Mark messages that were deleted or belong to a dissolved chat (230110,
+  232009), the 14-day edit window (230031), and missing or expired card
+  entities (200740, 200750) as terminal, so they stop being retried.
+
+### Validation
+
+- Full default suite: **2,341 passed**.
+- New `tests/test_card_v2_compliance.py` audits every card builder against the
+  strict 2.0 constraints (element IDs, `lark_md`, `column_set`, `update_multi`),
+  covers error-code classification, streaming-timeout fallback, gateway
+  sequence increments, and sequence validation.
+- Changed files introduce no new Ruff diagnostics compared with v1.67; the new
+  regression file passes Ruff. `git diff --check` passes.
+- Wheel build reports version **1.68** and all **44** packaged source/asset
+  files match the workspace.
+
 ## v1.67 (2026-11-21, personal fork)
 
 ### Fixed — preserve Hindsight's native memory status messages

@@ -284,7 +284,6 @@ def _build_clarify_card(
                 en_label, zh_label = en_choose.format(label), zh_choose.format(label)
                 columns.append({
                     "tag": "column",
-                    "width": "auto",
                     "elements": [{
                         "tag": "button",
                         "text": {

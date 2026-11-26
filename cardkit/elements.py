@@ -1112,13 +1112,10 @@ def _build_tool_step_output(
         return None
 
     return {
-        "tag": "div",
+        "tag": "markdown",
         "margin": "0px 0px 0px 22px",
-        "text": {
-            "tag": "lark_md",
-            "content": "\n".join(lines),
-            "text_size": _role_text_size(text_sizes, "tool", default="notation"),
-        },
+        "content": "\n".join(lines),
+        "text_size": _role_text_size(text_sizes, "tool", default="notation"),
     }
 
 def _tool_status_info(status: str) -> str:

@@ -100,6 +100,7 @@ def build_streaming_card_v2(
         "schema": "2.0",
         "config": {
             "width_mode": "fill",
+            "update_multi": True,
             "streaming_mode": True,
             "streaming_config": {
                 "print_frequency_ms": {"default": 70},
