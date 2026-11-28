@@ -293,6 +293,16 @@ class StreamCardController(ControllerMixin, UnifiedControllerMixin):
             return None
         return session
 
+    def _get_session_for_delivery(self, message_id: str) -> CardSession | None:
+        """Find the card that owns delivery, without reviving a superseded one."""
+        continuation_id = self._resolve_continuation_id(message_id)
+        session = self._sess_get(continuation_id or message_id)
+        if session is None or session._was_aborted:
+            return None
+        if session.is_terminal_phase and session.state != COMPLETED:
+            return None
+        return session
+
     # ── v1.4.0 fix (问题3 根因1): 会话续写重激活 ──────────────────
 
     def _resolve_continuation_id(self, message_id: str) -> str | None:

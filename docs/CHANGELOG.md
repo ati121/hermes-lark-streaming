@@ -4,6 +4,37 @@ This public changelog intentionally omits deployment topology, private service
 identifiers, production log excerpts, credentials, and environment-specific
 filesystem paths.
 
+## v1.69 (2026-11-28, personal fork)
+
+### Fixed — native message suppression after busy-turn interruptions
+
+- Resolve the continuation session when checking whether a busy follow-up
+  already owns a streaming card. Previously the card used a continuation ID
+  while native sends checked only the inbound ID, leaking duplicate interim
+  answers and long-running `Working` messages alongside the live card.
+- Apply the same lookup to the gateway's final-reply suppression check, so a
+  continuation card also prevents a duplicate native final response.
+- Do not latch final-delivery state when merely suppressing a live-card send.
+  A later interruption can replace that card with one that never lands; native
+  fallback must remain available, including after completion clears the chain.
+- Preserve native fallback while the continuation card is pending, missing or
+  failed, never fall back to a superseded card for deduplication, and retain the
+  dedicated memory-status channel's native receipts.
+
+### Validation
+
+- Full default suite: **2,365 passed**.
+- Behavior regressions exercise first and repeated busy interruptions, native
+  answers and heartbeats, streamed interim deduplication, gateway final replies,
+  undelivered-card fallback and dedicated memory-status delivery.
+- Freeze the elapsed-time snapshot in the panel-builder comparison test so
+  coarse platform timers cannot produce inconsistent `0s` headers.
+- The new regression file passes Ruff; changed files introduce no new Ruff
+  diagnostics compared with v1.68. `git diff --check` passes.
+- Clean wheel payload: all **44** source/asset files match the workspace, with
+  no cached bytecode. Installed-wheel continuation and memory-status smoke
+  checks pass.
+
 ## v1.68 (2026-11-26, personal fork)
 
 ### Fixed — strict Card JSON 2.0 output and CardKit error handling

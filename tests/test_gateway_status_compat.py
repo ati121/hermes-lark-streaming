@@ -131,7 +131,7 @@ def host_status(monkeypatch):
     adapter = Adapter()
     P._patched_feishu_classes.add(Adapter)
     session = SimpleNamespace(card_msg_id="om_streaming_card", state="streaming")
-    controller = SimpleNamespace(enabled=True, _sess_get=Mock(return_value=session))
+    controller = SimpleNamespace(enabled=True, _get_session_for_delivery=Mock(return_value=session))
     monkeypatch.setattr("hermes_lark_streaming.controller.get_controller", lambda: controller)
     monkeypatch.setattr(adapter_patch, "_send_result", lambda **kwargs: SimpleNamespace(**kwargs))
 

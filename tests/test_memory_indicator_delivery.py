@@ -48,7 +48,7 @@ def indicator_delivery(monkeypatch):
     session = SimpleNamespace(card_msg_id=None, state="creating")
     controller = SimpleNamespace(
         enabled=True,
-        _sess_get=Mock(return_value=session),
+        _get_session_for_delivery=Mock(return_value=session),
         _do_gateway_deliver=AsyncMock(return_value=("om_gateway_card", "gateway_card")),
     )
     ctx = {"event_message_id": "om_question", "card_sent": False}

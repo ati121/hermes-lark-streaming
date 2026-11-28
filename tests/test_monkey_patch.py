@@ -231,6 +231,7 @@ class TestCronDeliveryIsolation:
         ctrl.enabled = True
         ctrl._do_cron_deliver = _do_cron_deliver
         ctrl._sess_get.return_value = None
+        ctrl._get_session_for_delivery.return_value = None
 
         def orig(job, content, adapters=None, loop=None, **kwargs):
             target = next(iter(adapters.values()))
@@ -596,8 +597,8 @@ class TestCardSessionExistenceCheck:
         source = inspect.getsource(_wrap_handle_message_with_agent)
         # The fix adds a check for controller session store when result is not None
         # and card_sent is False but a session with card_msg_id exists.
-        # v1.3.0: access changed from direct _sessions.get to thread-safe _sess_get.
-        assert "_sess_get" in source or "_sessions" in source, \
+        # The delivery lookup also recognizes chained busy continuations.
+        assert "_get_session_for_delivery" in source, \
             "Controller session check not found in _wrap_handle_message_with_agent"
 
     def test_card_session_existence_check_in_feishu_adapter_send(self) -> None:
@@ -608,29 +609,18 @@ class TestCardSessionExistenceCheck:
         source = inspect.getsource(_wrap_feishu_adapter_send)
         # The fix adds a check in the Agent path when card_sent is False:
         # query controller session store for a session with card_msg_id.
-        # v1.3.0: access changed from direct _sessions.get to thread-safe _sess_get.
-        assert "_sess_get" in source or "_sessions" in source, \
+        # The delivery lookup also recognizes chained busy continuations.
+        assert "_get_session_for_delivery" in source, \
             "Controller session check not found in _wrap_feishu_adapter_send"
 
-    def test_feishu_adapter_send_session_check_sets_card_sent(self) -> None:
-        """When a card session is found, card_sent should be set to True."""
+    def test_feishu_adapter_send_session_check_does_not_latch_card_sent(self) -> None:
+        """A live card suppresses only this send; COMPLETE owns final delivery."""
         from hermes_lark_streaming.patching import _wrap_feishu_adapter_send
         import inspect
 
         source = inspect.getsource(_wrap_feishu_adapter_send)
-        # In the agent path, after finding a session with card_msg_id,
-        # the fix sets ctx["card_sent"] = True and returns SendResult(success=True)
-        lines = source.split('\n')
-        in_session_check = False
-        found_card_sent_set = False
-        for i, line in enumerate(lines):
-            if '_sess' in line and 'card_msg_id' in line:
-                in_session_check = True
-            if in_session_check and 'card_sent' in line and '= True' in line:
-                found_card_sent_set = True
-                break
-        assert found_card_sent_set, \
-            "card_sent not set to True after finding card session in _wrap_feishu_adapter_send"
+        assert 'ctx["card_sent"] = True' not in source, \
+            "A later interruption may replace the live card with a failed one"
 
 
 class TestParentAbortedCompleteSetsAlreadySent:

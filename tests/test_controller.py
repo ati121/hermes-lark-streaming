@@ -3274,7 +3274,7 @@ class TestSinglePanelBuilder:
     undo a frame the seal had just written.
     """
 
-    def test_builder_matches_direct_call(self) -> None:
+    def test_builder_matches_direct_call(self, monkeypatch) -> None:
         from hermes_lark_streaming.cardkit import build_unified_panel
 
         ctrl = _setup_ctrl()
@@ -3283,6 +3283,8 @@ class TestSinglePanelBuilder:
         state.on_reasoning_delta("thinking hard")
         session.tool_use.record_start("terminal", "gh pr list")
         session.tool_use.record_end("terminal", output="ok")
+        # Both builders must observe the same clock snapshot, even on coarse timers.
+        monkeypatch.setattr(type(session.tool_use), "elapsed_ms", property(lambda _self: 1000.0))
 
         built = ctrl._build_session_panel(session, state)
         direct = build_unified_panel(

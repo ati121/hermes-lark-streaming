@@ -152,14 +152,17 @@ def _wrap_feishu_adapter_send(orig_send: Callable) -> Callable:
                         from ..controller import get_controller
                         _ctrl = get_controller()
                         if _ctrl and _ctrl.enabled:
-                            _sess = _ctrl._sess_get(eid)
+                            # Busy turns may own only an <inbound>-cont-N
+                            # session; resolve it just like the stream hooks.
+                            _sess = _ctrl._get_session_for_delivery(eid)
                             if _sess and _sess.card_msg_id:
                                 _logger.info(
                                     "feishu_adapter_send: suppressing text reply "
                                     "(card exists for msg=%s, state=%s, card_sent=%s)",
                                     eid[:12], _sess.state, ctx.get("card_sent"),
                                 )
-                                ctx["card_sent"] = True
+                                # Only COMPLETE may latch card_sent: another
+                                # interruption can replace this card and fail.
                                 return _send_result(success=True)
                     except Exception:
                         _logger.debug("HLS: suppressed exception", exc_info=True)

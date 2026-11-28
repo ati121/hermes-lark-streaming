@@ -289,7 +289,7 @@ def _wrap_handle_message_with_agent(orig: Callable) -> Callable:
                 if _ctrl and _ctrl.enabled:
                     _eid = ctx.get("event_message_id", "") if ctx else ""
                     if _eid:
-                        _sess = _ctrl._sess_get(_eid)
+                        _sess = _ctrl._get_session_for_delivery(_eid)
                         if _sess and _sess.card_msg_id:
                             _logger.info(
                                 "card session exists for msg=%s (state=%s), suppressing gateway reply",
